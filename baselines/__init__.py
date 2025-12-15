@@ -1,5 +1,6 @@
 # Baselines Package
-# Contains original implementations of baseline models for fair comparison
+# Contains thin wrappers that import from ORIGINAL UNMODIFIED baseline implementations
+# The actual TRM code is in TinyRecursiveModels-main/ (unmodified)
 
 from baselines.trm import (
     TRM,
@@ -9,6 +10,8 @@ from baselines.trm import (
     HRMConfig,
     TransformerBaseline,
     TransformerBaselineConfig,
+    TRMLossHead,
+    TRM_AVAILABLE,
 )
 
 __all__ = [
@@ -19,4 +22,7 @@ __all__ = [
     'HRMConfig',
     'TransformerBaseline',
     'TransformerBaselineConfig',
+    'TRMLossHead',
+    'TRM_AVAILABLE',
 ]
+

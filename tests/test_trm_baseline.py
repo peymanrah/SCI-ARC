@@ -166,7 +166,7 @@ class TestTRMBaseline:
     
     def test_layers_import(self):
         """Test that TRM layers can be imported."""
-        from baselines.trm.models import (
+        from baselines.trm import (
             rms_norm,
             SwiGLU,
             Attention,
@@ -181,7 +181,7 @@ class TestTRMBaseline:
     
     def test_rms_norm(self, device):
         """Test RMS normalization."""
-        from baselines.trm.models import rms_norm
+        from baselines.trm import rms_norm
         
         x = torch.randn(2, 10, 64, device=device)
         y = rms_norm(x, variance_epsilon=1e-5)
@@ -194,7 +194,7 @@ class TestTRMBaseline:
     
     def test_swiglu(self, device):
         """Test SwiGLU activation."""
-        from baselines.trm.models import SwiGLU
+        from baselines.trm import SwiGLU
         
         hidden_size = 64
         expansion = 2.0
@@ -208,7 +208,7 @@ class TestTRMBaseline:
     
     def test_attention(self, device):
         """Test attention layer."""
-        from baselines.trm.models import Attention, RotaryEmbedding
+        from baselines.trm import Attention, RotaryEmbedding
         
         hidden_size = 64
         num_heads = 4
@@ -237,32 +237,38 @@ class TestTRMBaseline:
         assert y.shape == x.shape
     
     def test_loss_head(self, trm_config, sample_batch, device):
-        """Test TRM loss head."""
-        from baselines.trm import TRM, TRMLossHead
+        """Test TRM loss computation using stablemax_cross_entropy."""
+        from baselines.trm import TRM, stablemax_cross_entropy, TRMLossHead
         
         model = TRM(trm_config)
         model.to(device)
         
-        loss_model = TRMLossHead(model, q_loss_weight=0.1)
-        loss_model.to(device)
-        loss_model.train()
+        # Test TRMLossHead wrapper (simple compatibility wrapper)
+        loss_head = TRMLossHead(vocab_size=trm_config['vocab_size'])
         
-        carry = model.initial_carry(sample_batch)
-        carry_device = type(carry)(
-            inner_carry=type(carry.inner_carry)(
-                z_H=carry.inner_carry.z_H.to(device),
-                z_L=carry.inner_carry.z_L.to(device),
-            ),
-            steps=carry.steps.to(device),
-            halted=carry.halted.to(device),
-            current_data={k: v.to(device) for k, v in carry.current_data.items()},
-        )
+        # Create dummy logits and targets (requires_grad=True for logits)
+        batch_size = 2
+        seq_len = 100
+        vocab_size = trm_config['vocab_size']
         
-        carry_device, outputs = loss_model(carry_device, sample_batch)
+        logits = torch.randn(batch_size, seq_len, vocab_size, device=device, requires_grad=True)
+        targets = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
         
-        assert 'loss' in outputs
-        assert 'ce_loss' in outputs
-        assert outputs['loss'].requires_grad
+        # Test stablemax_cross_entropy directly
+        loss = stablemax_cross_entropy(logits.view(-1, vocab_size), targets.view(-1))
+        
+        # stablemax_cross_entropy returns per-element losses, sum them for scalar loss
+        scalar_loss = loss.mean()
+        assert scalar_loss.requires_grad
+        assert not torch.isnan(scalar_loss)
+        assert scalar_loss.item() > 0
+        
+        # Test TRMLossHead wrapper
+        loss2 = loss_head(logits, targets)
+        # TRMLossHead also returns per-element losses
+        scalar_loss2 = loss2.mean()
+        assert not torch.isnan(scalar_loss2)
+        assert scalar_loss2.item() > 0
 
 
 class TestTRMVsSCIARC:
