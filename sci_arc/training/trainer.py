@@ -139,6 +139,10 @@ class SCIARCTrainer:
         self.device = torch.device(config.device if torch.cuda.is_available() else 'cpu')
         self.model = self.model.to(self.device)
         
+        # Move loss function to device (important for projection head in SCL)
+        if hasattr(self.loss_fn, 'to'):
+            self.loss_fn = self.loss_fn.to(self.device)
+        
         # Setup optimizer
         self.optimizer = self._create_optimizer()
         self.scheduler = self._create_scheduler()
