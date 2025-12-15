@@ -6,12 +6,14 @@ Usage:
     python scripts/train.py --config configs/default.yaml
     python scripts/train.py --config configs/small.yaml --data.arc_dir /path/to/arc
     python scripts/train.py --resume checkpoints/checkpoint_epoch_50.pt
+    python scripts/train.py --resume auto  # Auto-resume from latest checkpoint
 """
 
 import argparse
 import os
 import sys
 from pathlib import Path
+from glob import glob
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -25,6 +27,33 @@ import random
 from sci_arc.models import SCIARC, SCIARCConfig
 from sci_arc.data import SCIARCDataset, collate_sci_arc, create_dataloader
 from sci_arc.training import SCIARCTrainer, TrainingConfig, SCIARCLoss
+
+
+def find_latest_checkpoint(checkpoint_dir: str) -> str:
+    """Find the most recent checkpoint in the checkpoint directory."""
+    checkpoint_path = Path(checkpoint_dir)
+    if not checkpoint_path.exists():
+        return None
+    
+    # First, check for the dedicated "latest" checkpoint
+    latest_path = checkpoint_path / 'checkpoint_latest.pt'
+    if latest_path.exists():
+        return str(latest_path)
+    
+    # Otherwise, find the highest epoch number
+    checkpoints = list(checkpoint_path.glob('checkpoint_epoch_*.pt'))
+    if not checkpoints:
+        return None
+    
+    # Sort by epoch number
+    def get_epoch(p):
+        try:
+            return int(p.stem.split('_')[-1])
+        except:
+            return -1
+    
+    checkpoints.sort(key=get_epoch, reverse=True)
+    return str(checkpoints[0])
 
 
 def load_config(config_path: str) -> dict:
@@ -155,7 +184,9 @@ def main():
     parser.add_argument('--config', type=str, default='configs/default.yaml',
                         help='Path to config file')
     parser.add_argument('--resume', type=str, default=None,
-                        help='Path to checkpoint to resume from')
+                        help='Path to checkpoint to resume from (use "auto" for latest)')
+    parser.add_argument('--no-resume', action='store_true',
+                        help='Start fresh even if checkpoints exist')
     parser.add_argument('overrides', nargs='*',
                         help='Config overrides in format key.subkey=value')
     
@@ -169,13 +200,30 @@ def main():
     hw_cfg = config.get('hardware', {})
     set_seed(hw_cfg.get('seed', 42), hw_cfg.get('deterministic', False))
     
+    # Determine checkpoint directory
+    log_cfg = config.get('logging', {})
+    checkpoint_dir = log_cfg.get('checkpoint_dir', './checkpoints')
+    
+    # Handle resume logic
+    resume_path = None
+    if not args.no_resume:
+        if args.resume == 'auto':
+            # Find latest checkpoint
+            resume_path = find_latest_checkpoint(checkpoint_dir)
+            if resume_path:
+                print(f"Auto-resume: found checkpoint {resume_path}")
+        elif args.resume:
+            resume_path = args.resume
+    
     # Print config summary
     print("=" * 60)
     print("SCI-ARC Training")
     print("=" * 60)
     print(f"Config: {args.config}")
-    if args.resume:
-        print(f"Resuming from: {args.resume}")
+    if resume_path:
+        print(f"Resuming from: {resume_path}")
+    else:
+        print("Starting fresh training")
     
     # Build model
     model = build_model(config)
@@ -259,8 +307,8 @@ def main():
     )
     
     # Resume if specified
-    if args.resume:
-        trainer.load_checkpoint(args.resume)
+    if resume_path:
+        trainer.load_checkpoint(resume_path)
     
     # Train
     trainer.train()

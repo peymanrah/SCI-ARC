@@ -116,8 +116,8 @@ evaluation:
 logging:
   log_every: 10                 # Log every N steps
   eval_every: 1                 # Evaluate every N epochs
-  save_every: 10                # Save checkpoint every N epochs (fast epochs)
-  keep_last_n: 3                # Keep last N checkpoints
+  save_every: 5                 # Save checkpoint every N epochs (for resume safety)
+  keep_last_n: 5                # Keep last N checkpoints
   
   # File logging (for reproducibility and debugging)
   log_to_file: true             # Save all terminal output to log file

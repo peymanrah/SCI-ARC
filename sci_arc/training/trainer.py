@@ -535,9 +535,14 @@ class SCIARCTrainer:
             'config': self.config.__dict__,
         }
         
-        # Save latest
+        # Save epoch checkpoint
         path = self.checkpoint_dir / f'checkpoint_epoch_{self.current_epoch}.pt'
         torch.save(checkpoint, path)
+        print(f"Saved checkpoint: {path.name}")
+        
+        # Always save a "latest" checkpoint for easy resume
+        latest_path = self.checkpoint_dir / 'checkpoint_latest.pt'
+        torch.save(checkpoint, latest_path)
         
         # Save best
         if is_best:
@@ -545,7 +550,7 @@ class SCIARCTrainer:
             torch.save(checkpoint, best_path)
             print(f"Saved best model to {best_path}")
         
-        # Clean old checkpoints
+        # Clean old checkpoints (but keep latest and best)
         self._cleanup_checkpoints()
     
     def _cleanup_checkpoints(self):
@@ -572,12 +577,12 @@ class SCIARCTrainer:
         if checkpoint['scaler_state_dict'] and self.scaler:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
         
-        self.current_epoch = checkpoint['epoch']
+        self.current_epoch = checkpoint['epoch'] + 1  # Resume from NEXT epoch
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint['best_val_loss']
         self.best_val_accuracy = checkpoint['best_val_accuracy']
         
-        print(f"Loaded checkpoint from epoch {self.current_epoch}")
+        print(f"Loaded checkpoint from epoch {checkpoint['epoch'] + 1}, will resume from epoch {self.current_epoch + 1}")
     
     def train(self):
         """Full training loop."""
