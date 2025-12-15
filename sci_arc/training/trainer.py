@@ -452,11 +452,13 @@ class SCIARCTrainer:
         for batch in self.val_loader:
             batch = self._to_device(batch)
             
-            outputs = self.model(
+            # Use forward_training which accepts the batched format
+            outputs = self.model.forward_training(
                 input_grids=batch['input_grids'],
                 output_grids=batch['output_grids'],
                 test_input=batch['test_inputs'],
-                grid_mask=batch['grid_masks'],
+                test_output=batch['test_outputs'],
+                grid_mask=batch.get('grid_masks'),
             )
             
             losses = self._compute_losses(outputs, batch)
