@@ -106,16 +106,19 @@ class ARCEvaluator:
         input_batch = input_batch.unsqueeze(0).to(self.device)  # [1, N, H, W]
         output_batch = output_batch.unsqueeze(0).to(self.device)
         test_batch = test_batch.unsqueeze(0).to(self.device)  # [1, H, W]
+        # Create dummy test_output for shape inference (same size as test_input)
+        test_output_dummy = torch.zeros_like(test_batch)
         grid_mask = torch.ones(1, max_pairs, dtype=torch.bool, device=self.device)
         
         predictions = []
         
         for attempt in range(num_attempts):
-            # Forward pass
-            outputs = self.model(
+            # Forward pass - use forward_training which accepts batched format
+            outputs = self.model.forward_training(
                 input_grids=input_batch,
                 output_grids=output_batch,
                 test_input=test_batch,
+                test_output=test_output_dummy,
                 grid_mask=grid_mask,
             )
             

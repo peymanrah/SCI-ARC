@@ -228,12 +228,62 @@ class SCIARC(nn.Module):
     
     def forward(
         self,
+        input_grids: torch.Tensor = None,
+        output_grids: torch.Tensor = None,
+        test_input: torch.Tensor = None,
+        test_output: torch.Tensor = None,
+        grid_mask: torch.Tensor = None,
+        # Legacy interface for inference
+        demo_pairs: List[Tuple[torch.Tensor, torch.Tensor]] = None,
+        target_shape: Tuple[int, int] = None,
+        **kwargs
+    ):
+        """
+        Unified forward pass supporting both training and inference interfaces.
+        
+        Training interface (batched):
+            input_grids: [B, num_pairs, H, W] batched input grids
+            output_grids: [B, num_pairs, H, W] batched output grids
+            test_input: [B, H, W] test input grid
+            test_output: [B, H_out, W_out] target (for shape inference)
+            grid_mask: Optional [B, num_pairs] mask for valid demos
+        
+        Inference interface (demo_pairs):
+            demo_pairs: List of (input, output) grid tensors
+            test_input: [B, H, W] test input grid
+            target_shape: (H_out, W_out) expected output size
+        
+        Returns:
+            Dict with logits, z_struct, z_content, z_task, intermediate_logits
+        """
+        # Dispatch to appropriate method based on arguments
+        if demo_pairs is not None:
+            # Legacy inference interface
+            return self._forward_demo_pairs(demo_pairs, test_input, target_shape)
+        elif input_grids is not None:
+            # Training interface - delegate to forward_training
+            # Infer test_output if not provided
+            if test_output is None:
+                test_output = test_input  # Use same shape as input
+            return self.forward_training(
+                input_grids=input_grids,
+                output_grids=output_grids,
+                test_input=test_input,
+                test_output=test_output,
+                grid_mask=grid_mask,
+                **kwargs
+            )
+        else:
+            raise ValueError("Must provide either (input_grids, output_grids, test_input) or (demo_pairs, test_input, target_shape)")
+    
+    def _forward_demo_pairs(
+        self,
         demo_pairs: List[Tuple[torch.Tensor, torch.Tensor]],
         test_input: torch.Tensor,
         target_shape: Tuple[int, int]
-    ) -> SCIARCOutput:
+    ) -> Dict[str, torch.Tensor]:
         """
-        Full forward pass.
+        Forward pass with demo_pairs interface (for inference).
         
         Args:
             demo_pairs: List of (input, output) grid tensors
@@ -242,7 +292,7 @@ class SCIARC(nn.Module):
             target_shape: (H_out, W_out) expected output size
         
         Returns:
-            SCIARCOutput with predictions and intermediate representations
+            Dict with predictions and intermediate representations
         """
         # === PHASE 1: Encode demos to get task understanding ===
         z_task, structure_rep, content_rep = self.encode_demos(demo_pairs)
@@ -256,13 +306,13 @@ class SCIARC(nn.Module):
         # Run recursive refinement
         predictions, final = self.refiner(test_flat, z_task, target_shape)
         
-        return SCIARCOutput(
-            predictions=predictions,
-            final_prediction=final,
-            structure_rep=structure_rep,
-            content_rep=content_rep,
-            z_task=z_task
-        )
+        return {
+            'logits': final,
+            'intermediate_logits': predictions,
+            'z_struct': structure_rep,
+            'z_content': content_rep,
+            'z_task': z_task
+        }
     
     def forward_training(
         self,

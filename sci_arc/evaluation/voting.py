@@ -209,13 +209,16 @@ class AugmentationVoter:
                 aug_demos_in = aug_demos_in.unsqueeze(0).to(self.device)  # [1, N, H, W]
                 aug_demos_out = aug_demos_out.unsqueeze(0).to(self.device)
                 aug_test = aug_test.unsqueeze(0).to(self.device)  # [1, H, W]
+                # Create dummy test_output for shape inference
+                test_output_dummy = torch.zeros_like(aug_test)
                 
-                # Run model
-                output = self.model(
-                    demo_inputs=aug_demos_in,
-                    demo_outputs=aug_demos_out,
+                # Run model - use forward_training which accepts batched format
+                output = self.model.forward_training(
+                    input_grids=aug_demos_in,
+                    output_grids=aug_demos_out,
                     test_input=aug_test,
-                    demo_mask=demo_mask.unsqueeze(0) if demo_mask is not None else None
+                    test_output=test_output_dummy,
+                    grid_mask=demo_mask.unsqueeze(0) if demo_mask is not None else None
                 )
                 
                 # Get prediction (argmax over colors)

@@ -203,7 +203,7 @@ def check_amp_support():
     print("-" * 40)
     
     import torch
-    from torch.cuda.amp import autocast, GradScaler
+    from torch.amp import autocast, GradScaler
     
     # Check if GPU supports efficient FP16/BF16
     props = torch.cuda.get_device_properties(0)
@@ -227,7 +227,7 @@ def check_amp_support():
     
     config = SCIARCConfig()
     model = SCIARC(config).cuda()
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')
     
     batch_size = 8
     demo_inputs = torch.randint(0, 10, (batch_size, 3, 10, 10), device='cuda')
@@ -235,7 +235,7 @@ def check_amp_support():
     test_input = torch.randint(0, 10, (batch_size, 10, 10), device='cuda')
     test_output = torch.randint(0, 10, (batch_size, 10, 10), device='cuda')
     
-    with autocast(dtype=torch.float16):
+    with autocast('cuda', dtype=torch.float16):
         outputs = model.forward_training(
             input_grids=demo_inputs,
             output_grids=demo_outputs,
