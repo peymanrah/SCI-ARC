@@ -174,7 +174,21 @@ cd ..
 
 ## STEP 3: PHASE A - TRAIN TRM BASELINE
 
-This establishes the baseline to beat.
+This establishes the baseline to beat using the **ORIGINAL UNMODIFIED** TRM implementation.
+
+### 3.0 Verify TRM is Unmodified (CRITICAL FOR FAIRNESS)
+```bash
+# The original TRM code is in TinyRecursiveModels-main/
+# It is UNMODIFIED from https://github.com/SamsungSAILMontreal/TinyRecursiveModels
+
+# To verify, you can compare with a fresh download:
+git clone https://github.com/SamsungSAILMontreal/TinyRecursiveModels.git TRM_fresh
+diff -r TinyRecursiveModels-main/models/ TRM_fresh/models/
+# Should show NO differences
+
+# Clean up
+rm -rf TRM_fresh
+```
 
 ### 3.1 Train TRM Baseline
 ```bash
