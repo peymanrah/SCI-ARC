@@ -267,6 +267,7 @@ def main():
                 input_grids = batch['input_grids'].to(device)
                 output_grids = batch['output_grids'].to(device)
                 test_input = test_inputs.to(device)
+                test_output = test_outputs.to(device)
                 grid_masks = batch.get('grid_masks')
                 if grid_masks is not None:
                     grid_masks = grid_masks.to(device)
@@ -276,6 +277,7 @@ def main():
                     input_grids=input_grids,
                     output_grids=output_grids,
                     test_input=test_input,
+                    test_output=test_output,
                     grid_mask=grid_masks,
                 )
                 

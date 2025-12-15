@@ -334,8 +334,11 @@ class SCIARCTrainer:
         
         # Log epoch summary
         epoch_time = time.time() - epoch_start_time
+        epochs_remaining = self.config.max_epochs - self.current_epoch - 1
+        eta_seconds = epoch_time * epochs_remaining
+        eta_str = f"{int(eta_seconds // 3600)}h {int((eta_seconds % 3600) // 60)}m" if eta_seconds > 3600 else f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
         print(f"Epoch {self.current_epoch + 1} completed in {epoch_time:.1f}s "
-              f"({epoch_time/num_batches:.2f}s/batch)")
+              f"({epoch_time/num_batches:.2f}s/batch) | ETA: {eta_str}")
         
         # Average losses
         for key in epoch_losses:
