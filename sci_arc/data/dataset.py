@@ -115,6 +115,7 @@ class SCIARCDataset(Dataset):
     - Applies data augmentation (rotation, flip, color permutation)
     - Provides transformation family labels for SCL
     - Supports curriculum learning (easy -> hard)
+    - Optional in-memory caching for faster training
     """
     
     def __init__(
@@ -128,6 +129,8 @@ class SCIARCDataset(Dataset):
         rearc_dir: Optional[str] = None,
         transform_fn: Optional[Callable] = None,
         curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
+        cache_samples: bool = False,  # Enable in-memory caching
+        cache_augmentations: int = 8,  # Number of augmented versions to pre-generate per task
     ):
         """
         Initialize the dataset.
@@ -142,6 +145,8 @@ class SCIARCDataset(Dataset):
             rearc_dir: Path to RE-ARC data if include_rearc
             transform_fn: Optional custom transform function
             curriculum_stage: Curriculum learning stage
+            cache_samples: If True, cache processed samples in memory
+            cache_augmentations: Number of pre-generated augmentations per task (only used when cache_samples=True and augment=True)
         """
         self.data_dir = Path(data_dir)
         self.split = split
@@ -150,6 +155,12 @@ class SCIARCDataset(Dataset):
         self.num_colors = num_colors
         self.transform_fn = transform_fn
         self.curriculum_stage = curriculum_stage
+        self.cache_samples = cache_samples
+        self.cache_augmentations = cache_augmentations
+        
+        # Cache storage
+        self._cache: Dict[int, Any] = {}
+        self._augmented_cache: List[Dict[str, Any]] = []  # Pre-generated augmentations
         
         # Load tasks
         self.tasks = self._load_tasks()
@@ -164,6 +175,10 @@ class SCIARCDataset(Dataset):
             self.tasks = self._filter_by_difficulty(curriculum_stage)
         
         print(f"Loaded {len(self.tasks)} tasks from {split}")
+        
+        # Pre-populate cache if enabled
+        if cache_samples:
+            self._build_cache()
     
     def _load_tasks(self) -> List[ARCTask]:
         """Load tasks from JSON files."""
@@ -296,10 +311,54 @@ class SCIARCDataset(Dataset):
         
         return [t for t in self.tasks if task_difficulty(t) <= stage]
     
+    def _build_cache(self):
+        """Pre-build cache of processed samples for faster training."""
+        import time
+        start_time = time.time()
+        
+        if self.augment:
+            # Pre-generate multiple augmented versions of each task
+            print(f"Building cache with {self.cache_augmentations} augmentations per task...")
+            for task_idx in range(len(self.tasks)):
+                for aug_idx in range(self.cache_augmentations):
+                    sample = self._process_task(task_idx, apply_augment=True)
+                    self._augmented_cache.append(sample)
+            print(f"Cached {len(self._augmented_cache)} augmented samples in {time.time() - start_time:.1f}s")
+        else:
+            # Cache processed samples without augmentation (for validation)
+            print(f"Building cache for {len(self.tasks)} tasks...")
+            for idx in range(len(self.tasks)):
+                self._cache[idx] = self._process_task(idx, apply_augment=False)
+            print(f"Cached {len(self._cache)} samples in {time.time() - start_time:.1f}s")
+    
     def __len__(self) -> int:
+        if self.cache_samples and self.augment and self._augmented_cache:
+            return len(self._augmented_cache)
         return len(self.tasks)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        # Return from cache if available
+        if self.cache_samples:
+            if self.augment and self._augmented_cache:
+                # Return pre-generated augmented sample
+                return self._augmented_cache[idx]
+            elif idx in self._cache:
+                # Return cached non-augmented sample
+                return self._cache[idx]
+        
+        # Process on-the-fly (original behavior)
+        return self._process_task(idx, apply_augment=self.augment)
+    
+    def _process_task(self, idx: int, apply_augment: bool = False) -> Dict[str, Any]:
+        """Process a single task into a training sample.
+        
+        Args:
+            idx: Task index (always indexes into self.tasks)
+            apply_augment: Whether to apply augmentation
+            
+        Returns:
+            Dictionary with processed sample tensors
+        """
         task = self.tasks[idx]
         
         # Randomly select a test pair
@@ -314,8 +373,8 @@ class SCIARCDataset(Dataset):
         input_grids = [pair[0] for pair in task.train_pairs]
         output_grids = [pair[1] for pair in task.train_pairs]
         
-        # Apply augmentation
-        if self.augment:
+        # Apply augmentation if requested
+        if apply_augment:
             input_grids, output_grids, test_input, test_output = self._augment(
                 input_grids, output_grids, test_input, test_output
             )
@@ -531,6 +590,8 @@ def create_dataloader(
     augment: bool = True,
     max_grid_size: int = 30,
     seed: int = None,
+    cache_samples: bool = False,
+    cache_augmentations: int = 8,
     **kwargs
 ) -> DataLoader:
     """
@@ -545,6 +606,8 @@ def create_dataloader(
         augment: Whether to apply augmentation
         max_grid_size: Maximum grid size
         seed: Random seed for reproducibility
+        cache_samples: If True, pre-cache all samples in memory (eliminates data loading stalls)
+        cache_augmentations: Number of pre-generated augmentations per task when caching
         **kwargs: Additional args for SCIARCDataset
     
     Returns:
@@ -555,8 +618,13 @@ def create_dataloader(
         split=split,
         augment=augment,
         max_grid_size=max_grid_size,
+        cache_samples=cache_samples,
+        cache_augmentations=cache_augmentations,
         **kwargs
     )
+    
+    # When using cached samples, we can use fewer workers since data is in memory
+    effective_workers = 0 if cache_samples else num_workers
     
     # Setup generator for reproducibility
     g = None
@@ -570,15 +638,18 @@ def create_dataloader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=num_workers,
+        num_workers=effective_workers,
         collate_fn=partial(collate_sci_arc, max_grid_size=max_grid_size),
-        pin_memory=True,
+        pin_memory=True if not cache_samples else False,  # No need to pin if already in memory
         drop_last=True if shuffle else False,
         worker_init_fn=worker_init,
         generator=g,
-        prefetch_factor=4 if num_workers > 0 else None,  # Prefetch more batches
-        persistent_workers=True if num_workers > 0 else False,  # Keep workers alive
+        prefetch_factor=4 if effective_workers > 0 else None,  # Prefetch more batches
+        persistent_workers=True if effective_workers > 0 else False,  # Keep workers alive
     )
+    
+    if cache_samples:
+        print(f"DataLoader created with caching enabled (num_workers=0, data in memory)")
     
     return loader
 

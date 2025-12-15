@@ -89,6 +89,12 @@ data:
   num_workers: 8
   pin_memory: true
   
+  # Caching (eliminates data loading stalls)
+  # When enabled, pre-generates augmented samples into memory before training
+  # Memory usage: ~400 tasks × 8 augmentations × ~1KB = ~3MB (very small)
+  cache_samples: true           # Pre-cache all samples in memory
+  cache_augmentations: 8        # Number of augmented versions per task
+  
   # Augmentation
   augment: true
   augment_rotation: true        # Random 90° rotations

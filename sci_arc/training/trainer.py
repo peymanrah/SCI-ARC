@@ -604,13 +604,18 @@ class SCIARCTrainer:
             print(f"\n{'='*60}")
             print(f"Epoch {epoch + 1}/{self.config.max_epochs}")
             print(f"{'='*60}")
+            sys.stdout.flush()  # Ensure header is visible
             
             # Train
             train_losses = self.train_epoch()
+            sys.stdout.flush()  # Flush after training
             
             # Validate
             if (epoch + 1) % self.config.eval_every == 0:
+                print("Starting validation...")
+                sys.stdout.flush()
                 val_metrics = self.validate()
+                sys.stdout.flush()  # Flush after validation
                 
                 # Check for improvement
                 is_best = False

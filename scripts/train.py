@@ -192,7 +192,13 @@ def main():
     # With 24 CPU cores, 8 workers is efficient for keeping GPU fed
     # Set to 0 only if you encounter multiprocessing errors
     num_workers = data_cfg.get('num_workers', 8)
-    print(f"Using {num_workers} data loading workers")
+    cache_samples = data_cfg.get('cache_samples', False)
+    cache_augmentations = data_cfg.get('cache_augmentations', 8)
+    
+    if cache_samples:
+        print(f"Caching enabled: pre-generating {cache_augmentations} augmentations per task")
+    else:
+        print(f"Using {num_workers} data loading workers")
     
     train_loader = create_dataloader(
         data_dir=data_cfg['arc_dir'],
@@ -203,6 +209,8 @@ def main():
         augment=data_cfg.get('augment', True),
         max_grid_size=config['model'].get('max_grid_size', 30),
         seed=seed if hw_cfg.get('deterministic', False) else None,
+        cache_samples=cache_samples,
+        cache_augmentations=cache_augmentations,
     )
     
     val_loader = create_dataloader(
@@ -214,6 +222,8 @@ def main():
         augment=False,
         max_grid_size=config['model'].get('max_grid_size', 30),
         seed=seed if hw_cfg.get('deterministic', False) else None,
+        cache_samples=cache_samples,  # Cache validation too for consistency
+        cache_augmentations=1,  # No augmentation variants needed for validation
     )
     
     print(f"Training batches: {len(train_loader)}")
