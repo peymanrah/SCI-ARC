@@ -1,64 +1,86 @@
-# TRM Baseline Implementation
+# TRM Baseline - Original Implementation
 
-This directory contains the **original implementation** of the Tiny Recursive Reasoning Model (TRM) from Samsung SAIL Montreal, copied for fair comparison with SCI-ARC.
+## CRITICAL: Fair Comparison Guarantee
 
-## Source
+This directory provides a **thin wrapper** that imports from the **ORIGINAL UNMODIFIED** TRM implementation located in `TinyRecursiveModels-main/`.
+
+**We do NOT modify the original TRM code in any way.**
+
+This ensures a fair scientific comparison between SCI-ARC and TRM as published by the original authors.
+
+## Original Source
 
 - **Repository**: https://github.com/SamsungSAILMontreal/TinyRecursiveModels
 - **Paper**: "Less is More: Recursive Reasoning with Tiny Networks" (https://arxiv.org/abs/2510.04871)
 - **Authors**: Samsung SAIL Montreal
+- **License**: Apache 2.0 (see original repository)
 
-## License
-
-Please check the original repository for the most current license information. The original code is believed to be released under Apache 2.0.
-
-## Files
+## Directory Structure
 
 ```
-baselines/trm/
-├── __init__.py                     # Package exports
-├── models/
-│   ├── __init__.py                 # Model exports
-│   ├── common.py                   # trunc_normal_init_ utility
-│   ├── layers.py                   # Core layers (Attention, SwiGLU, RoPE, etc.)
-│   ├── sparse_embedding.py         # CastedSparseEmbedding for puzzle embeddings
-│   └── recursive_reasoning/
-│       ├── __init__.py             # Model exports
-│       ├── trm.py                  # Main TRM model (TinyRecursiveReasoningModel_ACTV1)
-│       ├── hrm.py                  # Hierarchical Reasoning Model variant
-│       └── transformers_baseline.py # Transformer baseline for ablation
+SCI-ARC/
+├── TinyRecursiveModels-main/      # ORIGINAL UNMODIFIED TRM code
+│   ├── models/
+│   │   ├── common.py              # Original utilities
+│   │   ├── ema.py                 # Original EMA helper
+│   │   ├── layers.py              # Original layers (Attention, SwiGLU, etc.)
+│   │   ├── losses.py              # Original losses (stablemax_cross_entropy)
+│   │   ├── sparse_embedding.py    # Original sparse embeddings
+│   │   └── recursive_reasoning/
+│   │       └── trm.py             # Original TRM model
+│   ├── dataset/                   # Original data processing
+│   ├── pretrain.py                # Original training script
+│   └── ...
+│
+└── baselines/trm/
+    └── __init__.py                # Thin wrapper (imports from original)
 ```
 
 ## Usage
 
 ```python
-from baselines.trm import TRM, TRMConfig
+from baselines.trm import TRM, TRMConfig, TRM_AVAILABLE
 
-# Create TRM model with default config
-config = {
-    'batch_size': 32,
-    'seq_len': 900,  # 30x30 ARC grid
-    'puzzle_emb_ndim': 256,
-    'num_puzzle_identifiers': 1000,
-    'vocab_size': 16,
-    'H_cycles': 3,
-    'L_cycles': 4,
-    'H_layers': 2,
-    'L_layers': 2,
-    'hidden_size': 256,
-    'expansion': 2.5,
-    'num_heads': 8,
-    'pos_encodings': 'rope',
-    'halt_max_steps': 10,
-    'halt_exploration_prob': 0.1,
-}
-
-model = TRM(config)
+if TRM_AVAILABLE:
+    # Create TRM model using original implementation
+    config = TRMConfig(
+        batch_size=32,
+        seq_len=900,
+        puzzle_emb_ndim=256,
+        num_puzzle_identifiers=1000,
+        vocab_size=16,
+        H_cycles=3,
+        L_cycles=4,
+        H_layers=2,
+        L_layers=2,
+        hidden_size=256,
+        expansion=2.5,
+        num_heads=8,
+        pos_encodings='rope',
+        halt_max_steps=10,
+        halt_exploration_prob=0.1,
+    )
+    model = TRM(config)
+else:
+    print("TRM not available - download original repo first")
 ```
 
-## Key Architecture Details
+## Verification
 
-From the original paper:
+To verify the original TRM is unmodified, you can:
+
+1. Download fresh from GitHub:
+   ```bash
+   git clone https://github.com/SamsungSAILMontreal/TinyRecursiveModels.git TinyRecursiveModels-fresh
+   ```
+
+2. Compare with our copy:
+   ```bash
+   diff -r TinyRecursiveModels-main/ TinyRecursiveModels-fresh/
+   # Should show NO differences (except .git folder)
+   ```
+
+## Key Architecture (from original paper)
 
 - **7M parameters** - extremely small for the task complexity
 - **Hierarchical reasoning** with H (high-level) and L (low-level) state recurrence
@@ -67,39 +89,21 @@ From the original paper:
 - **RoPE positional encodings** for sequence positions
 - **Sparse puzzle embeddings** for task-specific context
 
-## Performance
+## Published Performance
 
-On ARC-AGI benchmark:
-- ARC-AGI-1: ~45% accuracy
-- ARC-AGI-2: ~8% accuracy
+On ARC-AGI benchmark (as reported in original paper):
+- ARC-AGI-1: ~45% task accuracy
+- ARC-AGI-2: ~8% task accuracy
 
 ## Citation
+
+If you use TRM in your research, please cite the original authors:
 
 ```bibtex
 @article{trm2024,
   title={Less is More: Recursive Reasoning with Tiny Networks},
   author={Samsung SAIL Montreal},
-  journal={arXiv preprint arXiv:2510.04871},
-  year={2024}
+  year={2024},
+  url={https://github.com/SamsungSAILMontreal/TinyRecursiveModels}
 }
 ```
-
-## Modifications
-
-**NONE** - This is the exact original implementation for fair scientific comparison. The only changes are:
-1. Import paths adjusted for the SCI-ARC project structure
-2. Documentation and comments added for clarity
-3. FlashAttention import replaced with PyTorch's `scaled_dot_product_attention` for compatibility
-
-The core architecture, initialization, and forward pass logic are unchanged from the original.
-
-## Fair Comparison Note
-
-This implementation is included to ensure a scientifically fair comparison between SCI-ARC and TRM for the NeurIPS publication. Both models are:
-
-1. Trained on the same data splits
-2. Evaluated with the same metrics
-3. Using their respective original implementations
-4. Compared on identical hardware
-
-This approach ensures reproducibility and fairness in reported results.

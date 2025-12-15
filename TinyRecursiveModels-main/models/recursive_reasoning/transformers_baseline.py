@@ -1,21 +1,17 @@
-# =============================================================================
-# TRM Original Implementation - transformers_baseline.py
-# Source: https://github.com/SamsungSAILMontreal/TinyRecursiveModels
-# Authors: Samsung SAIL Montreal
-# License: Apache 2.0 (check original repository for latest license)
-# 
-# HRM ACT V2: Transformer Baseline for Architecture Ablation
-#
-# This is an architecture ablation of the Hierarchical Reasoning Model (HRM).
-# Key changes from V1:
-# 1. REMOVED hierarchical split (no separate H and L levels)
-# 2. REMOVED inner cycles (no H_cycles/L_cycles loops within reasoning)
-# 3. KEPT ACT outer loop structure intact
-# 4. KEPT all data preprocessing, embeddings, and evaluation infrastructure
-#
-# Architecture: Single-level transformer that processes the full 30x30 grid as a
-# 900-token sequence, with the same positional encodings and sparse embeddings as V1.
-# =============================================================================
+"""
+HRM ACT V2: Transformer Baseline for Architecture Ablation
+
+This is an architecture ablation of the Hierarchical Reasoning Model (HRM).
+Key changes from V1:
+1. REMOVED hierarchical split (no separate H and L levels)
+2. REMOVED inner cycles (no H_cycles/L_cycles loops within reasoning)
+3. KEPT ACT outer loop structure intact
+4. KEPT all data preprocessing, embeddings, and evaluation infrastructure
+
+Architecture: Single-level transformer that processes the full 30x30 grid as a
+900-token sequence, with the same positional encodings and sparse embeddings as V1.
+
+"""
 
 from typing import Tuple, List, Dict, Optional
 from dataclasses import dataclass
@@ -26,40 +22,36 @@ import torch.nn.functional as F
 from torch import nn
 from pydantic import BaseModel
 
-from baselines.trm.models.common import trunc_normal_init_
-from baselines.trm.models.layers import (
-    rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin, 
-    CastedEmbedding, CastedLinear
-)
-from baselines.trm.models.sparse_embedding import CastedSparseEmbedding
+from models.common import trunc_normal_init_
+from models.layers import rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
+from models.sparse_embedding import CastedSparseEmbedding
 
 
 @dataclass
 class Model_ACTV2InnerCarry:
-    """Inner carry state for transformer baseline."""
     z_H: torch.Tensor
 
 
 @dataclass
 class Model_ACTV2Carry:
-    """Complete carry state for the transformer baseline ACT wrapper."""
     inner_carry: Model_ACTV2InnerCarry
+
     steps: torch.Tensor
     halted: torch.Tensor
+
     current_data: Dict[str, torch.Tensor]
 
 
 class Model_ACTV2Config(BaseModel):
-    """Configuration for transformer baseline model."""
     batch_size: int
     seq_len: int
     puzzle_emb_ndim: int = 0
     num_puzzle_identifiers: int
     vocab_size: int
 
-    H_cycles: int  # Used for ACT outer loop
+    H_cycles: int
 
-    H_layers: int  # Number of transformer layers
+    H_layers: int
 
     # Transformer config
     hidden_size: int
@@ -77,14 +69,9 @@ class Model_ACTV2Config(BaseModel):
     act_inference: bool = False  # If True, use adaptive computation during inference
 
     forward_dtype: str = "bfloat16"
-    
-    class Config:
-        extra = "allow"
 
 
 class Model_ACTV2Block(nn.Module):
-    """Single transformer block for baseline."""
-    
     def __init__(self, config: Model_ACTV2Config) -> None:
         super().__init__()
 
@@ -114,10 +101,9 @@ class Model_ACTV2Block(nn.Module):
 
 
 class Model_ACTV2ReasoningModule(nn.Module):
-    """Reasoning module with input injection."""
-    
     def __init__(self, layers: List[Model_ACTV2Block]):
         super().__init__()
+
         self.layers = torch.nn.ModuleList(layers)
 
     def forward(self, hidden_states: torch.Tensor, input_injection: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -126,12 +112,11 @@ class Model_ACTV2ReasoningModule(nn.Module):
         # Layers
         for layer in self.layers:
             hidden_states = layer(hidden_states=hidden_states, **kwargs)
+
         return hidden_states
 
 
 class Model_ACTV2_Inner(nn.Module):
-    """Inner model for transformer baseline."""
-    
     def __init__(self, config: Model_ACTV2Config) -> None:
         super().__init__()
         self.config = config
@@ -150,8 +135,9 @@ class Model_ACTV2_Inner(nn.Module):
         self.lm_head = CastedLinear(self.config.hidden_size, self.config.vocab_size, bias=False)
         self.q_head = CastedLinear(self.config.hidden_size, 2, bias=True)
 
-        self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)
+        self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  # ceil div
         if self.config.puzzle_emb_ndim > 0:
+            # Zero init puzzle embeddings
             self.puzzle_emb = CastedSparseEmbedding(
                 self.config.num_puzzle_identifiers,
                 self.config.puzzle_emb_ndim,
@@ -179,7 +165,7 @@ class Model_ACTV2_Inner(nn.Module):
 
         # Reasoning Layers
         self.H_level = Model_ACTV2ReasoningModule(
-            layers=[Model_ACTV2Block(self.config) for _ in range(self.config.H_layers)]
+            layers=[Model_ACTV2Block(self.config) for _i in range(self.config.H_layers)]
         )
 
         # Initial states
@@ -189,14 +175,16 @@ class Model_ACTV2_Inner(nn.Module):
         )
 
         # Q head special init
+        # Init Q to (almost) zero for faster learning during bootstrapping
         with torch.no_grad():
             self.q_head.weight.zero_()
-            self.q_head.bias.fill_(-5)
+            self.q_head.bias.fill_(-5)  # type: ignore
 
     def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
-        """Generate input embeddings."""
+        # Token embedding
         embedding = self.embed_tokens(input.to(torch.int32))
 
+        # Puzzle embeddings
         if self.config.puzzle_emb_ndim > 0:
             puzzle_embedding = self.puzzle_emb(puzzle_identifiers)
 
@@ -205,13 +193,15 @@ class Model_ACTV2_Inner(nn.Module):
                 puzzle_embedding = F.pad(puzzle_embedding, (0, pad_count))
 
             embedding = torch.cat(
-                (puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size), embedding), 
-                dim=-2
+                (puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size), embedding), dim=-2
             )
 
+        # Position embeddings
         if self.config.pos_encodings == "learned":
+            # scale by 1/sqrt(2) to maintain forward variance
             embedding = 0.707106781 * (embedding + self.embed_pos.embedding_weight.to(self.forward_dtype))
 
+        # Scale
         return self.embed_scale * embedding
 
     def empty_carry(self, batch_size: int):
@@ -236,22 +226,26 @@ class Model_ACTV2_Inner(nn.Module):
             cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
         )
 
+        # Input encoding
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
-        # 1-step grad (no inner cycles in baseline)
+        # 1-step grad
         z_H = self.H_level(carry.z_H, input_embeddings, **seq_info)
 
         # LM Outputs
-        new_carry = Model_ACTV2InnerCarry(z_H=z_H.detach())
-        output = self.lm_head(z_H)[:, self.puzzle_emb_len:]
+        new_carry = Model_ACTV2InnerCarry(
+            z_H=z_H.detach(),
+        )  # New carry no grad
+        output = self.lm_head(z_H)[:, self.puzzle_emb_len :]
 
         # Q head
         q_logits = self.q_head(z_H[:, 0]).to(torch.float32)
+
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
 class Model_ACTV2(nn.Module):
-    """ACT wrapper for transformer baseline."""
+    """ACT wrapper."""
 
     def __init__(self, config_dict: dict):
         super().__init__()
@@ -266,9 +260,11 @@ class Model_ACTV2(nn.Module):
         batch_size = batch["inputs"].shape[0]
 
         return Model_ACTV2Carry(
-            inner_carry=self.inner.empty_carry(batch_size),
+            inner_carry=self.inner.empty_carry(
+                batch_size
+            ),  # Empty is expected, it will be reseted in first pass as all sequences are halted.
             steps=torch.zeros((batch_size,), dtype=torch.int32),
-            halted=torch.ones((batch_size,), dtype=torch.bool),
+            halted=torch.ones((batch_size,), dtype=torch.bool),  # Default to halted
             current_data={k: torch.empty_like(v) for k, v in batch.items()},
         )
 
@@ -278,6 +274,7 @@ class Model_ACTV2(nn.Module):
         batch: Dict[str, torch.Tensor],
         compute_target_q: bool = False,
     ) -> Tuple[Model_ACTV2Carry, Dict[str, torch.Tensor]]:
+        # Update data, carry (removing halted sequences)
         new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
 
         new_steps = torch.where(carry.halted, 0, carry.steps)
@@ -287,39 +284,51 @@ class Model_ACTV2(nn.Module):
             for k, v in carry.current_data.items()
         }
 
+        # Forward inner model
         new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(
             new_inner_carry, new_current_data
         )
 
-        outputs = {
-            "logits": logits,
-            "q_halt_logits": q_halt_logits,
-            "q_continue_logits": q_continue_logits,
-        }
+        outputs = {"logits": logits, "q_halt_logits": q_halt_logits, "q_continue_logits": q_continue_logits}
 
         with torch.no_grad():
+            # Step
             new_steps = new_steps + 1
             is_last_step = new_steps >= self.config.halt_max_steps
 
             halted = is_last_step
 
-            act_enabled = self.config.act_enabled and (
-                self.training or self.config.act_inference
+            # Check if adaptive computation should be used
+            use_adaptive = (self.config.halt_max_steps > 1) and (
+                (self.training and self.config.act_enabled)
+                or (not self.training and self.config.act_inference)
             )
 
-            if act_enabled and (self.config.halt_max_steps > 1):
-                halted = halted | (q_halt_logits > q_continue_logits)
+            if use_adaptive:
+                # Halt signal based on Q-values (but always halt at max steps)
+                q_halt_signal = q_halt_logits > q_continue_logits
+                halted = halted | q_halt_signal
 
+                # Store actual steps used for logging (only during inference)
+                if not self.training:
+                    outputs["actual_steps"] = new_steps.float()
+
+                # Exploration (only during training)
                 if self.training:
                     min_halt_steps = (
                         torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
                     ) * torch.randint_like(new_steps, low=2, high=self.config.halt_max_steps + 1)
                     halted = halted & (new_steps >= min_halt_steps)
 
-                if compute_target_q:
-                    _, _, (next_q_halt_logits, next_q_continue_logits) = self.inner(
+                # Compute target Q (only during training)
+                # NOTE: No replay buffer and target networks for computing target Q-value.
+                # As batch_size is large, there're many parallel envs.
+                # Similar concept as PQN https://arxiv.org/abs/2407.04811
+                if self.training and compute_target_q:
+                    next_q_halt_logits, next_q_continue_logits = self.inner(
                         new_inner_carry, new_current_data
-                    )
+                    )[-1]
+
                     outputs["target_q_continue"] = torch.sigmoid(
                         torch.where(
                             is_last_step,
@@ -328,9 +337,6 @@ class Model_ACTV2(nn.Module):
                         )
                     )
 
-        return Model_ACTV2Carry(new_inner_carry, new_steps, halted, new_current_data), outputs
-
-
-# Aliases
-TransformerBaseline = Model_ACTV2
-TransformerBaselineConfig = Model_ACTV2Config
+        return Model_ACTV2Carry(
+            new_inner_carry, new_steps, halted, new_current_data
+        ), outputs

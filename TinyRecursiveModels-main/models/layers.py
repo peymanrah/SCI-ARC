@@ -1,31 +1,23 @@
-# =============================================================================
-# TRM Original Implementation - layers.py
-# Source: https://github.com/SamsungSAILMontreal/TinyRecursiveModels
-# Authors: Samsung SAIL Montreal
-# License: Apache 2.0 (check original repository for latest license)
-# 
-# This file is copied from the original TRM repository for fair comparison
-# in the SCI-ARC publication. No modifications have been made to the core logic.
-# =============================================================================
-
 from typing import Tuple
 import einops
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-# Use PyTorch's scaled_dot_product_attention instead of flash_attn
-# This provides compatibility across different hardware
+#try:
+#    from flash_attn_interface import flash_attn_func  # type: ignore[import]
+#except ImportError:
+#    # Fallback to FlashAttention 2
+#    from flash_attn import flash_attn_func  # type: ignore[import]
 from torch.nn.functional import scaled_dot_product_attention
 
-from baselines.trm.models.common import trunc_normal_init_
+from models.common import trunc_normal_init_
 
 
 CosSin = Tuple[torch.Tensor, torch.Tensor]
 
 
 def _find_multiple(a, b):
-    """Find the smallest multiple of b that is greater than or equal to a."""
     return (-(a // -b)) * b
 
 
@@ -37,13 +29,8 @@ def rotate_half(x: torch.Tensor):
 
 
 def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
-    """
-    Apply rotary position embeddings to queries and keys.
-    
-    Args:
-        q, k: [bs, seq_len, num_heads, head_dim]
-        cos, sin: [seq_len, head_dim]
-    """
+    # q, k: [bs, seq_len, num_heads, head_dim]
+    # cos, sin: [seq_len, head_dim]
     orig_dtype = q.dtype
     q = q.to(cos.dtype)
     k = k.to(cos.dtype)
@@ -55,8 +42,6 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
 
 
 class CastedLinear(nn.Module):
-    """Linear layer with proper initialization and dtype casting."""
-    
     def __init__(self,
                  in_features: int,
                  out_features: int,
@@ -72,13 +57,10 @@ class CastedLinear(nn.Module):
             self.bias = nn.Parameter(torch.zeros((out_features, )))
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return F.linear(input, self.weight.to(input.dtype), 
-                       bias=self.bias.to(input.dtype) if self.bias is not None else None)
+        return F.linear(input, self.weight.to(input.dtype), bias=self.bias.to(input.dtype) if self.bias is not None else None)
 
 
 class CastedEmbedding(nn.Module):
-    """Embedding layer with proper initialization and dtype casting."""
-    
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
@@ -97,8 +79,6 @@ class CastedEmbedding(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    """Rotary Position Embeddings (RoPE)."""
-    
     def __init__(self, dim, max_position_embeddings, base, device=None):
         super().__init__()
 
@@ -117,8 +97,6 @@ class RotaryEmbedding(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head attention with optional RoPE."""
-    
     def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False):
         super().__init__()
 
@@ -149,19 +127,14 @@ class Attention(nn.Module):
             cos, sin = cos_sin
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        # Attention using scaled_dot_product_attention
-        # Rearrange for attention: (B, H, S, D)
-        query, key, value = map(lambda t: einops.rearrange(t, 'B S H D -> B H S D'), (query, key, value))
+        # flash attn
+        query, key, value = map(lambda t: einops.rearrange(t, 'B S H D -> B H S D'), (query, key, value)) # needed for scaled_dot_product_attention but not flash_attn_func
         attn_output = scaled_dot_product_attention(query=query, key=key, value=value, is_causal=self.causal)
         attn_output = einops.rearrange(attn_output, 'B H S D -> B S H D')
-        attn_output = attn_output.reshape(batch_size, seq_len, self.output_size)
-        
+        attn_output = attn_output.reshape(batch_size, seq_len, self.output_size)  # type: ignore
         return self.o_proj(attn_output)
 
-
 class LinearSwish(nn.Module):
-    """Linear layer followed by SiLU activation (or vice versa)."""
-    
     def __init__(self, hidden_size: int, reverse=False):
         super().__init__()
 
@@ -176,22 +149,18 @@ class LinearSwish(nn.Module):
 
 
 class SwiGLU(nn.Module):
-    """SwiGLU activation function with gated linear unit."""
-    
     def __init__(self, hidden_size: int, expansion: float):
         super().__init__()
         inter = _find_multiple(round(expansion * hidden_size * 2 / 3), 256)
 
         self.gate_up_proj = CastedLinear(hidden_size, inter * 2, bias=False)
-        self.down_proj = CastedLinear(inter, hidden_size, bias=False)
+        self.down_proj    = CastedLinear(inter, hidden_size, bias=False)
 
     def forward(self, x):
         gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
         return self.down_proj(F.silu(gate) * up)
 
-
 def rms_norm(hidden_states: torch.Tensor, variance_epsilon: float) -> torch.Tensor:
-    """RMS Layer Normalization."""
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
 

@@ -68,5 +68,9 @@ logs/
 .DS_Store
 Thumbs.db
 
-# TinyRecursiveModels (reference only, not part of SCI-ARC)
-TinyRecursiveModels-main/
+# TinyRecursiveModels - INCLUDED for fair baseline comparison
+# This is the ORIGINAL UNMODIFIED code from:
+# https://github.com/SamsungSAILMontreal/TinyRecursiveModels
+# We include it to ensure reproducibility and fair comparison
+# TinyRecursiveModels-main/  # COMMENTED OUT - we now track this
+
