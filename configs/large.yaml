@@ -14,8 +14,9 @@ model:
   max_grid_size: 30
   
   num_structure_slots: 16
-  num_abstraction_layers: 4
+  se_layers: 4                  # Transformer encoder layers
   structure_heads: 12
+  use_abstraction: true
   
   max_objects: 24
   content_heads: 12

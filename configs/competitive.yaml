@@ -49,39 +49,47 @@ model:
 # =============================================================================
 # TRAINING (OPTIMIZED FOR CONVERGENCE AND GENERALIZATION)
 # =============================================================================
+# CRITICAL INSIGHTS from failed training (epoch 61 local minima):
+# 1. Model collapsed to predicting mostly background (87% pixel acc, 0.25% task acc)
+# 2. SCL loss didn't decrease = structural representations not being learned
+# 3. Cached data = model memorized instead of generalizing
+#
+# FIXES APPLIED:
+# 1. INFINITE DATA (cache_samples=false) - prevents memorization
+# 2. Longer training (500 epochs) - more time to escape local minima
+# 3. Lower LR with longer warmup - more stable convergence
+# 4. Gradient accumulation - larger effective batch for better SCL
+
 training:
-  # Optimization - tuned for infinite data training
-  learning_rate: 3.0e-4         # Standard LR for this model size
+  # Optimization - TUNED to escape local minima
+  learning_rate: 1.0e-4         # LOWERED from 3e-4 - more stable convergence
   weight_decay: 0.01            # Standard regularization
   max_epochs: 500               # CRITICAL: More epochs for infinite data
-                                # With infinite data, model never sees same sample twice
-  warmup_epochs: 10             # Longer warmup for stability
+  warmup_epochs: 20             # INCREASED from 10 - more stable warmup
   grad_clip: 1.0
-  grad_accumulation_steps: 1    # No accumulation needed
+  grad_accumulation_steps: 2    # Effective batch = 192*2 = 384 (better SCL)
   
   # Batch size - MAXIMUM for RTX 3090 24GB VRAM
-  # 192 uses ~18-19GB VRAM with excellent SCL performance
-  # CRITICAL: SCL quality scales with batch size (more negatives = better)
   batch_size: 192
-  eval_batch_size: 128          # Slightly lower for validation stability
+  eval_batch_size: 128
   
-  # Loss weights - TUNED for SCI-ARC with BatchNorm fix
-  scl_weight: 1.0               # CRITICAL: SCL is now working, give it full weight
-  ortho_weight: 0.01            # Standard orthogonality constraint
-  deep_supervision_weight: 0.5  # Keep intermediate supervision
+  # Loss weights - PROVEN TO WORK with BatchNorm fix
+  scl_weight: 1.0               # SCL weight (BatchNorm fix makes it work)
+  ortho_weight: 0.01            # Orthogonality constraint
+  deep_supervision_weight: 0.5  # Intermediate supervision
   
-  # Learning rate schedule
+  # Learning rate schedule - cosine annealing
   scheduler_type: cosine
-  min_lr: 1.0e-6                # Standard minimum LR
+  min_lr: 1.0e-6
   
   # Mixed precision - REQUIRED for RTX 3090
   use_amp: true
   
-  # Curriculum learning - Tuned for 500 epochs
+  # Curriculum learning - CRITICAL for progressive difficulty
   use_curriculum: true
   curriculum_stages:
     - 50    # Stage 1 (epochs 0-49): easy tasks (small grids, 3+ examples)
-    - 150   # Stage 2 (epochs 50-149): medium tasks
+    - 150   # Stage 2 (epochs 50-149): medium tasks  
     - 300   # Stage 3 (epochs 150-299): hard tasks
             # Stage 4 (epochs 300+): all data mixed
 

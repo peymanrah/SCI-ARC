@@ -20,8 +20,9 @@ model:
   
   # Structural encoder
   num_structure_slots: 8        # Number of transformation prototypes
-  num_abstraction_layers: 3     # Depth of abstraction hierarchy
+  se_layers: 3                  # Transformer encoder layers (context_encoder)
   structure_heads: 8            # Attention heads for structure
+  use_abstraction: true         # Enable abstraction layer
   
   # Content encoder  
   max_objects: 16               # Maximum number of objects to track

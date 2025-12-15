@@ -34,8 +34,9 @@ model:
   num_colors: 10
   max_grid_size: 30
   num_structure_slots: 8
-  num_abstraction_layers: 3
+  se_layers: 3                  # Transformer encoder layers
   structure_heads: 8
+  use_abstraction: true
   max_objects: 16
   content_heads: 8
   binding_heads: 8
