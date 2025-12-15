@@ -51,9 +51,9 @@ training:
   grad_accumulation_steps: 1
   
   # Batch size (optimized for RTX 3090 24GB VRAM)
-  # 128 balances SCL learning with training speed
-  batch_size: 128
-  eval_batch_size: 128
+  # 192 uses ~18-19GB VRAM with good SCL performance
+  batch_size: 192
+  eval_batch_size: 192
   
   # Loss weights
   scl_weight: 0.1               # Structural Contrastive Loss

@@ -52,12 +52,12 @@ training:
   max_epochs: 150               # More epochs for full convergence
   warmup_epochs: 8              # Longer warmup for larger model
   grad_clip: 1.0
-  grad_accumulation_steps: 1    # No accumulation needed with batch_size=128
+  grad_accumulation_steps: 1    # No accumulation needed with batch_size=192
   
-  # Batch size - balanced for SCL learning and speed on RTX 3090 24GB
-  # 128 uses ~12GB VRAM with good training speed
-  batch_size: 128
-  eval_batch_size: 128
+  # Batch size - optimal for SCL learning on RTX 3090 24GB
+  # 192 uses ~18-19GB VRAM with excellent positive pair density
+  batch_size: 192
+  eval_batch_size: 192
   
   # Loss weights - TUNED for SCI-ARC
   scl_weight: 0.15              # Slightly higher for structure learning
