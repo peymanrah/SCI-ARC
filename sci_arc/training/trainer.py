@@ -508,11 +508,14 @@ class SCIARCTrainer:
             total_correct += correct.item()
             total_pixels += targets.numel()
             
-            # Task accuracy (entire grid must match)
-            for i in range(preds.shape[0]):
-                if torch.all(preds[i] == targets[i]):
-                    total_tasks_correct += 1
-                total_tasks += 1
+            # Task accuracy (entire grid must match) - VECTORIZED
+            # Flatten spatial dims and check if all match per sample
+            B = preds.shape[0]
+            preds_flat = preds.view(B, -1)  # [B, H*W]
+            targets_flat = targets.view(B, -1)  # [B, H*W]
+            task_correct = (preds_flat == targets_flat).all(dim=1)  # [B] bool
+            total_tasks_correct += task_correct.sum().item()
+            total_tasks += B
         
         metrics = {
             'val_loss': total_loss / len(self.val_loader),
