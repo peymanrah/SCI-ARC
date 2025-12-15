@@ -267,12 +267,19 @@ class SCIARCTrainer:
         epoch_start_time = time.time()
         batch_start_time = time.time()
         data_time = 0.0  # Track time waiting for data
+        transfer_time = 0.0  # Track time for CPU->GPU transfer
         
         for batch_idx, batch in enumerate(self.train_loader):
             data_time = time.time() - batch_start_time  # Time spent waiting for this batch
             
-            # Move batch to device
+            # Move batch to device and track transfer time
+            transfer_start = time.time()
             batch = self._to_device(batch)
+            
+            # Sync CUDA to ensure data transfer is complete before timing compute
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            transfer_time = time.time() - transfer_start
             
             # Warmup
             self._warmup_lr(self.global_step, warmup_steps)
@@ -329,11 +336,12 @@ class SCIARCTrainer:
             num_batches += 1
             self.global_step += 1
             
-            # Logging with timing
+            # Logging with timing - sync CUDA for accurate measurement
             if batch_idx % self.config.log_every == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()  # Ensure GPU work is complete
                 batch_time = time.time() - batch_start_time
-                compute_time = batch_time - data_time
-                self._log_step(batch_idx, losses, batch_time, data_time)
+                self._log_step(batch_idx, losses, batch_time, data_time, transfer_time)
             batch_start_time = time.time()
         
         # Log epoch summary
@@ -415,10 +423,11 @@ class SCIARCTrainer:
                 device_batch[key] = value
         return device_batch
     
-    def _log_step(self, batch_idx: int, losses: Dict, batch_time: float = 0.0, data_time: float = 0.0):
+    def _log_step(self, batch_idx: int, losses: Dict, batch_time: float = 0.0, 
+                  data_time: float = 0.0, transfer_time: float = 0.0):
         """Log training step with timing breakdown."""
         lr = self.optimizer.param_groups[0]['lr']
-        compute_time = batch_time - data_time
+        compute_time = batch_time - data_time - transfer_time
         
         # Display epoch as 1-indexed to match header (Epoch 1/100)
         log_str = f"Epoch {self.current_epoch + 1} [{batch_idx + 1}/{len(self.train_loader)}] "
@@ -427,9 +436,9 @@ class SCIARCTrainer:
         log_str += f"scl={losses['scl'].item():.4f}, "
         log_str += f"ortho={losses['ortho'].item():.4f}) "
         log_str += f"LR: {lr:.2e} "
-        # Show total time, and if data loading was slow, highlight it
-        if data_time > 1.0:
-            log_str += f"[{batch_time:.2f}s = data:{data_time:.1f}s + compute:{compute_time:.1f}s]"
+        # Show timing breakdown when any component is slow
+        if data_time > 1.0 or transfer_time > 1.0:
+            log_str += f"[{batch_time:.2f}s = data:{data_time:.1f}s + transfer:{transfer_time:.1f}s + compute:{compute_time:.1f}s]"
         else:
             log_str += f"[{batch_time:.2f}s]"
         
