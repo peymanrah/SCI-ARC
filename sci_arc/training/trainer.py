@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
 
@@ -144,7 +144,7 @@ class SCIARCTrainer:
         self.scheduler = self._create_scheduler()
         
         # Mixed precision
-        self.scaler = GradScaler() if config.use_amp and self.device.type == 'cuda' else None
+        self.scaler = GradScaler('cuda') if config.use_amp and self.device.type == 'cuda' else None
         
         # Training state
         self.current_epoch = 0
@@ -274,7 +274,7 @@ class SCIARCTrainer:
             
             # Forward pass with mixed precision
             if self.scaler:
-                with autocast():
+                with autocast('cuda'):
                     outputs = self.model.forward_training(
                         input_grids=batch['input_grids'],
                         output_grids=batch['output_grids'],
@@ -403,7 +403,8 @@ class SCIARCTrainer:
         """Log training step."""
         lr = self.optimizer.param_groups[0]['lr']
         
-        log_str = f"Epoch {self.current_epoch} [{batch_idx}/{len(self.train_loader)}] "
+        # Display epoch as 1-indexed to match header (Epoch 1/100)
+        log_str = f"Epoch {self.current_epoch + 1} [{batch_idx + 1}/{len(self.train_loader)}] "
         log_str += f"Loss: {losses['total'].item():.4f} "
         log_str += f"(task={losses['task'].item():.4f}, "
         log_str += f"scl={losses['scl'].item():.4f}, "
