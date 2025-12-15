@@ -184,6 +184,8 @@ def main():
     # Build data loaders
     data_cfg = config['data']
     train_cfg = config['training']
+    hw_cfg = config.get('hardware', {})
+    seed = hw_cfg.get('seed', 42)
     
     print(f"\nLoading data from: {data_cfg['arc_dir']}")
     
@@ -195,6 +197,7 @@ def main():
         shuffle=True,
         augment=data_cfg.get('augment', True),
         max_grid_size=config['model'].get('max_grid_size', 30),
+        seed=seed if hw_cfg.get('deterministic', False) else None,
     )
     
     val_loader = create_dataloader(
@@ -205,6 +208,7 @@ def main():
         shuffle=False,
         augment=False,
         max_grid_size=config['model'].get('max_grid_size', 30),
+        seed=seed if hw_cfg.get('deterministic', False) else None,
     )
     
     print(f"Training batches: {len(train_loader)}")

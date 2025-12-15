@@ -504,6 +504,18 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30) -> Dict[str, Any]:
     }
 
 
+def seed_worker(worker_id):
+    """
+    Seed worker for reproducible data loading.
+    
+    PyTorch DataLoader workers need proper seeding for reproducibility.
+    This follows PyTorch's recommended approach for deterministic data loading.
+    """
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 def create_dataloader(
     data_dir: str,
     split: str = 'training',
@@ -512,6 +524,7 @@ def create_dataloader(
     shuffle: bool = True,
     augment: bool = True,
     max_grid_size: int = 30,
+    seed: int = None,
     **kwargs
 ) -> DataLoader:
     """
@@ -525,6 +538,7 @@ def create_dataloader(
         shuffle: Whether to shuffle data
         augment: Whether to apply augmentation
         max_grid_size: Maximum grid size
+        seed: Random seed for reproducibility
         **kwargs: Additional args for SCIARCDataset
     
     Returns:
@@ -538,6 +552,14 @@ def create_dataloader(
         **kwargs
     )
     
+    # Setup generator for reproducibility
+    g = None
+    worker_init = None
+    if seed is not None:
+        g = torch.Generator()
+        g.manual_seed(seed)
+        worker_init = seed_worker
+    
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -546,6 +568,8 @@ def create_dataloader(
         collate_fn=lambda b: collate_sci_arc(b, max_grid_size),
         pin_memory=True,
         drop_last=True if shuffle else False,
+        worker_init_fn=worker_init,
+        generator=g,
     )
     
     return loader

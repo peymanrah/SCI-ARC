@@ -117,8 +117,8 @@ logging:
 # =============================================================================
 hardware:
   device: cuda                  # Use 'cuda' for GPU, 'cpu' for CPU-only
-  seed: 42
-  deterministic: false          # Set true for reproducibility (slower)
+  seed: 42                      # Fixed seed for reproducibility
+  deterministic: true           # REQUIRED for reproducible results (Nature/NeurIPS)
   
   # Memory optimization for 24GB VRAM
   # These are applied automatically when use_amp: true
