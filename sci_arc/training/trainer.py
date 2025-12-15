@@ -268,6 +268,8 @@ class SCIARCTrainer:
         batch_start_time = time.time()
         data_time = 0.0  # Track time waiting for data
         transfer_time = 0.0  # Track time for CPU->GPU transfer
+        forward_time = 0.0  # Track forward pass time
+        backward_time = 0.0  # Track backward pass time
         
         for batch_idx, batch in enumerate(self.train_loader):
             data_time = time.time() - batch_start_time  # Time spent waiting for this batch
@@ -285,6 +287,7 @@ class SCIARCTrainer:
             self._warmup_lr(self.global_step, warmup_steps)
             
             # Forward pass with mixed precision
+            forward_start = time.time()
             if self.scaler:
                 with autocast('cuda'):
                     outputs = self.model.forward_training(
@@ -305,13 +308,22 @@ class SCIARCTrainer:
                 )
                 losses = self._compute_losses(outputs, batch)
             
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            forward_time = time.time() - forward_start
+            
             total_loss = losses['total'] / self.config.grad_accumulation_steps
             
             # Backward pass
+            backward_start = time.time()
             if self.scaler:
                 self.scaler.scale(total_loss).backward()
             else:
                 total_loss.backward()
+            
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            backward_time = time.time() - backward_start
             
             # Gradient accumulation
             if (batch_idx + 1) % self.config.grad_accumulation_steps == 0:
@@ -341,7 +353,8 @@ class SCIARCTrainer:
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()  # Ensure GPU work is complete
                 batch_time = time.time() - batch_start_time
-                self._log_step(batch_idx, losses, batch_time, data_time, transfer_time)
+                self._log_step(batch_idx, losses, batch_time, data_time, transfer_time, 
+                              forward_time, backward_time)
             batch_start_time = time.time()
         
         # Log epoch summary
@@ -424,10 +437,11 @@ class SCIARCTrainer:
         return device_batch
     
     def _log_step(self, batch_idx: int, losses: Dict, batch_time: float = 0.0, 
-                  data_time: float = 0.0, transfer_time: float = 0.0):
+                  data_time: float = 0.0, transfer_time: float = 0.0,
+                  forward_time: float = 0.0, backward_time: float = 0.0):
         """Log training step with timing breakdown."""
         lr = self.optimizer.param_groups[0]['lr']
-        compute_time = batch_time - data_time - transfer_time
+        other_time = batch_time - data_time - transfer_time - forward_time - backward_time
         
         # Display epoch as 1-indexed to match header (Epoch 1/100)
         log_str = f"Epoch {self.current_epoch + 1} [{batch_idx + 1}/{len(self.train_loader)}] "
@@ -436,9 +450,15 @@ class SCIARCTrainer:
         log_str += f"scl={losses['scl'].item():.4f}, "
         log_str += f"ortho={losses['ortho'].item():.4f}) "
         log_str += f"LR: {lr:.2e} "
-        # Show timing breakdown when any component is slow
-        if data_time > 1.0 or transfer_time > 1.0:
-            log_str += f"[{batch_time:.2f}s = data:{data_time:.1f}s + transfer:{transfer_time:.1f}s + compute:{compute_time:.1f}s]"
+        
+        # Show timing breakdown when batch is slow (>5s)
+        if batch_time > 5.0:
+            log_str += f"[{batch_time:.1f}s: fwd={forward_time:.1f}s bwd={backward_time:.1f}s data={data_time:.1f}s xfer={transfer_time:.1f}s other={other_time:.1f}s]"
+            # Add GPU info for slow batches
+            if torch.cuda.is_available():
+                mem_used = torch.cuda.memory_allocated() / 1024**3
+                mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                log_str += f" GPU:{mem_used:.1f}/{mem_total:.1f}GB"
         else:
             log_str += f"[{batch_time:.2f}s]"
         
