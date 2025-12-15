@@ -32,8 +32,8 @@ def print_header(title: str):
 
 def print_result(check: str, passed: bool, details: str = ""):
     """Print a check result."""
-    status = "✓ PASS" if passed else "✗ FAIL"
-    print(f"  [{status}] {check}")
+    status = "[PASS]" if passed else "[FAIL]"
+    print(f"  {status} {check}")
     if details:
         print(f"          {details}")
 
@@ -508,15 +508,15 @@ def run_all_tests():
     total = len(results)
     
     for test_name, result in results.items():
-        status = "✓" if result else "✗"
+        status = "OK" if result else "X"
         print(f"  [{status}] {test_name}")
     
     print(f"\n  Total: {passed}/{total} test suites passed")
     
     if passed == total:
-        print("\n  ✓ ALL VALIDATIONS PASSED - SCI-ARC IS READY!")
+        print("\n  ALL VALIDATIONS PASSED - SCI-ARC IS READY!")
     else:
-        print(f"\n  ✗ {total - passed} test suite(s) failed - review above errors")
+        print(f"\n  {total - passed} test suite(s) failed - review above errors")
     
     return passed == total
 

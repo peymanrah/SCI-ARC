@@ -33,12 +33,12 @@ failed = 0
 def check(name, condition, details=""):
     global passed, failed
     if condition:
-        print(f"  [✓ PASS] {name}")
+        print(f"  [PASS] {name}")
         if details:
             print(f"          {details}")
         passed += 1
     else:
-        print(f"  [✗ FAIL] {name}")
+        print(f"  [FAIL] {name}")
         if details:
             print(f"          {details}")
         failed += 1
@@ -284,8 +284,8 @@ print(f"  Total:  {passed + failed}")
 print()
 
 if failed == 0:
-    print("  ✓ ALL TRM BEST PRACTICES CORRECTLY IMPLEMENTED!")
+    print("  ALL TRM BEST PRACTICES CORRECTLY IMPLEMENTED!")
     sys.exit(0)
 else:
-    print(f"  ✗ {failed} tests failed")
+    print(f"  {failed} tests failed")
     sys.exit(1)
