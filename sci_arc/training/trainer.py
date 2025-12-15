@@ -264,6 +264,8 @@ class SCIARCTrainer:
         num_batches = 0
         
         warmup_steps = len(self.train_loader) * self.config.warmup_epochs
+        epoch_start_time = time.time()
+        batch_start_time = time.time()
         
         for batch_idx, batch in enumerate(self.train_loader):
             # Move batch to device
@@ -324,9 +326,16 @@ class SCIARCTrainer:
             num_batches += 1
             self.global_step += 1
             
-            # Logging
+            # Logging with timing
             if batch_idx % self.config.log_every == 0:
-                self._log_step(batch_idx, losses)
+                batch_time = time.time() - batch_start_time
+                self._log_step(batch_idx, losses, batch_time)
+                batch_start_time = time.time()
+        
+        # Log epoch summary
+        epoch_time = time.time() - epoch_start_time
+        print(f"Epoch {self.current_epoch + 1} completed in {epoch_time:.1f}s "
+              f"({epoch_time/num_batches:.2f}s/batch)")
         
         # Average losses
         for key in epoch_losses:
@@ -399,8 +408,8 @@ class SCIARCTrainer:
                 device_batch[key] = value
         return device_batch
     
-    def _log_step(self, batch_idx: int, losses: Dict):
-        """Log training step."""
+    def _log_step(self, batch_idx: int, losses: Dict, batch_time: float = 0.0):
+        """Log training step with timing."""
         lr = self.optimizer.param_groups[0]['lr']
         
         # Display epoch as 1-indexed to match header (Epoch 1/100)
@@ -409,7 +418,8 @@ class SCIARCTrainer:
         log_str += f"(task={losses['task'].item():.4f}, "
         log_str += f"scl={losses['scl'].item():.4f}, "
         log_str += f"ortho={losses['ortho'].item():.4f}) "
-        log_str += f"LR: {lr:.2e}"
+        log_str += f"LR: {lr:.2e} "
+        log_str += f"[{batch_time:.2f}s]"
         
         print(log_str)
         
