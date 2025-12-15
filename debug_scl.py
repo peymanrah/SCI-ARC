@@ -99,11 +99,12 @@ for batch in dataloader:
     print(f"   z_struct min: {z_struct.min().item():.6f}")
     print(f"   z_struct max: {z_struct.max().item():.6f}")
     
-    # Pool and normalize
-    z = z_struct.mean(dim=1)  # [B, D]
+    # FLATTEN (not pool!) to match SCL implementation
+    B = z_struct.size(0)
+    z = z_struct.reshape(B, -1)  # [B, K*D] - FLATTEN, not mean pool!
     z_norm = F.normalize(z, dim=-1)
     
-    print(f"\n3. NORMALIZED EMBEDDINGS:")
+    print(f"\n3. NORMALIZED EMBEDDINGS (FLATTENED):")
     print(f"   z_norm shape: {z_norm.shape}")
     print(f"   z_norm mean: {z_norm.mean().item():.6f}")
     print(f"   z_norm std: {z_norm.std().item():.6f}")
@@ -122,7 +123,7 @@ for batch in dataloader:
     print(f"   Self-similarity (diagonal): {sim.diag().mean():.4f} (should be 1.0)")
     
     # Off-diagonal similarities
-    mask_diag = torch.eye(192).bool()
+    mask_diag = torch.eye(B, device=z_norm.device).bool()
     off_diag = sim[~mask_diag]
     print(f"   Off-diagonal similarities:")
     print(f"      Mean: {off_diag.mean():.4f}")
