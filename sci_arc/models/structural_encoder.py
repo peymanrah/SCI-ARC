@@ -24,6 +24,67 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class PositionalEncoding2D(nn.Module):
+    """
+    2D Positional Encoding for grids.
+    
+    CRITICAL for spatial reasoning: Without this, the Transformer cannot
+    distinguish between positions. It would see a vertical line and a
+    horizontal line as identical if they have the same pixels.
+    
+    Uses learnable embeddings for (x, y) coordinates that are added together.
+    This allows the model to learn spatial relationships like "move right"
+    or "rotate 90 degrees".
+    """
+    
+    def __init__(self, hidden_dim: int, max_size: int = 32):
+        """
+        Args:
+            hidden_dim: Embedding dimension
+            max_size: Maximum grid dimension (ARC grids are up to 30x30)
+        """
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.max_size = max_size
+        
+        # Separate learnable embeddings for x and y coordinates
+        # These are added together to form the full 2D position encoding
+        self.x_embed = nn.Embedding(max_size, hidden_dim)
+        self.y_embed = nn.Embedding(max_size, hidden_dim)
+        
+        # Initialize with small values to not dominate initial representations
+        nn.init.normal_(self.x_embed.weight, std=0.02)
+        nn.init.normal_(self.y_embed.weight, std=0.02)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Add 2D positional encodings to grid embeddings.
+        
+        Args:
+            x: [B, H, W, D] grid embeddings
+        
+        Returns:
+            [B, H, W, D] embeddings with positional information
+        """
+        B, H, W, D = x.shape
+        device = x.device
+        
+        # Create position indices
+        y_pos = torch.arange(H, device=device)  # [H]
+        x_pos = torch.arange(W, device=device)  # [W]
+        
+        # Get embeddings
+        y_emb = self.y_embed(y_pos)  # [H, D]
+        x_emb = self.x_embed(x_pos)  # [W, D]
+        
+        # Broadcast and add: y_emb[h] + x_emb[w] for each (h, w)
+        # [H, 1, D] + [1, W, D] -> [H, W, D]
+        pos_emb = y_emb.unsqueeze(1) + x_emb.unsqueeze(0)
+        
+        # Add to input: [B, H, W, D] + [H, W, D] (broadcasts over batch)
+        return x + pos_emb
+
+
 class AbstractionLayer2D(nn.Module):
     """
     THE KEY SCI INNOVATION adapted for 2D grids.
@@ -73,9 +134,7 @@ class AbstractionLayer2D(nn.Module):
         # Residual gate: Start with higher value to preserve more information initially
         # This helps with gradient flow and prevents representation collapse
         self.residual_gate = nn.Parameter(torch.tensor(0.5))
-        
-        # Normalization
-        self.norm = nn.LayerNorm(d_model)
+        # Note: We don't use LayerNorm here as it was causing representation collapse
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -150,6 +209,10 @@ class StructuralEncoder2D(nn.Module):
         self.hidden_dim = hidden_dim
         self.use_abstraction = use_abstraction
         
+        # === 2D POSITIONAL ENCODING (Critical for spatial reasoning) ===
+        # Without this, Transformer cannot learn spatial relationships
+        self.pos_encoder = PositionalEncoding2D(hidden_dim, max_size=32)
+        
         # === ABSTRACTION LAYER (Key SCI component) ===
         if use_abstraction:
             self.abstraction_layer = AbstractionLayer2D(hidden_dim, dropout=dropout)
@@ -157,13 +220,13 @@ class StructuralEncoder2D(nn.Module):
         # === STRUCTURE QUERIES ===
         # Learnable queries that extract transformation patterns
         # Similar to DETR object queries, but for transformations
-        # Use orthogonal initialization to ensure different slots capture different aspects
+        # Use orthogonal initialization with unit scale to ensure diverse attention patterns
         self.structure_queries = nn.Parameter(
-            torch.randn(1, num_structure_slots, hidden_dim) * 0.02
+            torch.empty(1, num_structure_slots, hidden_dim)
         )
-        # Initialize with orthogonal vectors for diversity
+        # Initialize with orthogonal vectors at full scale for maximum diversity
         nn.init.orthogonal_(self.structure_queries.data.squeeze(0))
-        self.structure_queries.data *= 0.1  # Scale down but keep orthogonal
+        # No scaling down - orthogonal vectors already have unit norm
         
         # === INPUT/OUTPUT ENCODING ===
         # Mark whether embedding comes from input or output
@@ -223,9 +286,14 @@ class StructuralEncoder2D(nn.Module):
         B = input_emb.size(0)
         D = self.hidden_dim
         
+        # Add 2D positional encodings BEFORE flattening
+        # This gives each cell a unique spatial address (x, y)
+        input_pos = self.pos_encoder(input_emb)   # [B, H_in, W_in, D]
+        output_pos = self.pos_encoder(output_emb) # [B, H_out, W_out, D]
+        
         # Flatten grids to sequences
-        input_flat = input_emb.view(B, -1, D)   # [B, H_in*W_in, D]
-        output_flat = output_emb.view(B, -1, D) # [B, H_out*W_out, D]
+        input_flat = input_pos.view(B, -1, D)   # [B, H_in*W_in, D]
+        output_flat = output_pos.view(B, -1, D) # [B, H_out*W_out, D]
         
         # Add input/output indicators
         input_flat = input_flat + self.io_embed.weight[0]
@@ -277,8 +345,12 @@ class StructuralEncoder2D(nn.Module):
         B = input_emb.size(0)
         D = self.hidden_dim
         
-        input_flat = input_emb.view(B, -1, D)
-        output_flat = output_emb.view(B, -1, D)
+        # Add 2D positional encodings BEFORE flattening
+        input_pos = self.pos_encoder(input_emb)
+        output_pos = self.pos_encoder(output_emb)
+        
+        input_flat = input_pos.view(B, -1, D)
+        output_flat = output_pos.view(B, -1, D)
         
         input_flat = input_flat + self.io_embed.weight[0]
         output_flat = output_flat + self.io_embed.weight[1]

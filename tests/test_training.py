@@ -18,12 +18,13 @@ class TestStructuralContrastiveLoss:
     
     @pytest.fixture
     def loss_fn(self):
-        return StructuralContrastiveLoss(temperature=0.1, hidden_dim=64, projection_dim=32)
+        # Use num_structure_slots=4 for testing (matches K=4 in test tensors)
+        return StructuralContrastiveLoss(temperature=0.1, hidden_dim=64, projection_dim=32, num_structure_slots=4)
     
     def test_same_class_low_loss(self, loss_fn):
         """Test that same-class samples have lower loss."""
-        # Two samples from same transformation family - shape [B, K, D] where K=1 slot
-        z1 = torch.randn(2, 1, 64)
+        # Two samples from same transformation family - shape [B, K, D] where K=4 slots
+        z1 = torch.randn(2, 4, 64)
         
         labels = torch.tensor([0, 0])  # Same class
         
@@ -40,8 +41,8 @@ class TestStructuralContrastiveLoss:
     
     def test_output_shape(self, loss_fn):
         """Test that loss is a scalar."""
-        # Shape: [B, K, D] where K=1 structure slot
-        z = torch.randn(4, 1, 64)
+        # Shape: [B, K, D] where K=4 structure slots
+        z = torch.randn(4, 4, 64)
         labels = torch.tensor([0, 0, 1, 1])
         
         loss = loss_fn(z, labels)
@@ -50,8 +51,8 @@ class TestStructuralContrastiveLoss:
     
     def test_gradient_flow(self, loss_fn):
         """Test that gradients flow through loss."""
-        # Shape: [B, K, D] where K=1 structure slot
-        z = torch.randn(4, 1, 64, requires_grad=True)
+        # Shape: [B, K, D] where K=4 structure slots
+        z = torch.randn(4, 4, 64, requires_grad=True)
         labels = torch.tensor([0, 0, 1, 1])
         
         loss = loss_fn(z, labels)
@@ -109,7 +110,8 @@ class TestSCIARCLoss:
             orthogonality_weight=0.01,
             temperature=0.1,
             hidden_dim=64,
-            projection_dim=32
+            projection_dim=32,
+            num_structure_slots=8  # Match K=8 in test tensors
         )
     
     def test_combined_loss(self, loss_fn):
@@ -184,7 +186,8 @@ class TestLossWeights:
             H_cycles=2,
             scl_weight=0.0,
             orthogonality_weight=0.01,
-            hidden_dim=64
+            hidden_dim=64,
+            num_structure_slots=8  # Match K=8 in test tensors
         )
         
         predictions = [torch.randn(2, 8, 8, 10) for _ in range(2)]
@@ -211,7 +214,8 @@ class TestLossWeights:
             H_cycles=2,
             scl_weight=0.0,
             orthogonality_weight=1.0,
-            hidden_dim=64
+            hidden_dim=64,
+            num_structure_slots=8  # Match K=8 in test tensors
         )
         
         # Non-orthogonal vectors - [B, K, D]

@@ -89,6 +89,10 @@ class StructuralContrastiveLoss(nn.Module):
     
     Uses InfoNCE loss formulation with a projection head (SimCLR-style)
     to prevent representation collapse.
+    
+    Key Design Choice: We FLATTEN (concatenate) the K structure slots rather than
+    averaging them. This preserves all slot information and prevents variance
+    reduction that causes representation collapse with mean pooling.
     """
     
     def __init__(
@@ -96,30 +100,40 @@ class StructuralContrastiveLoss(nn.Module):
         temperature: float = 0.07,
         normalize: bool = True,
         hidden_dim: int = 256,
-        projection_dim: int = 128
+        projection_dim: int = 128,
+        num_structure_slots: int = 8
     ):
         """
         Args:
             temperature: Temperature for softmax scaling
             normalize: Whether to L2-normalize representations
-            hidden_dim: Input dimension from encoder
+            hidden_dim: Input dimension per slot from encoder
             projection_dim: Output dimension of projection head
+            num_structure_slots: Number of structure slots (K)
         """
         super().__init__()
-        self.temperature = temperature
+        # Learnable temperature - allows model to adapt cluster tightness
+        # Initialize with log(temperature) for numerical stability and positive constraint
+        self.log_temperature = nn.Parameter(torch.tensor(temperature).log())
         self.normalize = normalize
+        self.num_slots = num_structure_slots
         
-        # Projection head (SimCLR-style) to prevent representation collapse
-        # The encoder learns general representations, the projector maps them
-        # to a space where contrastive learning works better
+        # Input size is K * D (flattened slots) instead of D (pooled)
+        # This preserves all structural information and prevents collapse
+        input_dim = hidden_dim * num_structure_slots
+        
+        # Projection head (SimCLR-style) to map flattened slots to contrastive space
+        # Use LayerNorm instead of BatchNorm - BatchNorm fails when inputs are identical
+        # because it normalizes across batch (making identical inputs stay identical)
+        # LayerNorm normalizes across features, preserving inter-sample differences
         self.projector = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),  # BN helps prevent collapse (from BYOL/SimSiam)
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),  # LayerNorm works better for contrastive learning
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, projection_dim)
         )
         
-        # Initialize with orthogonal weights to amplify small input differences
+        # Initialize with orthogonal weights for stability
         nn.init.orthogonal_(self.projector[0].weight)
         nn.init.orthogonal_(self.projector[3].weight)
     
@@ -145,26 +159,22 @@ class StructuralContrastiveLoss(nn.Module):
             # Need at least 2 samples for contrastive learning
             return torch.tensor(0.0, device=structure_reps.device)
         
-        # Pool structure slots to single vector
-        z = structure_reps.mean(dim=1)  # [B, D]
+        # FLATTEN structure slots instead of pooling
+        # This preserves all K*D dimensions and prevents variance reduction
+        # that causes representation collapse with mean pooling
+        z = structure_reps.reshape(B, -1)  # [B, K*D]
         
-        # Apply projection head (critical for preventing representation collapse)
-        # This is the SimCLR insight: contrastive loss on projected representations
-        # allows the encoder to learn more general features
+        # Apply projection head to map flattened slots to contrastive space
         z = self.projector(z)  # [B, projection_dim]
-        
-        # Add small noise during training to bootstrap learning when embeddings collapse
-        # This ensures gradients flow even when all embeddings are initially similar
-        if self.training:
-            noise_scale = 0.1  # Small noise to break symmetry
-            z = z + torch.randn_like(z) * noise_scale
         
         # Normalize representations
         if self.normalize:
             z = F.normalize(z, dim=-1)
         
         # Compute pairwise similarity matrix
-        sim = torch.mm(z, z.t()) / self.temperature  # [B, B]
+        # Use exp(log_temperature) to ensure temperature stays positive
+        temperature = self.log_temperature.exp().clamp(min=0.01, max=1.0)
+        sim = torch.mm(z, z.t()) / temperature  # [B, B]
         
         # Create masks
         # Diagonal mask (self-similarity - to be excluded)
@@ -370,7 +380,8 @@ class SCIARCLoss(nn.Module):
         weight_schedule: str = "linear",
         ignore_index: int = -1,
         hidden_dim: int = 256,  # For SCL projection head
-        projection_dim: int = 128
+        projection_dim: int = 128,
+        num_structure_slots: int = 8  # Number of structure slots (K)
     ):
         """
         Args:
@@ -382,6 +393,7 @@ class SCIARCLoss(nn.Module):
             ignore_index: Label value to ignore
             hidden_dim: Hidden dimension for SCL projection head
             projection_dim: Output dimension of SCL projection head
+            num_structure_slots: Number of structure slots for SCL flattening
         """
         super().__init__()
         
@@ -397,7 +409,8 @@ class SCIARCLoss(nn.Module):
         self.scl = StructuralContrastiveLoss(
             temperature=temperature,
             hidden_dim=hidden_dim,
-            projection_dim=projection_dim
+            projection_dim=projection_dim,
+            num_structure_slots=num_structure_slots
         )
         self.orthogonality = OrthogonalityLoss()
     
