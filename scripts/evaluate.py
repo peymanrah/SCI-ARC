@@ -35,7 +35,15 @@ class TeeLogger:
         self.log_file = open(log_path, 'w', encoding='utf-8', buffering=1)
         
     def write(self, message):
-        self.terminal.write(message)
+        # Handle Unicode characters that Windows console can't display
+        try:
+            self.terminal.write(message)
+        except UnicodeEncodeError:
+            # Replace problematic Unicode characters with ASCII equivalents
+            safe_message = message.replace('\u2713', '[OK]').replace('\u2717', '[X]')
+            safe_message = safe_message.replace('\u2714', '[OK]').replace('\u2718', '[X]')
+            safe_message = safe_message.encode('ascii', 'replace').decode('ascii')
+            self.terminal.write(safe_message)
         self.log_file.write(message)
         self.log_file.flush()
         
@@ -56,21 +64,54 @@ def load_model(checkpoint_path: str, device: str = 'cuda') -> SCIARC:
     config_dict = checkpoint.get('config', {})
     
     # Build model config (with defaults for backward compatibility)
+    # NOTE: The config field names must match SCIARCConfig in sci_arc/models/sci_arc.py
     model_config = SCIARCConfig(
+        # Core dimensions
         hidden_dim=config_dict.get('hidden_dim', 256),
         num_colors=config_dict.get('num_colors', 10),
         max_grid_size=config_dict.get('max_grid_size', 30),
+        
+        # Structural Encoder - use se_layers (NOT num_abstraction_layers)
         num_structure_slots=config_dict.get('num_structure_slots', 8),
-        num_abstraction_layers=config_dict.get('num_abstraction_layers', 3),
+        se_layers=config_dict.get('se_layers', config_dict.get('num_abstraction_layers', 2)),
+        use_abstraction=config_dict.get('use_abstraction', True),
+        
+        # Content Encoder
         max_objects=config_dict.get('max_objects', 16),
-        H_cycles=config_dict.get('H_cycles', 3),
+        
+        # Attention
+        num_heads=config_dict.get('num_heads', 4),
+        dropout=config_dict.get('dropout', 0.1),
+        
+        # Recursive Refinement (TRM parameters)
+        H_cycles=config_dict.get('H_cycles', 16),
         L_cycles=config_dict.get('L_cycles', 4),
         L_layers=config_dict.get('L_layers', 2),
-        dropout=config_dict.get('dropout', 0.1),
+        latent_size=config_dict.get('latent_size', 64),
+        
+        # Training options
+        deep_supervision=config_dict.get('deep_supervision', True),
+        use_task_conditioning=config_dict.get('use_task_conditioning', True),
+        
+        # Demo aggregation
+        demo_aggregation=config_dict.get('demo_aggregation', 'attention'),
     )
     
     model = SCIARC(model_config)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Load state dict with strict=False to handle minor architecture mismatches
+    # (e.g., checkpoint trained with different num_abstraction_layers)
+    missing_keys, unexpected_keys = model.load_state_dict(
+        checkpoint['model_state_dict'], strict=False
+    )
+    
+    if missing_keys:
+        print(f"  Warning: Missing keys in checkpoint: {len(missing_keys)} keys")
+        print(f"    Examples: {missing_keys[:3]}..." if len(missing_keys) > 3 else f"    {missing_keys}")
+    if unexpected_keys:
+        print(f"  Note: Checkpoint has extra keys not used by model: {len(unexpected_keys)} keys")
+        print(f"    Examples: {unexpected_keys[:3]}..." if len(unexpected_keys) > 3 else f"    {unexpected_keys}")
+    
     model.to(device)
     model.eval()
     
@@ -332,8 +373,8 @@ def main():
                     )
                     all_details.append(detail)
                     
-                    # Print progress for each task
-                    status = "✓" if is_correct else "✗"
+                    # Print progress for each task (use ASCII-safe characters)
+                    status = "[OK]" if is_correct else "[X]"
                     print(f"  [{batch_idx+1}/{len(dataloader)}] Task {task_id}: {status} "
                           f"(pixel_acc={detail['pixel_accuracy']:.2%})")
         
