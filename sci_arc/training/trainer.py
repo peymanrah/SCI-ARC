@@ -274,13 +274,9 @@ class SCIARCTrainer:
         for batch_idx, batch in enumerate(self.train_loader):
             data_time = time.time() - batch_start_time  # Time spent waiting for this batch
             
-            # Move batch to device and track transfer time
+            # Move batch to device
             transfer_start = time.time()
             batch = self._to_device(batch)
-            
-            # Sync CUDA to ensure data transfer is complete before timing compute
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
             transfer_time = time.time() - transfer_start
             
             # Warmup
@@ -307,9 +303,6 @@ class SCIARCTrainer:
                     grid_mask=batch.get('grid_masks'),
                 )
                 losses = self._compute_losses(outputs, batch)
-            
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
             forward_time = time.time() - forward_start
             
             total_loss = losses['total'] / self.config.grad_accumulation_steps
@@ -320,9 +313,6 @@ class SCIARCTrainer:
                 self.scaler.scale(total_loss).backward()
             else:
                 total_loss.backward()
-            
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
             backward_time = time.time() - backward_start
             
             # Gradient accumulation
