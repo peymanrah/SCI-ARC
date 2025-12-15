@@ -51,9 +51,9 @@ training:
   grad_accumulation_steps: 1
   
   # Batch size (optimized for RTX 3090 24GB VRAM)
-  # 64 is sweet spot for SCL learning with 24GB VRAM
-  batch_size: 64
-  eval_batch_size: 64
+  # 256 is ideal for SCL contrastive learning
+  batch_size: 256
+  eval_batch_size: 256
   
   # Loss weights
   scl_weight: 0.1               # Structural Contrastive Loss
@@ -83,10 +83,10 @@ data:
   rearc_dir: null               # Optional: path to RE-ARC
   
   # Data loading
-  # With batch_size=64, more workers needed to keep GPU fed
+  # With batch_size=256 and 48 vCPUs, 24 workers keeps GPU fed
   # Rule: 2-4 workers per GPU, but can go higher with many cores
-  # Reduce to 8 if you see CPU memory issues
-  num_workers: 12
+  # Reduce to 16 if you see CPU memory issues
+  num_workers: 24
   pin_memory: true
   
   # Caching (eliminates data loading stalls)

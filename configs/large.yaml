@@ -37,8 +37,9 @@ training:
   grad_accumulation_steps: 1
   
   # Batch size optimized for SCL learning on RTX 3090 24GB
-  batch_size: 64
-  eval_batch_size: 64
+  # Note: Large model may need to reduce to 128 if OOM
+  batch_size: 256
+  eval_batch_size: 256
   
   scl_weight: 0.15
   ortho_weight: 0.02
@@ -58,7 +59,7 @@ data:
   # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
   arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: ./data/rearc       # Include synthetic data
-  num_workers: 12
+  num_workers: 24
   pin_memory: true
   augment: true
 

@@ -52,12 +52,12 @@ training:
   max_epochs: 150               # More epochs for full convergence
   warmup_epochs: 8              # Longer warmup for larger model
   grad_clip: 1.0
-  grad_accumulation_steps: 1    # No accumulation needed with batch_size=64
+  grad_accumulation_steps: 1    # No accumulation needed with batch_size=256
   
   # Batch size - optimized for SCL learning on RTX 3090 24GB
-  # 64 provides good positive pair density for contrastive learning
-  batch_size: 64
-  eval_batch_size: 64
+  # 256 provides excellent positive pair density for contrastive learning
+  batch_size: 256
+  eval_batch_size: 256
   
   # Loss weights - TUNED for SCI-ARC
   scl_weight: 0.15              # Slightly higher for structure learning
@@ -86,7 +86,7 @@ data:
   arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: ./data/rearc       # INCLUDE RE-ARC for more training data
   
-  num_workers: 12               # More workers for batch_size=64
+  num_workers: 24               # 24 workers for 48 vCPU server
   pin_memory: true
   
   # ALL augmentations enabled - CRITICAL for generalization
