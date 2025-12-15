@@ -266,8 +266,11 @@ class SCIARCTrainer:
         warmup_steps = len(self.train_loader) * self.config.warmup_epochs
         epoch_start_time = time.time()
         batch_start_time = time.time()
+        data_time = 0.0  # Track time waiting for data
         
         for batch_idx, batch in enumerate(self.train_loader):
+            data_time = time.time() - batch_start_time  # Time spent waiting for this batch
+            
             # Move batch to device
             batch = self._to_device(batch)
             
@@ -329,8 +332,9 @@ class SCIARCTrainer:
             # Logging with timing
             if batch_idx % self.config.log_every == 0:
                 batch_time = time.time() - batch_start_time
-                self._log_step(batch_idx, losses, batch_time)
-                batch_start_time = time.time()
+                compute_time = batch_time - data_time
+                self._log_step(batch_idx, losses, batch_time, data_time)
+            batch_start_time = time.time()
         
         # Log epoch summary
         epoch_time = time.time() - epoch_start_time
@@ -411,9 +415,10 @@ class SCIARCTrainer:
                 device_batch[key] = value
         return device_batch
     
-    def _log_step(self, batch_idx: int, losses: Dict, batch_time: float = 0.0):
-        """Log training step with timing."""
+    def _log_step(self, batch_idx: int, losses: Dict, batch_time: float = 0.0, data_time: float = 0.0):
+        """Log training step with timing breakdown."""
         lr = self.optimizer.param_groups[0]['lr']
+        compute_time = batch_time - data_time
         
         # Display epoch as 1-indexed to match header (Epoch 1/100)
         log_str = f"Epoch {self.current_epoch + 1} [{batch_idx + 1}/{len(self.train_loader)}] "
@@ -422,7 +427,11 @@ class SCIARCTrainer:
         log_str += f"scl={losses['scl'].item():.4f}, "
         log_str += f"ortho={losses['ortho'].item():.4f}) "
         log_str += f"LR: {lr:.2e} "
-        log_str += f"[{batch_time:.2f}s]"
+        # Show total time, and if data loading was slow, highlight it
+        if data_time > 1.0:
+            log_str += f"[{batch_time:.2f}s = data:{data_time:.1f}s + compute:{compute_time:.1f}s]"
+        else:
+            log_str += f"[{batch_time:.2f}s]"
         
         print(log_str)
         
