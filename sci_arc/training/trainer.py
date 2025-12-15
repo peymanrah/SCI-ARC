@@ -416,16 +416,27 @@ class SCIARCTrainer:
                 z_flat = z_struct.reshape(B, -1)  # [B, K*D] - FLATTEN, not pool!
                 z_norm = torch.nn.functional.normalize(z_flat, dim=-1)
                 
-                # Check similarity of first few samples (BEFORE projection)
+                # Check similarity of first few samples (BEFORE projection, BEFORE batchnorm)
                 sim_01 = (z_norm[0] * z_norm[1]).sum().item()
                 sim_02 = (z_norm[0] * z_norm[2]).sum().item()
                 sim_12 = (z_norm[1] * z_norm[2]).sum().item()
-                print(f"  Pre-projection similarities: (0,1)={sim_01:.4f}, (0,2)={sim_02:.4f}, (1,2)={sim_12:.4f}")
+                print(f"  Pre-BatchNorm similarities: (0,1)={sim_01:.4f}, (0,2)={sim_02:.4f}, (1,2)={sim_12:.4f}")
+                
+                # Check AFTER BatchNorm (if available)
+                if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'batch_norm'):
+                    with torch.no_grad():
+                        z_bn = self.loss_fn.scl.batch_norm(z_flat)  # Apply batch norm
+                        z_bn_norm = torch.nn.functional.normalize(z_bn, dim=-1)
+                        sim_01_bn = (z_bn_norm[0] * z_bn_norm[1]).sum().item()
+                        sim_02_bn = (z_bn_norm[0] * z_bn_norm[2]).sum().item()
+                        sim_12_bn = (z_bn_norm[1] * z_bn_norm[2]).sum().item()
+                        print(f"  Post-BatchNorm similarities: (0,1)={sim_01_bn:.4f}, (0,2)={sim_02_bn:.4f}, (1,2)={sim_12_bn:.4f}")
                 
                 # Check AFTER projection (if available)
                 if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'projector'):
                     with torch.no_grad():
-                        z_proj = self.loss_fn.scl.projector(z_flat)  # Use flattened input
+                        z_bn = self.loss_fn.scl.batch_norm(z_flat)  # Apply batch norm first
+                        z_proj = self.loss_fn.scl.projector(z_bn)  # Then project
                         z_proj_norm = torch.nn.functional.normalize(z_proj, dim=-1)
                         sim_01_p = (z_proj_norm[0] * z_proj_norm[1]).sum().item()
                         sim_02_p = (z_proj_norm[0] * z_proj_norm[2]).sum().item()

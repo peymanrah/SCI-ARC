@@ -193,7 +193,8 @@ class StructuralEncoder2D(nn.Module):
         num_layers: int = 2,
         num_heads: int = 4,
         dropout: float = 0.1,
-        use_abstraction: bool = True
+        use_abstraction: bool = True,
+        use_difference: bool = True  # NEW: Add explicit difference channel
     ):
         """
         Args:
@@ -203,12 +204,14 @@ class StructuralEncoder2D(nn.Module):
             num_heads: Number of attention heads
             dropout: Dropout probability
             use_abstraction: Whether to use AbstractionLayer2D
+            use_difference: Whether to add explicit (output - input) difference embedding
         """
         super().__init__()
         
         self.num_slots = num_structure_slots
         self.hidden_dim = hidden_dim
         self.use_abstraction = use_abstraction
+        self.use_difference = use_difference
         
         # === 2D POSITIONAL ENCODING (Critical for spatial reasoning) ===
         # Without this, Transformer cannot learn spatial relationships
@@ -231,7 +234,18 @@ class StructuralEncoder2D(nn.Module):
         
         # === INPUT/OUTPUT ENCODING ===
         # Mark whether embedding comes from input or output
-        self.io_embed = nn.Embedding(2, hidden_dim)  # 0=input, 1=output
+        # If use_difference=True, we have 3 types: input(0), output(1), difference(2)
+        self.io_embed = nn.Embedding(3 if use_difference else 2, hidden_dim)
+        
+        # === DIFFERENCE PROJECTION (NEW) ===
+        # Project the difference embedding to same space
+        # The difference captures WHERE changes happen, which is the core transformation signal
+        if use_difference:
+            self.diff_proj = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            )
         
         # === TRANSFORMATION ENCODER ===
         # Process the (input, output) context
@@ -286,6 +300,8 @@ class StructuralEncoder2D(nn.Module):
         """
         B = input_emb.size(0)
         D = self.hidden_dim
+        H_in, W_in = input_emb.shape[1], input_emb.shape[2]
+        H_out, W_out = output_emb.shape[1], output_emb.shape[2]
         
         # Add 2D positional encodings BEFORE flattening
         # This gives each cell a unique spatial address (x, y)
@@ -300,16 +316,44 @@ class StructuralEncoder2D(nn.Module):
         input_flat = input_flat + self.io_embed.weight[0]
         output_flat = output_flat + self.io_embed.weight[1]
         
+        # === DIFFERENCE EMBEDDING (NEW) ===
+        # Compute explicit difference where grids overlap
+        # This directly encodes WHERE changes happen - the core transformation signal
+        if self.use_difference:
+            # Use the smaller overlapping region
+            H_min, W_min = min(H_in, H_out), min(W_in, W_out)
+            
+            # Compute difference in embedding space (output - input)
+            # This highlights cells that changed
+            diff_emb = output_emb[:, :H_min, :W_min, :] - input_emb[:, :H_min, :W_min, :]
+            
+            # Add positional encoding to difference
+            diff_pos = self.pos_encoder(diff_emb)  # [B, H_min, W_min, D]
+            
+            # Project through MLP to learn what differences matter
+            diff_flat = diff_pos.view(B, -1, D)  # [B, H_min*W_min, D]
+            diff_flat = self.diff_proj(diff_flat)  # [B, H_min*W_min, D]
+            
+            # Add difference indicator
+            diff_flat = diff_flat + self.io_embed.weight[2]
+        
         # Apply AbstractionLayer to suppress content
         if self.use_abstraction:
             input_abs = self.abstraction_layer(input_flat)
             output_abs = self.abstraction_layer(output_flat)
+            if self.use_difference:
+                diff_abs = self.abstraction_layer(diff_flat)
         else:
             input_abs = input_flat
             output_abs = output_flat
+            if self.use_difference:
+                diff_abs = diff_flat
         
-        # Concatenate: [input | output]
-        context = torch.cat([input_abs, output_abs], dim=1)  # [B, N_in + N_out, D]
+        # Concatenate: [input | output | difference]
+        if self.use_difference:
+            context = torch.cat([input_abs, output_abs, diff_abs], dim=1)
+        else:
+            context = torch.cat([input_abs, output_abs], dim=1)  # [B, N_in + N_out, D]
         
         # Encode transformation context
         context_encoded = self.context_encoder(context)
@@ -346,6 +390,8 @@ class StructuralEncoder2D(nn.Module):
         """Forward pass that also returns attention weights for visualization."""
         B = input_emb.size(0)
         D = self.hidden_dim
+        H_in, W_in = input_emb.shape[1], input_emb.shape[2]
+        H_out, W_out = output_emb.shape[1], output_emb.shape[2]
         
         # Add 2D positional encodings BEFORE flattening
         input_pos = self.pos_encoder(input_emb)
@@ -357,18 +403,35 @@ class StructuralEncoder2D(nn.Module):
         input_flat = input_flat + self.io_embed.weight[0]
         output_flat = output_flat + self.io_embed.weight[1]
         
+        # Difference embedding (if enabled)
+        if self.use_difference:
+            H_min, W_min = min(H_in, H_out), min(W_in, W_out)
+            diff_emb = output_emb[:, :H_min, :W_min, :] - input_emb[:, :H_min, :W_min, :]
+            diff_pos = self.pos_encoder(diff_emb)
+            diff_flat = diff_pos.view(B, -1, D)
+            diff_flat = self.diff_proj(diff_flat)
+            diff_flat = diff_flat + self.io_embed.weight[2]
+        
         if self.use_abstraction:
             input_abs = self.abstraction_layer(input_flat)
             output_abs = self.abstraction_layer(output_flat)
+            if self.use_difference:
+                diff_abs = self.abstraction_layer(diff_flat)
             structural_scores = self.abstraction_layer.get_structural_scores(
                 torch.cat([input_flat, output_flat], dim=1)
             )
         else:
             input_abs = input_flat
             output_abs = output_flat
+            if self.use_difference:
+                diff_abs = diff_flat
             structural_scores = None
         
-        context = torch.cat([input_abs, output_abs], dim=1)
+        # Concatenate context
+        if self.use_difference:
+            context = torch.cat([input_abs, output_abs, diff_abs], dim=1)
+        else:
+            context = torch.cat([input_abs, output_abs], dim=1)
         context_encoded = self.context_encoder(context)
         
         # Condition queries on context statistics
@@ -386,7 +449,8 @@ class StructuralEncoder2D(nn.Module):
             value=context_encoded
         )
         
-        structure_slots = self.output_norm(self.output_proj(structure_slots))
+        # Project output (NO LayerNorm - it collapses sample differences!)
+        structure_slots = self.output_proj(structure_slots)
         
         return structure_slots, attn_weights, structural_scores
 

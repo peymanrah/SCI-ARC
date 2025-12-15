@@ -122,6 +122,14 @@ class StructuralContrastiveLoss(nn.Module):
         # This preserves all structural information and prevents collapse
         input_dim = hidden_dim * num_structure_slots
         
+        # === BATCH NORMALIZATION (NEW) ===
+        # BatchNorm1d centers the batch by subtracting the mean vector.
+        # This is mathematically equivalent to "background subtraction":
+        # - The mean vector across batch ≈ common background signal
+        # - Subtracting it leaves only the transformation-specific signal
+        # - This should drop similarity from ~0.95 to near 0
+        self.batch_norm = nn.BatchNorm1d(input_dim, affine=True)
+        
         # Projection head (SimCLR-style) to map flattened slots to contrastive space
         # Use LayerNorm instead of BatchNorm - BatchNorm fails when inputs are identical
         # because it normalizes across batch (making identical inputs stay identical)
@@ -163,6 +171,11 @@ class StructuralContrastiveLoss(nn.Module):
         # This preserves all K*D dimensions and prevents variance reduction
         # that causes representation collapse with mean pooling
         z = structure_reps.reshape(B, -1)  # [B, K*D]
+        
+        # Apply BatchNorm to remove common background signal
+        # This centers the batch, mathematically equivalent to subtracting
+        # the mean vector (which is dominated by background/shared signal)
+        z = self.batch_norm(z)  # [B, K*D] - now centered
         
         # Apply projection head to map flattened slots to contrastive space
         z = self.projector(z)  # [B, projection_dim]
