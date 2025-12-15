@@ -90,11 +90,9 @@ def build_model(config: dict) -> SCIARC:
         num_colors=model_cfg['num_colors'],
         max_grid_size=model_cfg['max_grid_size'],
         num_structure_slots=model_cfg['num_structure_slots'],
-        num_abstraction_layers=model_cfg['num_abstraction_layers'],
-        structure_heads=model_cfg.get('structure_heads', 8),
+        se_layers=model_cfg.get('num_abstraction_layers', model_cfg.get('se_layers', 2)),
+        num_heads=model_cfg.get('structure_heads', model_cfg.get('num_heads', 8)),
         max_objects=model_cfg['max_objects'],
-        content_heads=model_cfg.get('content_heads', 8),
-        binding_heads=model_cfg.get('binding_heads', 8),
         H_cycles=model_cfg['H_cycles'],
         L_cycles=model_cfg['L_cycles'],
         L_layers=model_cfg['L_layers'],
@@ -189,11 +187,15 @@ def main():
     
     print(f"\nLoading data from: {data_cfg['arc_dir']}")
     
+    # Windows multiprocessing fix: use 0 workers or proper function
+    import sys
+    num_workers = 0 if sys.platform == 'win32' else data_cfg.get('num_workers', 4)
+    
     train_loader = create_dataloader(
         data_dir=data_cfg['arc_dir'],
         split='training',
         batch_size=train_cfg['batch_size'],
-        num_workers=data_cfg.get('num_workers', 4),
+        num_workers=num_workers,
         shuffle=True,
         augment=data_cfg.get('augment', True),
         max_grid_size=config['model'].get('max_grid_size', 30),
@@ -204,7 +206,7 @@ def main():
         data_dir=data_cfg['arc_dir'],
         split='evaluation',
         batch_size=train_cfg['eval_batch_size'],
-        num_workers=data_cfg.get('num_workers', 4),
+        num_workers=num_workers,
         shuffle=False,
         augment=False,
         max_grid_size=config['model'].get('max_grid_size', 30),
@@ -216,13 +218,23 @@ def main():
     
     # Build loss function
     loss_fn = SCIARCLoss(
+        H_cycles=config['model']['H_cycles'],
         scl_weight=train_cfg['scl_weight'],
-        ortho_weight=train_cfg['ortho_weight'],
+        orthogonality_weight=train_cfg['ortho_weight'],
         temperature=0.1,
     )
     
     # Build training config
     training_config = build_training_config(config)
+    
+    # Disable wandb if not logged in (for local training)
+    if training_config.use_wandb:
+        try:
+            import wandb
+            wandb.login()
+        except:
+            print("Warning: wandb not configured, disabling logging")
+            training_config.use_wandb = False
     
     # Create trainer
     trainer = SCIARCTrainer(

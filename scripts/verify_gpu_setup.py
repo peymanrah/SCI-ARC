@@ -122,16 +122,24 @@ def check_model_fits():
     demo_outputs = torch.randint(0, 10, (batch_size, num_demos, H, W), device=device)
     test_input = torch.randint(0, 10, (batch_size, H, W), device=device)
     
+    # Convert to demo_pairs format (list of tuples per batch)
+    demo_pairs = [
+        [(demo_inputs[b, i], demo_outputs[b, i]) for i in range(num_demos)]
+        for b in range(batch_size)
+    ]
+    
     with torch.no_grad():
-        output = model(
-            demo_inputs=demo_inputs,
-            demo_outputs=demo_outputs,
-            test_input=test_input
+        # Use forward_training for batched interface
+        output = model.forward_training(
+            input_grids=demo_inputs,
+            output_grids=demo_outputs,
+            test_input=test_input,
+            test_output=test_input  # Use same shape for test_output
         )
     
     allocated_after_forward = torch.cuda.memory_allocated(0) / (1024**3)
     print(f"   GPU Memory After Forward: {allocated_after_forward:.3f} GB")
-    print(f"   Output Shape: {output.final_prediction.shape}")
+    print(f"   Output Shape: {output['logits'].shape}")
     
     # Test backward pass with larger batch
     print("\n   Testing training pass (batch_size=32)...")
