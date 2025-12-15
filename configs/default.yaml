@@ -51,9 +51,9 @@ training:
   grad_accumulation_steps: 1
   
   # Batch size (optimized for RTX 3090 24GB VRAM)
-  # Can increase to 64 if memory allows, reduce to 16 if OOM
-  batch_size: 32
-  eval_batch_size: 64
+  # Reduced to 16 to prevent VRAM overflow to shared memory
+  batch_size: 16
+  eval_batch_size: 16
   
   # Loss weights
   scl_weight: 0.1               # Structural Contrastive Loss

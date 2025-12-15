@@ -584,7 +584,7 @@ def seed_worker(worker_id):
 def create_dataloader(
     data_dir: str,
     split: str = 'training',
-    batch_size: int = 32,
+    batch_size: int = 16,  # Reduced from 32 to prevent VRAM overflow
     num_workers: int = 4,
     shuffle: bool = True,
     augment: bool = True,

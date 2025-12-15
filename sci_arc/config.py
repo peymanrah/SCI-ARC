@@ -72,7 +72,7 @@ class SCIARCConfig:
     warmup_steps: int = 1000
     warmup_ratio: float = 0.1
     max_epochs: int = 100
-    batch_size: int = 32
+    batch_size: int = 16  # Reduced from 32 to prevent VRAM overflow
     gradient_accumulation_steps: int = 1
     max_grad_norm: float = 1.0
     
@@ -165,8 +165,8 @@ class TrainingConfig:
     
     # Training loop
     num_epochs: int = 100
-    batch_size: int = 32
-    eval_batch_size: int = 64
+    batch_size: int = 16  # Reduced from 32 to prevent VRAM overflow
+    eval_batch_size: int = 16  # Reduced from 64 to prevent VRAM overflow
     num_workers: int = 8
     
     # Optimization

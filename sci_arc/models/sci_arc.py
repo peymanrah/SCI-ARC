@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from pydantic import BaseModel
 
 from sci_arc.models.grid_encoder import GridEncoder
@@ -276,6 +277,34 @@ class SCIARC(nn.Module):
         else:
             raise ValueError("Must provide either (input_grids, output_grids, test_input) or (demo_pairs, test_input, target_shape)")
     
+    def _encode_demo_pair(
+        self,
+        inp: torch.Tensor,  # [B, H, W]
+        out: torch.Tensor   # [B, H, W]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Encode a single demo pair. Extracted for gradient checkpointing.
+        
+        Returns:
+            structure_rep: [B, K, D]
+            content_rep: [B, M, D]
+            z_task_demo: [B, D]
+        """
+        # Encode grids
+        input_emb = self.grid_encoder(inp)   # [B, H, W, D]
+        output_emb = self.grid_encoder(out)  # [B, H, W, D]
+        
+        # Extract structure
+        structure_rep = self.structural_encoder(input_emb, output_emb)  # [B, K, D]
+        
+        # Extract content
+        content_rep = self.content_encoder(input_emb, structure_rep)  # [B, M, D]
+        
+        # Bind
+        z_task_demo = self.causal_binding(structure_rep, content_rep)  # [B, D]
+        
+        return structure_rep, content_rep, z_task_demo
+    
     def _forward_demo_pairs(
         self,
         demo_pairs: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -350,31 +379,35 @@ class SCIARC(nn.Module):
         # Get target shape from test_output
         target_shape = (test_output.size(1), test_output.size(2))
         
+        # Cap demo pairs to limit memory usage during backprop
+        # More pairs = larger computational graph = more VRAM for gradients
+        max_demo_pairs = 4
+        num_pairs_to_use = min(num_pairs, max_demo_pairs)
+        
         # Process demo pairs sequentially to minimize peak VRAM usage
-        # (Processing B*num_pairs at once causes VRAM overflow to shared memory)
+        # Use gradient checkpointing to trade compute for memory
         all_structure_reps = []
         all_content_reps = []
         all_z_tasks = []
         
-        for p in range(num_pairs):
+        for p in range(num_pairs_to_use):
             # Get pair p for all batches
             inp = input_grids[:, p, :, :]   # [B, H, W]
             out = output_grids[:, p, :, :]  # [B, H, W]
             
-            # Encode grids
-            input_emb = self.grid_encoder(inp)   # [B, H, W, D]
-            output_emb = self.grid_encoder(out)  # [B, H, W, D]
+            # Use gradient checkpointing during training to reduce memory
+            # This recomputes activations during backward instead of storing them
+            if self.training:
+                structure_rep, content_rep, z_task_demo = checkpoint(
+                    self._encode_demo_pair,
+                    inp, out,
+                    use_reentrant=False
+                )
+            else:
+                structure_rep, content_rep, z_task_demo = self._encode_demo_pair(inp, out)
             
-            # Extract structure
-            structure_rep = self.structural_encoder(input_emb, output_emb)  # [B, K, D]
             all_structure_reps.append(structure_rep)
-            
-            # Extract content
-            content_rep = self.content_encoder(input_emb, structure_rep)  # [B, M, D]
             all_content_reps.append(content_rep)
-            
-            # Bind
-            z_task_demo = self.causal_binding(structure_rep, content_rep)  # [B, D]
             all_z_tasks.append(z_task_demo)
         
         # Aggregate across demos

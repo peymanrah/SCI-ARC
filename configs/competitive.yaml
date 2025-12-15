@@ -54,9 +54,10 @@ training:
   grad_clip: 1.0
   grad_accumulation_steps: 2    # Effective batch = 32*2 = 64
   
-  # Batch size - memory optimized
-  batch_size: 32                # Fits in 24GB with AMP
-  eval_batch_size: 64
+  # Batch size - memory optimized for H_cycles=4, L_cycles=6
+  # Reduced to prevent VRAM overflow to shared GPU memory
+  batch_size: 16
+  eval_batch_size: 16
   
   # Loss weights - TUNED for SCI-ARC
   scl_weight: 0.15              # Slightly higher for structure learning

@@ -31,7 +31,7 @@ def count_parameters_by_component(model: nn.Module) -> Dict[str, int]:
 
 def estimate_memory_usage(
     model: nn.Module,
-    batch_size: int = 32,
+    batch_size: int = 16,  # Reduced from 32 to reflect safe default
     grid_size: int = 30,
     dtype: torch.dtype = torch.float32
 ) -> Dict[str, float]:

@@ -70,9 +70,9 @@ class TrainingConfig:
     grad_clip: float = 1.0
     grad_accumulation_steps: int = 1
     
-    # Batch size
-    batch_size: int = 32
-    eval_batch_size: int = 64
+    # Batch size (reduced from 32/64 to prevent VRAM overflow)
+    batch_size: int = 16
+    eval_batch_size: int = 16
     
     # Loss weights
     scl_weight: float = 0.1
@@ -254,6 +254,10 @@ class SCIARCTrainer:
         """Train for one epoch."""
         self.model.train()
         
+        # Accumulate losses as Python floats to avoid GPU memory buildup
+        # Note: .item() does cause a sync, but it's necessary to prevent
+        # GPU tensor accumulation which causes memory fragmentation and
+        # eventually spills to slow shared GPU memory (system RAM over PCIe)
         epoch_losses = {
             'total': 0.0,
             'task': 0.0,
@@ -331,17 +335,17 @@ class SCIARCTrainer:
                 if self.scheduler and self.global_step >= warmup_steps:
                     self.scheduler.step()
             
-            # Accumulate losses
+            # Accumulate losses as Python floats (prevents GPU memory fragmentation)
             for key in epoch_losses:
                 if key in losses:
                     epoch_losses[key] += losses[key].item()
             num_batches += 1
             self.global_step += 1
             
-            # Logging with timing - sync CUDA for accurate measurement
+            # Logging with timing - sync CUDA only when we log (intentional)
             if batch_idx % self.config.log_every == 0:
                 if torch.cuda.is_available():
-                    torch.cuda.synchronize()  # Ensure GPU work is complete
+                    torch.cuda.synchronize()  # Ensure GPU work is complete for accurate timing
                 batch_time = time.time() - batch_start_time
                 self._log_step(batch_idx, losses, batch_time, data_time, transfer_time, 
                               forward_time, backward_time)
@@ -355,7 +359,7 @@ class SCIARCTrainer:
         print(f"Epoch {self.current_epoch + 1} completed in {epoch_time:.1f}s "
               f"({epoch_time/num_batches:.2f}s/batch) | ETA: {eta_str}")
         
-        # Average losses
+        # Average losses (already Python floats)
         for key in epoch_losses:
             epoch_losses[key] /= max(num_batches, 1)
         
@@ -444,11 +448,13 @@ class SCIARCTrainer:
         # Show timing breakdown when batch is slow (>5s)
         if batch_time > 5.0:
             log_str += f"[{batch_time:.1f}s: fwd={forward_time:.1f}s bwd={backward_time:.1f}s data={data_time:.1f}s xfer={transfer_time:.1f}s other={other_time:.1f}s]"
-            # Add GPU info for slow batches
+            # Add GPU info for slow batches - use memory_reserved for accurate total
+            # memory_allocated = tensors only, memory_reserved = all CUDA allocations
             if torch.cuda.is_available():
-                mem_used = torch.cuda.memory_allocated() / 1024**3
+                mem_allocated = torch.cuda.memory_allocated() / 1024**3
+                mem_reserved = torch.cuda.memory_reserved() / 1024**3
                 mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                log_str += f" GPU:{mem_used:.1f}/{mem_total:.1f}GB"
+                log_str += f" GPU:{mem_reserved:.1f}/{mem_total:.1f}GB (alloc:{mem_allocated:.1f}GB)"
         else:
             log_str += f"[{batch_time:.2f}s]"
         
@@ -480,10 +486,10 @@ class SCIARCTrainer:
         total_tasks_correct = 0
         total_tasks = 0
         num_val_batches = len(self.val_loader)
+        val_start_time = time.time()
         
         for batch_idx, batch in enumerate(self.val_loader):
-            if batch_idx % 10 == 0:
-                print(f"  Validation batch {batch_idx + 1}/{num_val_batches}...", end='\r')
+            batch_start = time.time()
             batch = self._to_device(batch)
             
             # Use forward_training which accepts the batched format
@@ -516,6 +522,11 @@ class SCIARCTrainer:
             task_correct = (preds_flat == targets_flat).all(dim=1)  # [B] bool
             total_tasks_correct += task_correct.sum().item()
             total_tasks += B
+            
+            batch_time = time.time() - batch_start
+            print(f"  Validation batch {batch_idx + 1}/{num_val_batches} [{batch_time:.1f}s]", end='\r')
+        
+        val_time = time.time() - val_start_time
         
         metrics = {
             'val_loss': total_loss / len(self.val_loader),
@@ -523,7 +534,7 @@ class SCIARCTrainer:
             'task_accuracy': total_tasks_correct / total_tasks,
         }
         
-        print(f"\nValidation: Loss={metrics['val_loss']:.4f}, "
+        print(f"\nValidation complete in {val_time:.1f}s: Loss={metrics['val_loss']:.4f}, "
               f"Pixel Acc={metrics['pixel_accuracy']:.4f}, "
               f"Task Acc={metrics['task_accuracy']:.4f}")
         
@@ -630,6 +641,10 @@ class SCIARCTrainer:
             # Train
             train_losses = self.train_epoch()
             sys.stdout.flush()  # Flush after training
+            
+            # Clear CUDA cache to defragment memory before validation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
             # Validate
             if (epoch + 1) % self.config.eval_every == 0:

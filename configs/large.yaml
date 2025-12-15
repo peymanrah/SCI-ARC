@@ -36,8 +36,9 @@ training:
   grad_clip: 1.0
   grad_accumulation_steps: 2
   
-  batch_size: 16
-  eval_batch_size: 32
+  # Memory-safe batch sizes for large model
+  batch_size: 8
+  eval_batch_size: 16
   
   scl_weight: 0.15
   ortho_weight: 0.02

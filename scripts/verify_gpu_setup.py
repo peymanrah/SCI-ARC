@@ -141,11 +141,11 @@ def check_model_fits():
     print(f"   GPU Memory After Forward: {allocated_after_forward:.3f} GB")
     print(f"   Output Shape: {output['logits'].shape}")
     
-    # Test backward pass with larger batch
-    print("\n   Testing training pass (batch_size=32)...")
+    # Test backward pass with memory-safe batch size
+    print("\n   Testing training pass (batch_size=16)...")
     model.train()
     
-    batch_size = 32
+    batch_size = 16  # Reduced from 32 to prevent VRAM overflow
     demo_inputs = torch.randint(0, 10, (batch_size, num_demos, H, W), device=device)
     demo_outputs = torch.randint(0, 10, (batch_size, num_demos, H, W), device=device)
     test_input = torch.randint(0, 10, (batch_size, H, W), device=device)
