@@ -162,10 +162,7 @@ class StructuralContrastiveLoss(nn.Module):
         
         # Identify anchors that have at least one positive pair
         has_positives = pos_counts > 0  # [B]
-        
-        # Early exit if no positive pairs at all (fully vectorized check)
-        if not has_positives.any():
-            return torch.tensor(0.0, device=structure_reps.device)
+        num_valid_anchors = has_positives.float().sum()  # Scalar on GPU
         
         # Sum of losses for positive pairs per anchor
         # Mask non-positive pairs with 0, then sum
@@ -179,8 +176,10 @@ class StructuralContrastiveLoss(nn.Module):
             torch.zeros_like(pos_loss_sum)
         )
         
-        # Average only over anchors that have positive pairs
-        return per_anchor_loss[has_positives].mean()
+        # Average only over valid anchors (those with positive pairs)
+        # Use safe division to handle case with no valid anchors
+        total_loss = per_anchor_loss.sum()
+        return total_loss / num_valid_anchors.clamp(min=1)
 
 
 class OrthogonalityLoss(nn.Module):
@@ -301,20 +300,17 @@ class DeepSupervisionLoss(nn.Module):
             pred_flat = pred.reshape(-1, C)  # [B*H*W, C]
             target_flat = target.reshape(-1)  # [B*H*W]
             
-            # Compute valid mask
-            valid_mask = target_flat != self.ignore_index
+            # Use standard CE with ignore_index (avoids CPU-GPU sync from .any())
+            step_loss = F.cross_entropy(
+                pred_flat,
+                target_flat,
+                ignore_index=self.ignore_index,
+                reduction='mean'
+            )
             
-            if valid_mask.any():
-                # Compute CE only on valid positions
-                step_loss = F.cross_entropy(
-                    pred_flat[valid_mask],
-                    target_flat[valid_mask],
-                    reduction='mean'
-                )
-                
-                weight = self.step_weights[t]
-                total_loss = total_loss + weight * step_loss
-                total_weight = total_weight + weight
+            weight = self.step_weights[t]
+            total_loss = total_loss + weight * step_loss
+            total_weight = total_weight + weight
         
         # Normalize by total weight
         if total_weight > 0:
