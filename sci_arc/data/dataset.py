@@ -576,6 +576,8 @@ def create_dataloader(
         drop_last=True if shuffle else False,
         worker_init_fn=worker_init,
         generator=g,
+        prefetch_factor=4 if num_workers > 0 else None,  # Prefetch more batches
+        persistent_workers=True if num_workers > 0 else False,  # Keep workers alive
     )
     
     return loader
