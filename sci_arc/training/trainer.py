@@ -479,8 +479,11 @@ class SCIARCTrainer:
         total_pixels = 0
         total_tasks_correct = 0
         total_tasks = 0
+        num_val_batches = len(self.val_loader)
         
-        for batch in self.val_loader:
+        for batch_idx, batch in enumerate(self.val_loader):
+            if batch_idx % 10 == 0:
+                print(f"  Validation batch {batch_idx + 1}/{num_val_batches}...", end='\r')
             batch = self._to_device(batch)
             
             # Use forward_training which accepts the batched format
