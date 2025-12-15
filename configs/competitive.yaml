@@ -25,7 +25,7 @@ model:
   
   # Structural encoder - CRITICAL for ARC transformations
   num_structure_slots: 8        # 8 slots for transformation patterns
-  num_abstraction_layers: 3     # Depth of abstraction hierarchy
+  se_layers: 3                  # Transformer encoder layers (context_encoder)
   structure_heads: 8            # Attention heads for structure
   use_difference: false         # DISABLED: saves VRAM for larger batch size
                                 # Batch size 192 > Batch size 64 + difference

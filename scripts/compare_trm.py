@@ -51,15 +51,22 @@ def load_sci_arc_model(checkpoint_path: str, device: str = 'cuda') -> SCIARC:
         num_colors=config_dict.get('num_colors', 10),
         max_grid_size=config_dict.get('max_grid_size', 30),
         num_structure_slots=config_dict.get('num_structure_slots', 8),
-        num_abstraction_layers=config_dict.get('num_abstraction_layers', 3),
+        se_layers=config_dict.get('se_layers', config_dict.get('num_abstraction_layers', 2)),
+        use_abstraction=config_dict.get('use_abstraction', True),
         max_objects=config_dict.get('max_objects', 16),
-        H_cycles=config_dict.get('H_cycles', 3),
+        num_heads=config_dict.get('num_heads', 4),
+        dropout=config_dict.get('dropout', 0.1),
+        H_cycles=config_dict.get('H_cycles', 16),
         L_cycles=config_dict.get('L_cycles', 4),
         L_layers=config_dict.get('L_layers', 2),
+        latent_size=config_dict.get('latent_size', 64),
+        deep_supervision=config_dict.get('deep_supervision', True),
+        demo_aggregation=config_dict.get('demo_aggregation', 'attention'),
     )
     
     model = SCIARC(model_config)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Use strict=False to handle architecture variations in checkpoints
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model.to(device)
     model.eval()
     
