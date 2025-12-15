@@ -1,0 +1,150 @@
+# SCI-ARC COMPETITIVE Configuration
+# ===========================================================================
+# PURPOSE: MAXIMUM PERFORMANCE for beating TRM baseline in publication
+# Target: ARC-AGI-1 and ARC-AGI-2 benchmarks
+# Goal: Beat TRM's 45% task accuracy with statistical significance
+#
+# Hardware: NVIDIA RTX 3090 (24GB VRAM), CUDA 12.6
+# Training Time: ~36-48 hours
+# Expected Params: ~10-12M (competitive range, same order as TRM's 7M)
+# ===========================================================================
+
+# =============================================================================
+# MODEL ARCHITECTURE (OPTIMIZED FOR MAXIMUM ARC PERFORMANCE)
+# =============================================================================
+# TRM uses: hidden=256, H_cycles=3, L_cycles=4-6, ~7M params
+# We scale up slightly while staying in same order of magnitude
+
+model:
+  # Core dimensions - INCREASED for more capacity
+  hidden_dim: 384               # TRM uses 256; we use 384 for more capacity
+  num_colors: 10                # Fixed for ARC (0-9)
+  max_grid_size: 30             # Fixed for ARC (max 30x30)
+  
+  # Structural encoder - CRITICAL for ARC transformations
+  num_structure_slots: 12       # More slots = more transformation patterns
+  num_abstraction_layers: 4     # Deeper abstraction hierarchy
+  structure_heads: 12           # More heads = finer-grained attention
+  
+  # Content encoder - CRITICAL for object tracking
+  max_objects: 20               # ARC tasks can have many objects
+  content_heads: 12             # Match structure heads
+  
+  # Causal binding - CRITICAL for structure-content interaction
+  binding_heads: 12             # More heads for complex bindings
+  
+  # Recursive refinement (TRM-style) - KEY ARCHITECTURE
+  # TRM: H_cycles=3, L_cycles=4-6
+  H_cycles: 4                   # Slightly more outer cycles for harder tasks
+  L_cycles: 6                   # Match TRM's best L_cycles
+  L_layers: 3                   # More layers per L cycle
+  
+  # Regularization
+  dropout: 0.1                  # Standard dropout
+
+# =============================================================================
+# TRAINING (OPTIMIZED FOR CONVERGENCE AND GENERALIZATION)
+# =============================================================================
+training:
+  # Optimization - tuned for stability
+  learning_rate: 2.5e-4         # Slightly lower for larger model
+  weight_decay: 0.015           # Stronger regularization
+  max_epochs: 150               # More epochs for full convergence
+  warmup_epochs: 8              # Longer warmup for larger model
+  grad_clip: 1.0
+  grad_accumulation_steps: 2    # Effective batch = 32*2 = 64
+  
+  # Batch size - memory optimized
+  batch_size: 32                # Fits in 24GB with AMP
+  eval_batch_size: 64
+  
+  # Loss weights - TUNED for SCI-ARC
+  scl_weight: 0.15              # Slightly higher for structure learning
+  ortho_weight: 0.02            # Stronger orthogonality constraint
+  deep_supervision_weight: 0.5  # Keep intermediate supervision
+  
+  # Learning rate schedule
+  scheduler_type: cosine
+  min_lr: 1.0e-7                # Lower minimum for fine-grained convergence
+  
+  # Mixed precision - REQUIRED
+  use_amp: true
+  
+  # Curriculum learning - CRITICAL for ARC
+  use_curriculum: true
+  curriculum_stages:
+    - 15    # Stage 1: easy tasks (small grids, 3+ examples)
+    - 50    # Stage 2: medium tasks
+    - 100   # Stage 3: hard tasks (all data)
+
+# =============================================================================
+# DATA (MAXIMUM AUGMENTATION)
+# =============================================================================
+data:
+  arc_dir: ./data/arc-agi/data
+  rearc_dir: ./data/rearc       # INCLUDE RE-ARC for more training data
+  
+  num_workers: 8                # More workers for faster loading
+  pin_memory: true
+  
+  # ALL augmentations enabled - CRITICAL for generalization
+  augment: true
+  augment_rotation: true        # 8 dihedral transforms (D4 group)
+  augment_flip: true            # Included in dihedral
+  augment_color: true           # Color permutation (9! possibilities)
+  augment_translation: true     # Translational augmentation
+
+# =============================================================================
+# EVALUATION (MAXIMUM ACCURACY)
+# =============================================================================
+evaluation:
+  num_attempts: 2               # Official ARC allows 2 attempts
+  use_voting: true              # ENSEMBLE voting across augmentations
+  num_dihedral: 8               # All 8 dihedral transforms for voting
+  num_color_samples: 3          # Multiple color permutations for voting
+  temperature: 0.8              # Lower temp = more confident predictions
+  batch_size: 1
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+logging:
+  log_every: 10
+  eval_every: 1
+  save_every: 5
+  keep_last_n: 5
+  
+  use_wandb: true
+  wandb_project: sci-arc-competitive
+  wandb_run_name: null
+  
+  checkpoint_dir: ./checkpoints/competitive
+  output_dir: ./outputs/competitive
+
+# =============================================================================
+# HARDWARE
+# =============================================================================
+hardware:
+  device: cuda
+  seed: 42
+  deterministic: true           # For reproducibility
+
+# =============================================================================
+# NOTES FOR PUBLICATION
+# =============================================================================
+# Expected Results (based on architecture analysis):
+#   - Task Accuracy: Target 50%+ (vs TRM's 45%)
+#   - Pixel Accuracy: Target 85%+ 
+#   - Parameters: ~10-12M (1.5x TRM, still small)
+#   - Training Time: ~36-48 hours on RTX 3090
+#
+# Key Advantages over TRM:
+#   1. Explicit structure-content separation (z_struct, z_content)
+#   2. Structural Contrastive Loss (SCL) for transformation learning
+#   3. Causal Binding Module for relational reasoning
+#   4. More structure slots (12 vs implicit in TRM)
+#
+# If you want even more performance, consider:
+#   - Increase hidden_dim to 512 (but check memory)
+#   - Add more H_cycles (5) for harder tasks
+#   - Use Test-Time Training (TTT) on test examples

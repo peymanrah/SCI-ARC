@@ -1,5 +1,12 @@
 # SCI-ARC Large Model Configuration
-# ~15M parameters for best performance
+# ===========================================================================
+# PURPOSE: MAXIMUM CAPACITY exploration (research/ablation)
+# Use Case: Testing if more capacity helps, ablation studies
+# Caution: May overfit on small ARC training set
+#
+# Parameters: ~15M (2x TRM)
+# Training Time: ~48-72 hours
+# ===========================================================================
 
 model:
   hidden_dim: 384

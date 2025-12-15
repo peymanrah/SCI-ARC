@@ -1,5 +1,12 @@
 # SCI-ARC Small Model Configuration
-# ~3M parameters for quick experiments
+# ===========================================================================
+# PURPOSE: FAST EXPERIMENTS and debugging
+# Use Case: Testing code changes, quick prototyping, CI/CD
+# NOT for publication - ~30% lower accuracy expected
+#
+# Parameters: ~3M
+# Training Time: ~2-4 hours
+# ===========================================================================
 
 model:
   hidden_dim: 128

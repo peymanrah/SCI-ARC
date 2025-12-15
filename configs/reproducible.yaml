@@ -1,6 +1,13 @@
 # SCI-ARC Reproducible Configuration for Publication
-# Target: Nature / NeurIPS reproducibility standards
+# ===========================================================================
+# PURPOSE: REPRODUCIBILITY for paper submission (same as default but strict)
+# Use Case: When you need bit-exact reproduction for Nature/NeurIPS
+# Note: Same architecture as default.yaml, but with strict determinism
+#
+# For MAXIMUM PERFORMANCE, use competitive.yaml instead!
+#
 # Hardware: NVIDIA RTX 3090 (24GB VRAM), CUDA 12.6
+# ===========================================================================
 
 # =============================================================================
 # REPRODUCIBILITY SETTINGS (CRITICAL FOR PUBLICATION)

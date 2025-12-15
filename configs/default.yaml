@@ -1,13 +1,20 @@
 # SCI-ARC Default Configuration
-# Training configuration for Structural Causal Invariance model on ARC
-# Optimized for: NVIDIA RTX 3090 (24GB VRAM) with CUDA 12.6
+# ===========================================================================
+# PURPOSE: BALANCED config for development and reasonable performance
+# Use Case: Day-to-day training, debugging, testing
+# NOT optimized for publication - use competitive.yaml for that
+#
+# Hardware: NVIDIA RTX 3090 (24GB VRAM) with CUDA 12.6
+# Training Time: ~12-24 hours
+# Parameters: ~7.1M (matching TRM)
+# ===========================================================================
 
 # =============================================================================
 # MODEL ARCHITECTURE
 # =============================================================================
 model:
-  # Core dimensions (optimized for 24GB VRAM)
-  hidden_dim: 256
+  # Core dimensions (matching TRM's ~7M params)
+  hidden_dim: 256               # TRM uses 256
   num_colors: 10
   max_grid_size: 30
   
@@ -24,8 +31,8 @@ model:
   binding_heads: 8              # Attention heads for binding
   
   # Recursive refinement (TRM-style)
-  H_cycles: 3                   # Outer refinement cycles
-  L_cycles: 4                   # Inner refinement cycles
+  H_cycles: 3                   # Outer refinement cycles (TRM uses 3)
+  L_cycles: 4                   # Inner refinement cycles (TRM uses 4-6)
   L_layers: 2                   # Layers per L cycle
   
   # Output
