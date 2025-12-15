@@ -346,50 +346,42 @@ class SCIARC(nn.Module):
         """
         B = input_grids.size(0)
         num_pairs = input_grids.size(1)
+        H_in, W_in = input_grids.size(2), input_grids.size(3)
         
         # Get target shape from test_output
         target_shape = (test_output.size(1), test_output.size(2))
         
-        # Convert batched grids to demo pairs format
-        # For each sample in batch, create list of (input, output) pairs
-        # We need to process batch-first, so we iterate over pairs
+        # === BATCHED DEMO PROCESSING (optimized - single pass through encoders) ===
+        # Reshape: [B, num_pairs, H, W] -> [B * num_pairs, H, W]
+        inp_flat = input_grids.view(B * num_pairs, H_in, W_in)
+        out_flat = output_grids.view(B * num_pairs, H_in, W_in)
         
-        all_structure_reps = []
-        all_content_reps = []
-        all_z_tasks = []
+        # Encode all grids in one pass
+        input_emb = self.grid_encoder(inp_flat)   # [B*P, H, W, D]
+        output_emb = self.grid_encoder(out_flat)  # [B*P, H, W, D]
         
-        for p in range(num_pairs):
-            # Get pair p for all batches
-            inp = input_grids[:, p, :, :]   # [B, H, W]
-            out = output_grids[:, p, :, :]  # [B, H, W]
-            
-            # Apply mask if provided
-            if grid_mask is not None:
-                # Create a valid mask for this pair
-                valid = grid_mask[:, p]  # [B] boolean mask
-                # For simplicity, we still process all but could mask later
-            
-            # Encode grids
-            input_emb = self.grid_encoder(inp)   # [B, H, W, D]
-            output_emb = self.grid_encoder(out)  # [B, H, W, D]
-            
-            # Extract structure
-            structure_rep = self.structural_encoder(input_emb, output_emb)  # [B, K, D]
-            all_structure_reps.append(structure_rep)
-            
-            # Extract content
-            content_rep = self.content_encoder(input_emb, structure_rep)  # [B, M, D]
-            all_content_reps.append(content_rep)
-            
-            # Bind
-            z_task_demo = self.causal_binding(structure_rep, content_rep)  # [B, D]
-            all_z_tasks.append(z_task_demo)
+        # Extract structure for all pairs
+        structure_rep = self.structural_encoder(input_emb, output_emb)  # [B*P, K, D]
         
-        # Aggregate across demos
-        structure_agg = torch.stack(all_structure_reps, dim=1).mean(dim=1)  # [B, K, D]
-        content_agg = torch.stack(all_content_reps, dim=1).mean(dim=1)      # [B, M, D]
-        z_tasks_stacked = torch.stack(all_z_tasks, dim=1)  # [B, num_pairs, D]
-        z_task = self.demo_aggregator(z_tasks_stacked)      # [B, D]
+        # Extract content for all pairs
+        content_rep = self.content_encoder(input_emb, structure_rep)  # [B*P, M, D]
+        
+        # Bind structure to content for all pairs
+        z_task_all = self.causal_binding(structure_rep, content_rep)  # [B*P, D]
+        
+        # Reshape back: [B*P, ...] -> [B, P, ...]
+        K = structure_rep.size(1)
+        M = content_rep.size(1)
+        D = structure_rep.size(2)
+        
+        structure_rep = structure_rep.view(B, num_pairs, K, D)  # [B, P, K, D]
+        content_rep = content_rep.view(B, num_pairs, M, D)      # [B, P, M, D]
+        z_task_all = z_task_all.view(B, num_pairs, D)           # [B, P, D]
+        
+        # Aggregate across demos (mean over pairs dimension)
+        structure_agg = structure_rep.mean(dim=1)  # [B, K, D]
+        content_agg = content_rep.mean(dim=1)      # [B, M, D]
+        z_task = self.demo_aggregator(z_task_all)  # [B, D]
         
         # Encode test input
         test_emb = self.grid_encoder(test_input)  # [B, H, W, D]
