@@ -155,9 +155,10 @@ class AbstractionLayer2D(nn.Module):
         # The residual_gate ensures information flows through even when scores are low
         abstracted = x * scores + x * self.residual_gate * (1 - scores)
         
-        # Skip LayerNorm to preserve diversity - use simple scaling instead
-        # LayerNorm was causing representation collapse by normalizing away differences
-        return abstracted * (1.0 / abstracted.std(dim=-1, keepdim=True).clamp(min=1e-6))
+        # NO NORMALIZATION HERE - it was causing representation collapse!
+        # LayerNorm and per-sample std normalization both collapse representations
+        # because they normalize away the differences between samples.
+        return abstracted
     
     def get_structural_scores(self, x: torch.Tensor) -> torch.Tensor:
         """Get structuralness scores for visualization/analysis."""
@@ -330,9 +331,10 @@ class StructuralEncoder2D(nn.Module):
             value=context_encoded
         )
         
-        # Project and normalize
+        # Project output (NO LayerNorm - it collapses sample differences!)
         structure_slots = self.output_proj(structure_slots)
-        structure_slots = self.output_norm(structure_slots)
+        # NOTE: Removed output_norm LayerNorm as it was causing representation collapse
+        # by normalizing away the differences between samples
         
         return structure_slots
     
