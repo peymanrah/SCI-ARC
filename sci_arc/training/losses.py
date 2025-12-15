@@ -97,7 +97,7 @@ class StructuralContrastiveLoss(nn.Module):
     
     def __init__(
         self, 
-        temperature: float = 0.07,
+        temperature: float = 0.5,  # Higher temp for high-similarity regime (was 0.07)
         normalize: bool = True,
         hidden_dim: int = 256,
         projection_dim: int = 128,
