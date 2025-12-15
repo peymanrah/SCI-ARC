@@ -54,7 +54,7 @@ SCI-ARC addresses a key limitation in current neural approaches to abstract reas
 ### Key Features
 
 - **Structure-Content Separation**: Explicit encoders for structural patterns vs. content information
-- **Structural Contrastive Learning (SCL)**: Learn invariant structural representations across tasks with same transformation type
+- **Structural Contrastive Learning (SCL)**: Learn invariant structural representations across tasks with same transformation type. Uses a SimCLR-style projection head to prevent representation collapse.
 - **Orthogonality Constraint**: Ensure structure and content representations are independent
 - **Causal Binding**: Combine structure and content while preserving causal relationships
 - **TRM-Style Recursive Refinement**: Iterative answer refinement with deep supervision
@@ -186,6 +186,7 @@ training:
   batch_size: 32
   scl_weight: 0.1        # Structural contrastive loss weight
   ortho_weight: 0.01     # Orthogonality loss weight
+  projection_dim: 128    # SCL projection head dimension (prevents representation collapse)
 ```
 
 ## Data

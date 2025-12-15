@@ -887,19 +887,39 @@ class SCIARC(nn.Module):
 ```python
 class StructuralContrastiveLoss(nn.Module):
     """
-    SCL adapted for ARC grids.
+    SCL adapted for ARC grids with projection head to prevent representation collapse.
     
     IDENTICAL to SCI's SCL in principle:
     - Positive pairs: Same transformation rule, different grids
     - Negative pairs: Different transformation rules
     - Objective: Pull together, push apart
     
+    KEY FIX: Uses a projection head (SimCLR-style) to prevent representation collapse.
+    Without the projection head, the structural encoder tends to produce identical
+    embeddings for all inputs (similarity ~1.0), causing SCL loss to be constant
+    at log(batch_size). The projection head breaks this symmetry and allows the
+    encoder to learn diverse, discriminative representations.
+    
     This is what makes SCI novel and should transfer directly.
     """
     
-    def __init__(self, temperature: float = 0.07):
+    def __init__(
+        self, 
+        temperature: float = 0.07,
+        hidden_dim: int = 256,
+        projection_dim: int = 128
+    ):
         super().__init__()
         self.temperature = temperature
+        
+        # Projection head (SimCLR-style) to prevent representation collapse
+        # The encoder learns general representations, the projector maps them
+        # to a space where contrastive learning works better
+        self.projector = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, projection_dim)
+        )
         
     def forward(
         self,
@@ -918,6 +938,11 @@ class StructuralContrastiveLoss(nn.Module):
         
         # Pool structure slots
         z = structure_reps.mean(dim=1)  # [B, D]
+        
+        # Apply projection head (critical for preventing collapse)
+        z = self.projector(z)  # [B, projection_dim]
+        
+        # Normalize
         z = F.normalize(z, dim=-1)
         
         # Compute similarity matrix
@@ -931,22 +956,21 @@ class StructuralContrastiveLoss(nn.Module):
         pos_mask = transform_labels.unsqueeze(0) == transform_labels.unsqueeze(1)
         pos_mask = pos_mask & ~mask
         
-        # InfoNCE loss
-        loss = 0.0
-        count = 0
+        # InfoNCE loss (vectorized for efficiency)
+        log_sum_exp = torch.logsumexp(sim, dim=1)
+        loss_matrix = -sim + log_sum_exp.unsqueeze(1)
         
-        for i in range(B):
-            if pos_mask[i].any():
-                pos_sim = sim[i, pos_mask[i]]
-                
-                # Log-sum-exp over all (for denominator)
-                all_sim = sim[i, ~mask[i]]
-                
-                # InfoNCE: -log(exp(pos) / sum(exp(all)))
-                loss += -pos_sim.mean() + torch.logsumexp(all_sim, dim=0)
-                count += 1
+        pos_counts = pos_mask.float().sum(dim=1)
+        has_positives = pos_counts > 0
         
-        return loss / max(count, 1)
+        pos_loss_sum = (loss_matrix * pos_mask.float()).sum(dim=1)
+        per_anchor_loss = torch.where(
+            has_positives,
+            pos_loss_sum / pos_counts.clamp(min=1),
+            torch.zeros_like(pos_loss_sum)
+        )
+        
+        return per_anchor_loss.sum() / has_positives.float().sum().clamp(min=1)
 
 
 class SCIARCLoss(nn.Module):

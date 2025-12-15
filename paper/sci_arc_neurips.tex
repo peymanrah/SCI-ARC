@@ -265,12 +265,18 @@ The primary objective is cross-entropy over output grid pixels:
 
 \subsubsection{Structural Contrastive Loss}
 
-We introduce Structural Contrastive Loss (SCL) to encourage tasks with the same transformation type to cluster together:
+We introduce Structural Contrastive Loss (SCL) to encourage tasks with the same transformation type to cluster together. To prevent \textbf{representation collapse}---a common failure mode where the encoder produces identical embeddings for all inputs---we employ a projection head following the SimCLR methodology \cite{chen2020simple}:
+
 \begin{equation}
-    \mathcal{L}_{SCL} = -\log \frac{\exp(z_S^i \cdot z_S^j / \tau)}{\sum_{k \neq i} \exp(z_S^i \cdot z_S^k / \tau)}
+    z'_S = \text{MLP}(z_S) = W_2 \cdot \text{ReLU}(W_1 \cdot z_S)
 \end{equation}
 
-where $j$ is a task with the same transformation family as $i$, and $\tau$ is the temperature.
+The contrastive loss is computed on the projected representations:
+\begin{equation}
+    \mathcal{L}_{SCL} = -\log \frac{\exp(z'^i_S \cdot z'^j_S / \tau)}{\sum_{k \neq i} \exp(z'^i_S \cdot z'^k_S / \tau)}
+\end{equation}
+
+where $j$ is a task with the same transformation family as $i$, and $\tau$ is the temperature. The projection head is critical: without it, the structural encoder tends to collapse all representations to the same point, resulting in a constant SCL loss of $\log(B)$ where $B$ is the batch size.
 
 \subsubsection{Orthogonality Loss}
 

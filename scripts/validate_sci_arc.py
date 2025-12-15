@@ -296,12 +296,12 @@ def test_loss_function():
         from sci_arc.training.losses import SCIARCLoss
         
         config = SCIARCConfig(hidden_dim=64)
-        loss_fn = SCIARCLoss(H_cycles=config.H_cycles)
+        hidden_dim = config.hidden_dim
+        loss_fn = SCIARCLoss(H_cycles=config.H_cycles, hidden_dim=hidden_dim)
         
         batch_size = 2
         h, w = 5, 5
         num_colors = 10
-        hidden_dim = 64
         
         # Create dummy inputs
         logits = torch.randn(batch_size, h, w, num_colors)
