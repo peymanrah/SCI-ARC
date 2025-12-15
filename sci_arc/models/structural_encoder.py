@@ -194,7 +194,7 @@ class StructuralEncoder2D(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.1,
         use_abstraction: bool = True,
-        use_difference: bool = True  # NEW: Add explicit difference channel
+        use_difference: bool = False  # DISABLED by default - causes OOM with large grids
     ):
         """
         Args:
@@ -205,6 +205,8 @@ class StructuralEncoder2D(nn.Module):
             dropout: Dropout probability
             use_abstraction: Whether to use AbstractionLayer2D
             use_difference: Whether to add explicit (output - input) difference embedding
+                           NOTE: Disabled by default as it triples sequence length
+                           and causes OOM on 24GB GPUs with batch_size=192
         """
         super().__init__()
         
