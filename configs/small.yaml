@@ -50,7 +50,8 @@ training:
   use_curriculum: false         # Faster training without curriculum
 
 data:
-  arc_dir: ./data/arc-agi
+  # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
+  arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: null
   num_workers: 4
   pin_memory: true
@@ -66,6 +67,7 @@ logging:
   eval_every: 2
   save_every: 10
   keep_last_n: 2
+  log_to_file: true             # Save all terminal output to log file
   use_wandb: true
   wandb_project: sci-arc-small
   checkpoint_dir: ./checkpoints/small

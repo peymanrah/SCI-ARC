@@ -81,7 +81,8 @@ training:
 # DATA (MAXIMUM AUGMENTATION)
 # =============================================================================
 data:
-  arc_dir: ./data/arc-agi/data
+  # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
+  arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: ./data/rearc       # INCLUDE RE-ARC for more training data
   
   num_workers: 8                # More workers for faster loading
@@ -113,6 +114,9 @@ logging:
   eval_every: 1
   save_every: 5
   keep_last_n: 5
+  
+  # File logging (for reproducibility and debugging)
+  log_to_file: true             # Save all terminal output to log file
   
   use_wandb: true
   wandb_project: sci-arc-competitive

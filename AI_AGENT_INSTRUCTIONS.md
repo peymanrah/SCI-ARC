@@ -169,52 +169,50 @@ Task Accuracy (%) on ARC-AGI Evaluation Set
 ## STEP 1: ENVIRONMENT SETUP
 
 ### 1.1 Clone Repository
-```bash
-cd /home/user/projects  # or your preferred directory
+```powershell
+# PRODUCTION ENVIRONMENT: D:\SCI-ARC on Windows 10
+cd D:\
 git clone https://github.com/peymanrah/SCI-ARC.git
 cd SCI-ARC
 ```
 
 ### 1.2 Verify Repository
-```bash
+```powershell
 git log --oneline -5
 # Should show recent commits
 ```
 
 ### 1.3 Create Virtual Environment
-```bash
+```powershell
 # Create venv with Python 3.10 (recommended for reproducibility)
-python3.10 -m venv .venv
+python -m venv .venv
 
-# Activate (Linux/Mac)
-source .venv/bin/activate
-
-# Activate (Windows)
-# .venv\Scripts\activate
+# Activate (Windows - PRODUCTION)
+.\.venv\Scripts\activate
 ```
 
 ### 1.4 Install PyTorch with CUDA 12.6
-```bash
+```powershell
 # CRITICAL: Install PyTorch with CUDA 12.6 support
 pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu126
 ```
 
 ### 1.5 Install Other Dependencies
-```bash
+```powershell
 pip install -r requirements.txt
 pip install -e .
 ```
 
 ### 1.6 Verify Installation
-```bash
+```powershell
 # Verify GPU setup
-python scripts/verify_gpu_setup.py
+.\.venv\Scripts\python.exe scripts/verify_gpu_setup.py
 
 # Verify SCI-ARC (8/8 tests should pass)
-python scripts/validate_sci_arc.py
+.\.venv\Scripts\python.exe scripts/validate_sci_arc.py
 
 # Verify TRM best practices (27/27 tests should pass)
-python scripts/validate_trm_practices.py
+.\.venv\Scripts\python.exe scripts/validate_trm_practices.py
 ```
 
 **Expected Output:**
@@ -232,8 +230,8 @@ ALL TRM BEST PRACTICES CORRECTLY IMPLEMENTED!
 ## STEP 2: DATA SETUP
 
 ### 2.1 Download ARC-AGI Dataset
-```bash
-mkdir -p data
+```powershell
+mkdir data
 cd data
 
 # Download ARC-AGI-1 (training + evaluation)
@@ -243,13 +241,15 @@ cd ..
 ```
 
 ### 2.2 Verify Data Structure
-```bash
-ls -la data/arc-agi/data/
-# Should contain: training/, evaluation/
+```powershell
+# Data structure should be:
+# D:\SCI-ARC\data\arc-agi\data\training\
+# D:\SCI-ARC\data\arc-agi\data\evaluation\
+dir data\arc-agi\data\
 ```
 
 ### 2.3 Download RE-ARC (Required for Competitive Config)
-```bash
+```powershell
 # RE-ARC provides synthetic augmented data
 cd data
 git clone https://github.com/michaelhodel/re-arc.git rearc
@@ -278,43 +278,41 @@ Repository Structure:
 ```
 
 ### 3.0 Verify TRM is Unmodified (CRITICAL FOR FAIRNESS)
-```bash
+```powershell
 # The original TRM code is in TinyRecursiveModels-main/
 # It is UNMODIFIED from https://github.com/SamsungSAILMontreal/TinyRecursiveModels
 
 # To verify, you can compare with a fresh download:
 git clone https://github.com/SamsungSAILMontreal/TinyRecursiveModels.git TRM_fresh
-diff -r TinyRecursiveModels-main/models/ TRM_fresh/models/
-# Should show NO differences
-
+# Compare manually or with diff tools
 # Clean up
-rm -rf TRM_fresh
+Remove-Item -Recurse -Force TRM_fresh
 ```
 
 ### 3.1 Train TRM Baseline
-```bash
-python scripts/train_trm_baseline.py \
-    --config configs/trm_baseline.yaml \
-    --data ./data/arc-agi/data \
-    --output-dir ./checkpoints/trm_baseline \
+```powershell
+.\.venv\Scripts\python.exe -u scripts/train_trm_baseline.py `
+    --config configs/trm_baseline.yaml `
+    --data ./data/arc-agi/data `
+    --output-dir ./checkpoints/trm_baseline `
     --seed 42
 ```
 
 ### 3.2 Evaluate TRM Baseline
-```bash
-python scripts/evaluate.py \
-    --checkpoint checkpoints/trm_baseline/best_model.pt \
-    --model-type trm \
-    --data ./data/arc-agi/data/evaluation \
-    --output ./results/trm_baseline_eval.json \
-    --use-voting \
+```powershell
+.\.venv\Scripts\python.exe -u scripts/evaluate.py `
+    --checkpoint checkpoints/trm_baseline/best_model.pt `
+    --model-type trm `
+    --data ./data/arc-agi/data/evaluation `
+    --output ./results/trm_baseline_eval `
+    --detailed-output `
     --num-attempts 2
 ```
 
 ### 3.3 Record TRM Results
-```bash
+```powershell
 # Expected: ~45% task accuracy (as reported in TRM paper)
-cat ./results/trm_baseline_eval.json
+Get-Content ./results/trm_baseline_eval/metrics.json
 ```
 
 ---
@@ -327,31 +325,35 @@ This isolates the impact of SCI-ARC's architecture (Structure-Content separation
 Causal Binding, SCL loss) without confounding from additional parameters.
 
 ### 4.1 Train SCI-ARC Default
-```bash
-python scripts/train.py \
-    --config configs/default.yaml \
-    data.arc_dir=./data/arc-agi/data \
-    logging.checkpoint_dir=./checkpoints/sci_arc_default \
-    logging.wandb_run_name=sci-arc-default-7M-seed42 \
+```powershell
+# PRODUCTION TRAINING COMMAND (Windows)
+# Terminal logs are saved automatically to checkpoints/training_log_*.txt
+.\.venv\Scripts\python.exe -u scripts/train.py `
+    --config configs/default.yaml `
+    logging.use_wandb=false `
+    logging.log_every=1 `
+    logging.checkpoint_dir=./checkpoints/sci_arc_default `
     hardware.seed=42
 ```
 
 ### 4.2 Evaluate SCI-ARC Default
-```bash
-python scripts/evaluate.py \
-    --checkpoint checkpoints/sci_arc_default/best_model.pt \
-    --data ./data/arc-agi/data/evaluation \
-    --output ./results/sci_arc_default_eval.json \
-    --use-voting \
+```powershell
+# PRODUCTION EVALUATION COMMAND (Windows)
+# --detailed-output saves prediction vs reference for each task
+.\.venv\Scripts\python.exe -u scripts/evaluate.py `
+    --checkpoint checkpoints/sci_arc_default/best_model.pt `
+    --data ./data/arc-agi/data/evaluation `
+    --output ./results/sci_arc_default_eval `
+    --detailed-output `
     --num-attempts 2
 ```
 
 ### 4.3 Compare Default SCI-ARC vs TRM (Fair Comparison)
-```bash
-python scripts/compare_trm.py \
-    --sci-arc-checkpoint checkpoints/sci_arc_default/best_model.pt \
-    --trm-checkpoint checkpoints/trm_baseline/best_model.pt \
-    --data ./data/arc-agi/data/evaluation \
+```powershell
+.\.venv\Scripts\python.exe -u scripts/compare_trm.py `
+    --sci-arc-checkpoint checkpoints/sci_arc_default/best_model.pt `
+    --trm-checkpoint checkpoints/trm_baseline/best_model.pt `
+    --data ./data/arc-agi/data/evaluation `
     --output ./results/fair_comparison.json
 ```
 
@@ -367,33 +369,35 @@ python scripts/compare_trm.py \
 **This uses ~10-12M parameters for maximum ARC performance.**
 
 ### 5.1 Train SCI-ARC Competitive
-```bash
-python scripts/train.py \
-    --config configs/competitive.yaml \
-    data.arc_dir=./data/arc-agi/data \
-    data.rearc_dir=./data/rearc \
-    logging.checkpoint_dir=./checkpoints/sci_arc_competitive \
-    logging.wandb_run_name=sci-arc-competitive-12M-seed42 \
+```powershell
+# PRODUCTION TRAINING COMMAND (Windows)
+# Terminal logs are saved automatically to checkpoints/competitive/training_log_*.txt
+.\.venv\Scripts\python.exe -u scripts/train.py `
+    --config configs/competitive.yaml `
+    logging.use_wandb=false `
+    logging.log_every=1 `
     hardware.seed=42
 ```
 
 ### 5.2 Evaluate SCI-ARC Competitive
-```bash
-python scripts/evaluate.py \
-    --checkpoint checkpoints/sci_arc_competitive/best_model.pt \
-    --data ./data/arc-agi/data/evaluation \
-    --output ./results/sci_arc_competitive_eval.json \
-    --use-voting \
+```powershell
+# PRODUCTION EVALUATION COMMAND (Windows)
+# --detailed-output saves prediction vs reference for each task
+.\.venv\Scripts\python.exe -u scripts/evaluate.py `
+    --checkpoint checkpoints/competitive/best_model.pt `
+    --data ./data/arc-agi/data/evaluation `
+    --output ./results/sci_arc_competitive_eval `
+    --detailed-output `
     --num-attempts 2
 ```
 
 ### 5.3 Full Three-Way Comparison
-```bash
-python scripts/compare_trm.py \
-    --sci-arc-checkpoint checkpoints/sci_arc_competitive/best_model.pt \
-    --sci-arc-default-checkpoint checkpoints/sci_arc_default/best_model.pt \
-    --trm-checkpoint checkpoints/trm_baseline/best_model.pt \
-    --data ./data/arc-agi/data/evaluation \
+```powershell
+.\.venv\Scripts\python.exe -u scripts/compare_trm.py `
+    --sci-arc-checkpoint checkpoints/competitive/best_model.pt `
+    --sci-arc-default-checkpoint checkpoints/sci_arc_default/best_model.pt `
+    --trm-checkpoint checkpoints/trm_baseline/best_model.pt `
+    --data ./data/arc-agi/data/evaluation `
     --output ./results/full_comparison.json
 ```
 
@@ -408,16 +412,22 @@ python scripts/compare_trm.py \
 ## STEP 6: REPRODUCIBILITY VERIFICATION
 
 ### 6.1 Run Deterministic Test
-```bash
+```powershell
 # Train twice with same seed - results should be identical
-python scripts/train.py --config configs/default.yaml hardware.seed=42 \
-    logging.checkpoint_dir=./checkpoints/repro_run1
+.\.venv\Scripts\python.exe -u scripts/train.py --config configs/default.yaml `
+    hardware.seed=42 `
+    logging.checkpoint_dir=./checkpoints/repro_run1 `
+    logging.use_wandb=false `
+    training.max_epochs=10
 
-python scripts/train.py --config configs/default.yaml hardware.seed=42 \
-    logging.checkpoint_dir=./checkpoints/repro_run2
+.\.venv\Scripts\python.exe -u scripts/train.py --config configs/default.yaml `
+    hardware.seed=42 `
+    logging.checkpoint_dir=./checkpoints/repro_run2 `
+    logging.use_wandb=false `
+    training.max_epochs=10
 
 # Compare checkpoints (should be identical)
-python -c "
+.\.venv\Scripts\python.exe -c @"
 import torch
 m1 = torch.load('checkpoints/repro_run1/checkpoint_epoch_10.pt')
 m2 = torch.load('checkpoints/repro_run2/checkpoint_epoch_10.pt')
@@ -427,12 +437,12 @@ for k in m1['model_state_dict']:
         break
 else:
     print('REPRODUCIBILITY VERIFIED: All weights match!')
-"
+"@
 ```
 
 ### 6.2 Log Software Versions
-```bash
-python -c "
+```powershell
+.\.venv\Scripts\python.exe -c @"
 import torch
 import numpy as np
 import sys
@@ -444,7 +454,7 @@ print(f'CUDA: {torch.version.cuda}')
 print(f'cuDNN: {torch.backends.cudnn.version()}')
 print(f'NumPy: {np.__version__}')
 print(f'GPU: {torch.cuda.get_device_name(0)}')
-"
+"@
 ```
 
 ---
@@ -452,12 +462,12 @@ print(f'GPU: {torch.cuda.get_device_name(0)}')
 ## STEP 7: GENERATE PUBLICATION RESULTS
 
 ### 7.1 Generate All Metrics
-```bash
-python scripts/generate_publication_results.py \
-    --sci-arc-checkpoint checkpoints/sci_arc_competitive/best_model.pt \
-    --sci-arc-default-checkpoint checkpoints/sci_arc_default/best_model.pt \
-    --trm-checkpoint checkpoints/trm_baseline/best_model.pt \
-    --data ./data/arc-agi/data \
+```powershell
+.\.venv\Scripts\python.exe -u scripts/generate_publication_results.py `
+    --sci-arc-checkpoint checkpoints/competitive/best_model.pt `
+    --sci-arc-default-checkpoint checkpoints/sci_arc_default/best_model.pt `
+    --trm-checkpoint checkpoints/trm_baseline/best_model.pt `
+    --data ./data/arc-agi/data `
     --output ./results/publication/
 ```
 
@@ -517,12 +527,13 @@ python scripts/generate_publication_results.py \
 
 | Path | Purpose |
 |------|---------|
+| `D:\SCI-ARC\` | Project root (PRODUCTION) |
 | `./data/arc-agi/data/training/` | Training data |
 | `./data/arc-agi/data/evaluation/` | Evaluation data |
 | `./data/rearc/` | RE-ARC synthetic data |
 | `./checkpoints/trm_baseline/` | TRM baseline models |
 | `./checkpoints/sci_arc_default/` | SCI-ARC default models |
-| `./checkpoints/sci_arc_competitive/` | SCI-ARC competitive models |
+| `./checkpoints/competitive/` | SCI-ARC competitive models |
 | `./results/` | Evaluation results |
 
 ---
@@ -530,20 +541,23 @@ python scripts/generate_publication_results.py \
 ## TROUBLESHOOTING
 
 ### Out of Memory (OOM)
-```bash
+```powershell
 # For competitive config, reduce batch size
-python scripts/train.py --config configs/competitive.yaml training.batch_size=16
+.\.venv\Scripts\python.exe -u scripts/train.py --config configs/competitive.yaml `
+    training.batch_size=16 `
+    logging.use_wandb=false
 
 # Or increase gradient accumulation
-python scripts/train.py --config configs/competitive.yaml \
-    training.batch_size=16 \
-    training.grad_accumulation_steps=4
+.\.venv\Scripts\python.exe -u scripts/train.py --config configs/competitive.yaml `
+    training.batch_size=16 `
+    training.grad_accumulation_steps=4 `
+    logging.use_wandb=false
 ```
 
 ### CUDA Not Available
-```bash
+```powershell
 # Verify CUDA installation
-python -c "import torch; print(torch.cuda.is_available())"
+.\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"
 
 # Reinstall PyTorch with CUDA
 pip uninstall torch torchvision
@@ -551,18 +565,19 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 ```
 
 ### Reproducibility Issues
-```bash
+```powershell
 # Ensure deterministic mode
-python scripts/train.py --config configs/default.yaml \
-    hardware.deterministic=true \
-    hardware.seed=42
+.\.venv\Scripts\python.exe -u scripts/train.py --config configs/default.yaml `
+    hardware.deterministic=true `
+    hardware.seed=42 `
+    logging.use_wandb=false
 
 # Check cuDNN settings
-python -c "
+.\.venv\Scripts\python.exe -c @"
 import torch
 print(f'cuDNN deterministic: {torch.backends.cudnn.deterministic}')
 print(f'cuDNN benchmark: {torch.backends.cudnn.benchmark}')
-"
+"@
 ```
 
 ### Debugging: Training Logs and Prediction Outputs
@@ -583,20 +598,23 @@ checkpoints/
 - Timestamps are included for performance analysis
 
 **Disable file logging (not recommended):**
-```bash
-python scripts/train.py --config configs/default.yaml logging.log_to_file=false
+```powershell
+.\.venv\Scripts\python.exe -u scripts/train.py --config configs/default.yaml `
+    logging.log_to_file=false `
+    logging.use_wandb=false
 ```
 
 ### Debugging: Detailed Evaluation Output
 
 To debug model predictions, use the `--detailed-output` flag during evaluation:
 
-```bash
-python scripts/evaluate.py \
-    --checkpoint checkpoints/best_model.pt \
-    --data ./data/arc-agi/data/evaluation \
-    --output ./evaluation_results \
-    --detailed-output
+```powershell
+.\.venv\Scripts\python.exe -u scripts/evaluate.py `
+    --checkpoint checkpoints/sci_arc_default/best_model.pt `
+    --data ./data/arc-agi/data/evaluation `
+    --output ./evaluation_results `
+    --detailed-output `
+    --num-attempts 2
 ```
 
 This creates detailed prediction files:

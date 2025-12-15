@@ -54,7 +54,8 @@ training:
     - 100
 
 data:
-  arc_dir: ./data/arc-agi
+  # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
+  arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: ./data/rearc       # Include synthetic data
   num_workers: 8
   pin_memory: true
@@ -70,6 +71,7 @@ logging:
   eval_every: 1
   save_every: 5
   keep_last_n: 5
+  log_to_file: true             # Save all terminal output to log file
   use_wandb: true
   wandb_project: sci-arc-large
   checkpoint_dir: ./checkpoints/large

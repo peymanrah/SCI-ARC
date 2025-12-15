@@ -78,8 +78,8 @@ training:
 # DATA
 # =============================================================================
 data:
-  # Dataset paths
-  arc_dir: ./data/arc-agi      # Path to ARC-AGI data
+  # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
+  arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: null               # Optional: path to RE-ARC
   
   # Data loading
