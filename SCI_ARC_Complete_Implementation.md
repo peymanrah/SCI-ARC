@@ -12,14 +12,30 @@
 > **IMPORTANT**: The original SCL implementation suffered from representation collapse
 > (constant loss at ~5.25). The following fixes were applied:
 
+### Phase 1: Initial Fixes (Representation Diversity)
+
 | Fix | Component | Problem | Solution |
 |-----|-----------|---------|----------|
 | **#1** | `PositionalEncoding2D` | Transformer blind to geometry | Learnable (x,y) position embeddings |
 | **#2** | `structure_queries` | Slots initialized too small (0.002) | Full-scale orthogonal init (1.0) |
 | **#3** | `StructuralContrastiveLoss` | Mean pooling kills variance | **Flatten** slots instead of pool |
 | **#4** | `temperature` | Fixed at 0.07 | **Learnable** parameter |
+| **#5** | `AbstractionLayer2D` | Per-sample std normalization | Removed (was collapsing outputs) |
+| **#6** | `output_norm` | LayerNorm after cross-attention | Removed (was collapsing samples) |
 
-**Result**: SCL loss now decreases properly; embeddings are diverse (similarity ~0.0 vs ~1.0 before).
+### Phase 2: Background Signal Removal (December 2024)
+
+After Phase 1, encoder produced diverse outputs but **all similarities remained ~0.95**.  
+Root cause: ARC grids are 90% background → embeddings share a massive "common signal".
+
+| Fix | Component | Problem | Solution |
+|-----|-----------|---------|----------|
+| **#7** | `BatchNorm1d` | Common background signal | Centers batch by subtracting mean vector |
+| **#8** | `Difference Embedding` | Model must learn (output - input) | Explicit `diff_emb = output - input` channel |
+| **#9** | `temperature` | 0.07 too low for high similarity | Increased to **0.5** (higher temp = better gradients) |
+| **#10** | `scl_weight` | 0.1 too weak vs task loss | Increased to **1.0** |
+
+**Result**: Post-BatchNorm similarity drops from ~0.95 to near 0. SCL loss now decreases.
 
 See [Section 7: Structural Contrastive Loss](#7-structural-contrastive-loss-scl---fixed-architecture) for detailed diagrams.
 
@@ -445,7 +461,17 @@ class StructuralEncoder2D(nn.Module):
         
         # === OUTPUT PROJECTION ===
         self.output_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.output_norm = nn.LayerNorm(hidden_dim)
+        # NOTE: No LayerNorm here - it was causing representation collapse
+        
+        # === DIFFERENCE PROJECTION (NEW - Phase 2) ===
+        # Explicit (output - input) embedding for change detection
+        self.use_difference = True
+        self.io_embed = nn.Embedding(3, hidden_dim)  # 0=input, 1=output, 2=diff
+        self.diff_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
         
     def forward(
         self,
@@ -460,6 +486,8 @@ class StructuralEncoder2D(nn.Module):
         """
         B = input_emb.size(0)
         D = self.hidden_dim
+        H_in, W_in = input_emb.shape[1], input_emb.shape[2]
+        H_out, W_out = output_emb.shape[1], output_emb.shape[2]
         
         # ★ Add 2D positional encodings BEFORE flattening
         # This gives each cell a unique spatial address (x, y)
@@ -470,15 +498,34 @@ class StructuralEncoder2D(nn.Module):
         input_flat = input_pos.view(B, -1, D)   # [B, H*W, D]
         output_flat = output_pos.view(B, -1, D) # [B, H*W, D]
         
+        # Add input/output type indicators
+        input_flat = input_flat + self.io_embed.weight[0]
+        output_flat = output_flat + self.io_embed.weight[1]
+        
+        # ★ FIX #8: EXPLICIT DIFFERENCE EMBEDDING
+        # Compute (output - input) to highlight WHERE changes happened
+        if self.use_difference:
+            H_min, W_min = min(H_in, H_out), min(W_in, W_out)
+            diff_emb = output_emb[:, :H_min, :W_min, :] - input_emb[:, :H_min, :W_min, :]
+            diff_pos = self.pos_encoder(diff_emb)
+            diff_flat = diff_pos.view(B, -1, D)
+            diff_flat = self.diff_proj(diff_flat)
+            diff_flat = diff_flat + self.io_embed.weight[2]
+        
         # Apply AbstractionLayer to suppress content
         input_abs = self.abstraction_layer(input_flat)
         output_abs = self.abstraction_layer(output_flat)
+        if self.use_difference:
+            diff_abs = self.abstraction_layer(diff_flat)
         
-        # Concatenate input and output (transformation context)
-        context = torch.cat([input_abs, output_abs], dim=1)  # [B, 2*H*W, D]
+        # Concatenate: [input | output | difference]
+        if self.use_difference:
+            context = torch.cat([input_abs, output_abs, diff_abs], dim=1)
+        else:
+            context = torch.cat([input_abs, output_abs], dim=1)
         
         # Encode transformation patterns
-        context_encoded = self.diff_encoder(context)
+        context_encoded = self.context_encoder(context)
         
         # Structure queries attend to context
         queries = self.structure_queries.expand(B, -1, -1)
@@ -953,10 +1000,13 @@ class SCIARC(nn.Module):
 
 ### 7. Structural Contrastive Loss (SCL) - Fixed Architecture
 
-> **CRITICAL FIX (December 2024)**: The original SCL implementation suffered from
+> **CRITICAL FIXES (December 2024)**: The original SCL implementation suffered from
 > **representation collapse** - the structural encoder produced near-identical embeddings
 > for all inputs, causing SCL loss to remain constant at $\ln(\text{batch\_size}) \approx 5.25$.
-> This section documents the architectural fixes that resolved this issue.
+> 
+> **Two phases of fixes were required:**
+> 1. **Phase 1**: Fix variance reduction (pooling → flattening, remove LayerNorm)
+> 2. **Phase 2**: Fix common background signal (add BatchNorm, Difference Embedding)
 
 #### The Problem: Constant SCL Loss
 
@@ -968,21 +1018,26 @@ Epoch 2: SCL Loss = 5.25 (constant)
 Epoch 10: SCL Loss = 5.25 (constant)
 ```
 
-**Root Cause Analysis:**
+**Root Cause Analysis (Two Issues):**
 
+**Issue 1: Variance Reduction (Fixed in Phase 1)**
 The issue was **mean pooling** of structure slots:
 ```python
 # OLD (broken) code:
 z = structure_reps.mean(dim=1)  # [B, K, D] → [B, D]
 ```
 
-**Why this fails (Central Limit Theorem)**:
-- Structure slots are initialized randomly with variance $\sigma^2$
-- Mean pooling of $K=8$ slots reduces variance by factor of $K$: $\text{Var}(\bar{z}) = \sigma^2 / K$
-- With $K=8$, variance drops to ~12.5% of original
-- All samples converge to similar embeddings → similarity ≈ 1.0 → constant loss
+**Issue 2: Common Background Signal (Fixed in Phase 2)**
+After fixing pooling, all samples still had **similarity ~0.95**:
+```
+Pre-BatchNorm similarities: (0,1)=0.9592, (0,2)=0.9572
+```
 
-#### The Solution: Architectural Fixes
+Root cause: ARC grids are 90% black (background). The embedding is dominated by this common signal:
+$$v_{sample} = v_{background} + v_{transformation}$$
+Since $v_{background}$ is huge, all samples point in the same direction.
+
+#### The Solution: Two-Phase Architectural Fixes
 
 We implemented **four key fixes**:
 
@@ -1093,6 +1148,97 @@ We implemented **four key fixes**:
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+#### Phase 2 Fixes: Background Signal Removal
+
+After Phase 1 fixes, we observed that embeddings were diverse (variance ~1.0) but 
+**all similarities remained ~0.95**. The issue was the common background signal.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                    PHASE 2 FIXES - Background Signal Removal                         │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  PROBLEM: All embeddings point in same direction (sim ~0.95)                        │
+│  ════════════════════════════════════════════════════════════                        │
+│                                                                                      │
+│  ARC grids are 90% background (black/0):                                            │
+│                                                                                      │
+│    v_sample = v_background + v_transformation                                        │
+│               ─────────────   ────────────────                                       │
+│               HUGE (shared)   small (unique)                                         │
+│                                                                                      │
+│  Result: cos(v₁, v₂) ≈ 0.95 because background dominates                            │
+│                                                                                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  ★ FIX #7: BATCHNORM1D (Background Subtraction)                                     │
+│  ─────────────────────────────────────────────────────────────────────────────────── │
+│                                                                                      │
+│  BatchNorm centers the batch by subtracting mean vector:                            │
+│                                                                                      │
+│    μ_batch ≈ v_background  (the common signal across all samples)                   │
+│    z_centered = z - μ_batch  (removes background!)                                  │
+│                                                                                      │
+│  Code:                                                                               │
+│    self.batch_norm = nn.BatchNorm1d(input_dim, affine=True)                         │
+│    z = structure_reps.reshape(B, -1)  # [B, K*D]                                    │
+│    z = self.batch_norm(z)              # Centers → removes common signal            │
+│    z = self.projector(z)               # Then project                               │
+│                                                                                      │
+│  Effect: Post-BatchNorm similarity drops from 0.95 → near 0                         │
+│                                                                                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  ★ FIX #8: DIFFERENCE EMBEDDING (Explicit Change Detection)                         │
+│  ─────────────────────────────────────────────────────────────────────────────────── │
+│                                                                                      │
+│  Instead of making the model learn (output - input), compute it explicitly:         │
+│                                                                                      │
+│    OLD: context = [input_emb, output_emb]                                           │
+│    NEW: context = [input_emb, output_emb, diff_emb]                                 │
+│                                                                                      │
+│         where diff_emb = output_emb - input_emb                                     │
+│                                                                                      │
+│  The difference highlights WHERE changes happened:                                  │
+│    • Zeros where nothing changed (background)                                       │
+│    • Non-zeros only at transformation locations                                     │
+│                                                                                      │
+│  Code (StructuralEncoder2D):                                                        │
+│    diff_emb = output_emb[:, :H_min, :W_min, :] - input_emb[:, :H_min, :W_min, :]   │
+│    diff_pos = self.pos_encoder(diff_emb)                                            │
+│    diff_flat = self.diff_proj(diff_flat)  # Learnable projection                   │
+│    context = torch.cat([input_abs, output_abs, diff_abs], dim=1)                   │
+│                                                                                      │
+│  Backward compatible: use_difference=True (default)                                 │
+│                                                                                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  ★ FIX #9: HIGHER INITIAL TEMPERATURE                                               │
+│  ─────────────────────────────────────────────────────────────────────────────────── │
+│                                                                                      │
+│    OLD: temperature = 0.07 (too low for high similarity regime)                     │
+│    NEW: temperature = 0.5  (spreads softmax, better gradients)                      │
+│                                                                                      │
+│  With sim~0.95 and temp=0.07:                                                       │
+│    exp(0.95/0.07) ≈ exp(13.6) → near-uniform softmax → no gradient                 │
+│                                                                                      │
+│  With sim~0.95 and temp=0.5:                                                        │
+│    exp(0.95/0.5) = exp(1.9) → good gradient signal                                  │
+│                                                                                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│  ★ FIX #10: INCREASED SCL WEIGHT                                                    │
+│  ─────────────────────────────────────────────────────────────────────────────────── │
+│                                                                                      │
+│    OLD: scl_weight = 0.1  (task loss dominates)                                     │
+│    NEW: scl_weight = 1.0  (balanced influence)                                      │
+│                                                                                      │
+│  Task loss was optimized quickly, leaving no gradient budget for SCL.               │
+│  With higher weight, model must satisfy both objectives.                            │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
 #### Mathematical Justification
 
 **Why Pooling Causes Collapse (Central Limit Theorem):**
@@ -1116,16 +1262,17 @@ class StructuralContrastiveLoss(nn.Module):
     """
     SCL with architectural fixes for preventing representation collapse.
     
-    Key Changes from Original:
+    Key Changes from Original (Phase 1 + Phase 2):
     1. FLATTEN instead of mean pool
-    2. LayerNorm instead of BatchNorm in projector
-    3. Learnable temperature
-    4. Orthogonal initialization for projector weights
+    2. BatchNorm1d BEFORE projection (removes common background signal)
+    3. LayerNorm inside projector
+    4. Learnable temperature (starts at 0.5 for high-similarity regime)
+    5. Orthogonal initialization for projector weights
     """
     
     def __init__(
         self, 
-        temperature: float = 0.07,
+        temperature: float = 0.5,  # ★ Higher for high-similarity regime
         normalize: bool = True,
         hidden_dim: int = 256,
         projection_dim: int = 128,
@@ -1140,6 +1287,9 @@ class StructuralContrastiveLoss(nn.Module):
         
         # ★ FIX #3: Input is K*D (flattened) not D (pooled)
         input_dim = hidden_dim * num_structure_slots  # 256 * 8 = 2048
+        
+        # ★ FIX #7: BatchNorm to remove common background signal
+        self.batch_norm = nn.BatchNorm1d(input_dim, affine=True)
         
         # Projection head with LayerNorm
         self.projector = nn.Sequential(
@@ -1166,6 +1316,9 @@ class StructuralContrastiveLoss(nn.Module):
         # ★ FIX #3: FLATTEN not mean pool
         z = structure_reps.reshape(B, -1)  # [B, K*D]
         
+        # ★ FIX #7: Apply BatchNorm to remove common background signal
+        z = self.batch_norm(z)  # Centers batch → removes shared direction
+        
         # Project to contrastive space
         z = self.projector(z)  # [B, projection_dim]
         
@@ -1183,16 +1336,18 @@ class StructuralContrastiveLoss(nn.Module):
 
 #### Empirical Validation
 
-After applying these fixes:
+After applying Phase 1 + Phase 2 fixes:
 
-| Metric | Before Fix | After Fix |
-|--------|------------|-----------|
-| SCL Loss (epoch 1) | 5.25 (constant) | 2.1 → decreasing |
-| Embedding Similarity | ~1.0 (collapsed) | ~0.0 (diverse) |
-| Embedding Variance | ~0.001 | ~1.0 |
-| InfoNCE Gradient | Near-zero | Strong signal |
+| Metric | Before Any Fix | After Phase 1 | After Phase 2 |
+|--------|----------------|---------------|---------------|
+| SCL Loss (epoch 1) | 5.25 (constant) | 5.25 (still constant) | Decreasing |
+| Pre-BatchNorm Similarity | ~1.0 | ~0.95 | ~0.95 |
+| Post-BatchNorm Similarity | N/A | N/A | **< 0.3** |
+| Embedding Variance | ~0.001 | ~1.0 | ~1.0 |
+| InfoNCE Gradient | Near-zero | Weak | **Strong signal** |
 
-The model can now learn discriminative structural representations that cluster by transformation type.
+**Key insight**: Phase 1 fixed the variance but not the direction. 
+Phase 2 (BatchNorm) removes the common direction, making contrastive learning work.
 
 ---
 
@@ -1205,7 +1360,7 @@ class SCIARCLoss(nn.Module):
     def __init__(
         self,
         H_cycles: int = 16,
-        scl_weight: float = 0.1,
+        scl_weight: float = 1.0,  # ★ Increased from 0.1
         orthogonality_weight: float = 0.01,
         hidden_dim: int = 256,
         num_structure_slots: int = 8
