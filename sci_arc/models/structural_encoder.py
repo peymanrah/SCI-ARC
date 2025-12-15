@@ -65,9 +65,14 @@ class AbstractionLayer2D(nn.Module):
             nn.Sigmoid()  # [0, 1] structuralness scores
         )
         
-        # Residual gate: Allows small amount of content to flow through
-        # This helps with gradient flow and prevents complete information loss
-        self.residual_gate = nn.Parameter(torch.tensor(0.1))
+        # Initialize detector to output ~0.5 (neutral) initially
+        # This prevents over-suppression at the start of training
+        nn.init.zeros_(self.structural_detector[-2].bias)
+        nn.init.xavier_uniform_(self.structural_detector[-2].weight, gain=0.1)
+        
+        # Residual gate: Start with higher value to preserve more information initially
+        # This helps with gradient flow and prevents representation collapse
+        self.residual_gate = nn.Parameter(torch.tensor(0.5))
         
         # Normalization
         self.norm = nn.LayerNorm(d_model)
@@ -88,9 +93,12 @@ class AbstractionLayer2D(nn.Module):
         # Apply soft mask: 
         # - Structural features (high score) are preserved
         # - Content features (low score) are suppressed but not zeroed
+        # The residual_gate ensures information flows through even when scores are low
         abstracted = x * scores + x * self.residual_gate * (1 - scores)
         
-        return self.norm(abstracted)
+        # Skip LayerNorm to preserve diversity - use simple scaling instead
+        # LayerNorm was causing representation collapse by normalizing away differences
+        return abstracted * (1.0 / abstracted.std(dim=-1, keepdim=True).clamp(min=1e-6))
     
     def get_structural_scores(self, x: torch.Tensor) -> torch.Tensor:
         """Get structuralness scores for visualization/analysis."""
@@ -149,9 +157,13 @@ class StructuralEncoder2D(nn.Module):
         # === STRUCTURE QUERIES ===
         # Learnable queries that extract transformation patterns
         # Similar to DETR object queries, but for transformations
+        # Use orthogonal initialization to ensure different slots capture different aspects
         self.structure_queries = nn.Parameter(
             torch.randn(1, num_structure_slots, hidden_dim) * 0.02
         )
+        # Initialize with orthogonal vectors for diversity
+        nn.init.orthogonal_(self.structure_queries.data.squeeze(0))
+        self.structure_queries.data *= 0.1  # Scale down but keep orthogonal
         
         # === INPUT/OUTPUT ENCODING ===
         # Mark whether embedding comes from input or output
@@ -159,13 +171,15 @@ class StructuralEncoder2D(nn.Module):
         
         # === TRANSFORMATION ENCODER ===
         # Process the (input, output) context
+        # Use PreLN (norm_first=True) which is more stable and avoids representation collapse
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
             dim_feedforward=hidden_dim * 4,
             dropout=dropout,
             batch_first=True,
-            activation='gelu'
+            activation='gelu',
+            norm_first=True  # PreLN is more stable than PostLN
         )
         self.context_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
@@ -176,6 +190,15 @@ class StructuralEncoder2D(nn.Module):
             num_heads=num_heads,
             dropout=dropout,
             batch_first=True
+        )
+        
+        # === QUERY CONDITIONING ===
+        # Condition queries on input statistics to ensure diversity across samples
+        # This projects global context stats into a query modulation
+        self.query_conditioner = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),  # Mean and std of context
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
         )
         
         # === OUTPUT ===
@@ -222,8 +245,16 @@ class StructuralEncoder2D(nn.Module):
         # Encode transformation context
         context_encoded = self.context_encoder(context)
         
-        # Structure queries cross-attend to context
+        # Condition structure queries on context statistics for sample-specific diversity
+        # This ensures different inputs produce different query modulations
+        context_mean = context_encoded.mean(dim=1)  # [B, D]
+        context_std = context_encoded.std(dim=1)    # [B, D]
+        context_stats = torch.cat([context_mean, context_std], dim=-1)  # [B, 2D]
+        query_modulation = self.query_conditioner(context_stats)  # [B, D]
+        
+        # Structure queries cross-attend to context (with sample-specific modulation)
         queries = self.structure_queries.expand(B, -1, -1)  # [B, K, D]
+        queries = queries + query_modulation.unsqueeze(1)   # Add sample-specific offset
         
         structure_slots, attn_weights = self.cross_attention(
             query=queries,
@@ -266,7 +297,15 @@ class StructuralEncoder2D(nn.Module):
         context = torch.cat([input_abs, output_abs], dim=1)
         context_encoded = self.context_encoder(context)
         
+        # Condition queries on context statistics
+        context_mean = context_encoded.mean(dim=1)
+        context_std = context_encoded.std(dim=1)
+        context_stats = torch.cat([context_mean, context_std], dim=-1)
+        query_modulation = self.query_conditioner(context_stats)
+        
         queries = self.structure_queries.expand(B, -1, -1)
+        queries = queries + query_modulation.unsqueeze(1)
+        
         structure_slots, attn_weights = self.cross_attention(
             query=queries,
             key=context_encoded,

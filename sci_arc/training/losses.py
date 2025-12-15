@@ -114,9 +114,14 @@ class StructuralContrastiveLoss(nn.Module):
         # to a space where contrastive learning works better
         self.projector = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),  # BN helps prevent collapse (from BYOL/SimSiam)
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, projection_dim)
         )
+        
+        # Initialize with orthogonal weights to amplify small input differences
+        nn.init.orthogonal_(self.projector[0].weight)
+        nn.init.orthogonal_(self.projector[3].weight)
     
     def forward(
         self,
@@ -147,6 +152,12 @@ class StructuralContrastiveLoss(nn.Module):
         # This is the SimCLR insight: contrastive loss on projected representations
         # allows the encoder to learn more general features
         z = self.projector(z)  # [B, projection_dim]
+        
+        # Add small noise during training to bootstrap learning when embeddings collapse
+        # This ensures gradients flow even when all embeddings are initially similar
+        if self.training:
+            noise_scale = 0.1  # Small noise to break symmetry
+            z = z + torch.randn_like(z) * noise_scale
         
         # Normalize representations
         if self.normalize:
