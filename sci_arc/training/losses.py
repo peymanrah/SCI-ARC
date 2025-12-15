@@ -144,39 +144,43 @@ class StructuralContrastiveLoss(nn.Module):
         labels_equal = transform_labels.unsqueeze(0) == transform_labels.unsqueeze(1)
         pos_mask = labels_equal & ~mask_diag
         
-        # Check if we have any positive pairs
-        if not pos_mask.any():
-            # No positive pairs available - can happen with small batches
-            # Return a small regularization loss instead
-            return torch.tensor(0.0, device=structure_reps.device)
-        
-        # InfoNCE loss
+        # InfoNCE loss - FULLY VECTORIZED (no Python loops)
         # For each anchor, compute: -log(exp(pos) / sum(exp(all)))
         
-        # Mask out diagonal for denominator
+        # Mask out diagonal for denominator (exclude self-similarity)
         sim_masked = sim.masked_fill(mask_diag, float('-inf'))
         
-        # Compute loss for each sample that has positive pairs
-        losses = []
+        # Log-sum-exp over all samples except self for each anchor [B]
+        log_sum_exp = torch.logsumexp(sim_masked, dim=1)
         
-        for i in range(B):
-            if pos_mask[i].any():
-                # Positive similarities
-                pos_sim = sim[i, pos_mask[i]]  # [num_pos]
-                
-                # Log-sum-exp over all (excluding self)
-                all_sim = sim_masked[i]  # [B] with self masked
-                log_sum_exp = torch.logsumexp(all_sim[~mask_diag[i]], dim=0)
-                
-                # InfoNCE: -log(exp(pos) / sum(exp(all))) = -pos + log_sum_exp
-                # Average over all positive pairs for this anchor
-                loss_i = (-pos_sim + log_sum_exp).mean()
-                losses.append(loss_i)
+        # Compute loss matrix: loss[i,j] = -sim[i,j] + log_sum_exp[i]
+        # This is the InfoNCE loss if (i,j) is a positive pair
+        loss_matrix = -sim + log_sum_exp.unsqueeze(1)  # [B, B]
         
-        if len(losses) == 0:
+        # Count positive pairs per anchor (for averaging)
+        pos_counts = pos_mask.float().sum(dim=1)  # [B]
+        
+        # Identify anchors that have at least one positive pair
+        has_positives = pos_counts > 0  # [B]
+        
+        # Early exit if no positive pairs at all (fully vectorized check)
+        if not has_positives.any():
             return torch.tensor(0.0, device=structure_reps.device)
         
-        return torch.stack(losses).mean()
+        # Sum of losses for positive pairs per anchor
+        # Mask non-positive pairs with 0, then sum
+        pos_loss_sum = (loss_matrix * pos_mask.float()).sum(dim=1)  # [B]
+        
+        # Average over positive pairs for each anchor (avoid div by zero)
+        # Use where to handle anchors with no positives
+        per_anchor_loss = torch.where(
+            has_positives,
+            pos_loss_sum / pos_counts.clamp(min=1),
+            torch.zeros_like(pos_loss_sum)
+        )
+        
+        # Average only over anchors that have positive pairs
+        return per_anchor_loss[has_positives].mean()
 
 
 class OrthogonalityLoss(nn.Module):
