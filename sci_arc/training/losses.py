@@ -87,22 +87,36 @@ class StructuralContrastiveLoss(nn.Module):
     - "Flip horizontal" tasks should cluster together
     - Different transformation types should be separated
     
-    Uses InfoNCE loss formulation.
+    Uses InfoNCE loss formulation with a projection head (SimCLR-style)
+    to prevent representation collapse.
     """
     
     def __init__(
         self, 
         temperature: float = 0.07,
-        normalize: bool = True
+        normalize: bool = True,
+        hidden_dim: int = 256,
+        projection_dim: int = 128
     ):
         """
         Args:
             temperature: Temperature for softmax scaling
             normalize: Whether to L2-normalize representations
+            hidden_dim: Input dimension from encoder
+            projection_dim: Output dimension of projection head
         """
         super().__init__()
         self.temperature = temperature
         self.normalize = normalize
+        
+        # Projection head (SimCLR-style) to prevent representation collapse
+        # The encoder learns general representations, the projector maps them
+        # to a space where contrastive learning works better
+        self.projector = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, projection_dim)
+        )
     
     def forward(
         self,
@@ -128,6 +142,11 @@ class StructuralContrastiveLoss(nn.Module):
         
         # Pool structure slots to single vector
         z = structure_reps.mean(dim=1)  # [B, D]
+        
+        # Apply projection head (critical for preventing representation collapse)
+        # This is the SimCLR insight: contrastive loss on projected representations
+        # allows the encoder to learn more general features
+        z = self.projector(z)  # [B, projection_dim]
         
         # Normalize representations
         if self.normalize:
@@ -338,7 +357,9 @@ class SCIARCLoss(nn.Module):
         orthogonality_weight: float = 0.01,
         temperature: float = 0.07,
         weight_schedule: str = "linear",
-        ignore_index: int = -1
+        ignore_index: int = -1,
+        hidden_dim: int = 256,  # For SCL projection head
+        projection_dim: int = 128
     ):
         """
         Args:
@@ -348,6 +369,8 @@ class SCIARCLoss(nn.Module):
             temperature: Temperature for SCL
             weight_schedule: Weight schedule for deep supervision
             ignore_index: Label value to ignore
+            hidden_dim: Hidden dimension for SCL projection head
+            projection_dim: Output dimension of SCL projection head
         """
         super().__init__()
         
@@ -360,7 +383,11 @@ class SCIARCLoss(nn.Module):
             weight_schedule=weight_schedule,
             ignore_index=ignore_index
         )
-        self.scl = StructuralContrastiveLoss(temperature=temperature)
+        self.scl = StructuralContrastiveLoss(
+            temperature=temperature,
+            hidden_dim=hidden_dim,
+            projection_dim=projection_dim
+        )
         self.orthogonality = OrthogonalityLoss()
     
     def forward(
@@ -477,7 +504,10 @@ class TRMCompatibleLoss(nn.Module):
             
             # SCL if labels provided
             if transform_labels is not None:
-                scl_loss = StructuralContrastiveLoss()(structure_rep, transform_labels)
+                # Note: Creating a new instance each call is inefficient
+                # In practice, use SCIARCLoss which maintains a persistent instance
+                hidden_dim = structure_rep.size(-1)
+                scl_loss = StructuralContrastiveLoss(hidden_dim=hidden_dim)(structure_rep, transform_labels)
                 total_loss = total_loss + 0.1 * scl_loss
                 losses['scl'] = scl_loss
         

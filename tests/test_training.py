@@ -18,13 +18,12 @@ class TestStructuralContrastiveLoss:
     
     @pytest.fixture
     def loss_fn(self):
-        return StructuralContrastiveLoss(temperature=0.1)
+        return StructuralContrastiveLoss(temperature=0.1, hidden_dim=64, projection_dim=32)
     
     def test_same_class_low_loss(self, loss_fn):
         """Test that same-class samples have lower loss."""
-        # Two samples from same transformation family
-        z1 = torch.randn(2, 64)
-        z1 = z1 / z1.norm(dim=-1, keepdim=True)
+        # Two samples from same transformation family - shape [B, K, D] where K=1 slot
+        z1 = torch.randn(2, 1, 64)
         
         labels = torch.tensor([0, 0])  # Same class
         

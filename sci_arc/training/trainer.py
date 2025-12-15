@@ -407,15 +407,25 @@ class SCIARCTrainer:
                 print(f"  z_struct shape: {z_struct.shape}")
                 print(f"  z_struct mean: {z_struct.mean().item():.6f}, std: {z_struct.std().item():.6f}")
                 
-                # Check if z_struct varies across samples
+                # Check if z_struct varies across samples (before projection)
                 z_pooled = z_struct.mean(dim=1)  # [B, D]
                 z_norm = torch.nn.functional.normalize(z_pooled, dim=-1)
                 
-                # Check similarity of first few samples
+                # Check similarity of first few samples (BEFORE projection)
                 sim_01 = (z_norm[0] * z_norm[1]).sum().item()
                 sim_02 = (z_norm[0] * z_norm[2]).sum().item()
                 sim_12 = (z_norm[1] * z_norm[2]).sum().item()
-                print(f"  Sample similarities: (0,1)={sim_01:.4f}, (0,2)={sim_02:.4f}, (1,2)={sim_12:.4f}")
+                print(f"  Pre-projection similarities: (0,1)={sim_01:.4f}, (0,2)={sim_02:.4f}, (1,2)={sim_12:.4f}")
+                
+                # Check AFTER projection (if available)
+                if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'projector'):
+                    with torch.no_grad():
+                        z_proj = self.loss_fn.scl.projector(z_pooled)
+                        z_proj_norm = torch.nn.functional.normalize(z_proj, dim=-1)
+                        sim_01_p = (z_proj_norm[0] * z_proj_norm[1]).sum().item()
+                        sim_02_p = (z_proj_norm[0] * z_proj_norm[2]).sum().item()
+                        sim_12_p = (z_proj_norm[1] * z_proj_norm[2]).sum().item()
+                        print(f"  Post-projection similarities: (0,1)={sim_01_p:.4f}, (0,2)={sim_02_p:.4f}, (1,2)={sim_12_p:.4f}")
                 
                 self._scl_debug_count += 1
             

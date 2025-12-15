@@ -278,12 +278,15 @@ def main():
     print(f"Training batches: {len(train_loader)}")
     print(f"Validation batches: {len(val_loader)}")
     
-    # Build loss function
+    # Build loss function with projection head for SCL
+    hidden_dim = config['model']['hidden_dim']
     loss_fn = SCIARCLoss(
         H_cycles=config['model']['H_cycles'],
         scl_weight=train_cfg['scl_weight'],
         orthogonality_weight=train_cfg['ortho_weight'],
         temperature=0.1,
+        hidden_dim=hidden_dim,  # For SCL projection head
+        projection_dim=hidden_dim // 2,  # Standard to use smaller projection dim
     )
     
     # Build training config
