@@ -271,6 +271,9 @@ class SCIARCTrainer:
         }
         num_batches = 0
         
+        # === DIAGNOSTICS: Track batch-level diversity for infinite data debugging ===
+        batch_transform_families = []  # Track transform families to verify diversity
+        
         warmup_steps = len(self.train_loader) * self.config.warmup_epochs
         epoch_start_time = time.time()
         batch_start_time = time.time()
@@ -286,6 +289,10 @@ class SCIARCTrainer:
             transfer_start = time.time()
             batch = self._to_device(batch)
             transfer_time = time.time() - transfer_start
+            
+            # === DIAGNOSTIC: Track transform_family diversity (for infinite data debugging) ===
+            if 'transform_families' in batch and batch_idx < 3:  # Only first 3 batches
+                batch_transform_families.append(batch['transform_families'].tolist())
             
             # Warmup
             self._warmup_lr(self.global_step, warmup_steps)
@@ -362,6 +369,17 @@ class SCIARCTrainer:
         eta_str = f"{int(eta_seconds // 3600)}h {int((eta_seconds % 3600) // 60)}m" if eta_seconds > 3600 else f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
         print(f"Epoch {self.current_epoch + 1} completed in {epoch_time:.1f}s "
               f"({epoch_time/num_batches:.2f}s/batch) | ETA: {eta_str}")
+        
+        # === DIAGNOSTIC: Log batch diversity (first epoch only for infinite data debugging) ===
+        if self.current_epoch == 0 and batch_transform_families:
+            print(f"\n[INFINITE DATA CHECK] First 3 batches transform_families:")
+            for i, families in enumerate(batch_transform_families):
+                unique_count = len(set(families))
+                print(f"  Batch {i+1}: {unique_count} unique families out of {len(families)} samples")
+                if unique_count < len(families) // 2:
+                    print(f"    ⚠ Low diversity - check augmentation settings")
+                else:
+                    print(f"    ✓ Good diversity for SCL")
         
         # Average losses (already Python floats)
         for key in epoch_losses:
@@ -640,6 +658,115 @@ class SCIARCTrainer:
             old_ckpt = checkpoints.pop(0)
             old_ckpt.unlink()
     
+    def _log_dataset_info(self):
+        """Log dataset configuration for debugging (especially for infinite data mode)."""
+        dataset = self.train_loader.dataset
+        
+        print(f"\n{'='*60}")
+        print("Dataset Configuration:")
+        print(f"{'='*60}")
+        
+        # Basic info
+        print(f"  Dataset size: {len(dataset)} samples")
+        print(f"  Batch size: {self.train_loader.batch_size}")
+        print(f"  Batches per epoch: {len(self.train_loader)}")
+        
+        # Cache mode (CRITICAL for understanding training behavior)
+        if hasattr(dataset, 'cache_samples'):
+            cache_mode = dataset.cache_samples
+            print(f"\n  === CACHING MODE ===")
+            if cache_mode:
+                print(f"  Mode: CACHED (fixed {len(dataset)} samples)")
+                print(f"  Behavior: Same samples every epoch (potential overfitting)")
+                if hasattr(dataset, 'cache_augmentations'):
+                    print(f"  Cached augmentations: {dataset.cache_augmentations} per task")
+            else:
+                print(f"  Mode: INFINITE (on-the-fly generation)")
+                print(f"  Behavior: Every batch is UNIQUE (maximum generalization)")
+                print(f"  Samples per epoch: {len(self.train_loader) * self.train_loader.batch_size}")
+                total_unique = len(self.train_loader) * self.train_loader.batch_size * self.config.max_epochs
+                print(f"  Total unique samples ({self.config.max_epochs} epochs): ~{total_unique:,}")
+        
+        # Augmentation info
+        if hasattr(dataset, 'augment'):
+            print(f"\n  === AUGMENTATION ===")
+            print(f"  Enabled: {dataset.augment}")
+            if hasattr(dataset, 'use_augment_family'):
+                print(f"  Use augment as transform_family (for SCL): {dataset.use_augment_family}")
+        
+        # SCL info
+        if hasattr(self.loss_fn, 'scl'):
+            print(f"\n  === SCL CONFIGURATION ===")
+            print(f"  SCL weight: {self.config.scl_weight}")
+            if hasattr(self.loss_fn.scl, 'temperature'):
+                temp = self.loss_fn.scl.temperature
+                if hasattr(temp, 'item'):
+                    print(f"  Temperature: {temp.item():.4f} (learnable)")
+                else:
+                    print(f"  Temperature: {temp}")
+            if hasattr(self.loss_fn.scl, 'batch_norm'):
+                print(f"  BatchNorm: Enabled (removes background signal)")
+        
+        print(f"{'='*60}")
+    
+    def _log_epoch_summary(self, epoch: int, train_losses: Dict[str, float], 
+                           val_metrics: Optional[Dict[str, float]] = None):
+        """Log detailed epoch summary with SCL health checks."""
+        print(f"\n{'='*60}")
+        print(f"EPOCH {epoch + 1} SUMMARY")
+        print(f"{'='*60}")
+        
+        # Training losses
+        print(f"Training Losses:")
+        print(f"  Total: {train_losses['total']:.6f}")
+        print(f"  Task:  {train_losses['task']:.6f}")
+        print(f"  SCL:   {train_losses['scl']:.6f}")
+        print(f"  Ortho: {train_losses['ortho']:.6f}")
+        print(f"  Deep:  {train_losses['deep']:.6f}")
+        
+        # SCL health check
+        scl_loss = train_losses['scl']
+        print(f"\n  === SCL HEALTH CHECK ===")
+        if scl_loss < 0.1:
+            print(f"  ✓ SCL loss very low ({scl_loss:.4f}) - Excellent clustering!")
+        elif scl_loss < 1.0:
+            print(f"  ✓ SCL loss moderate ({scl_loss:.4f}) - Good progress")
+        elif scl_loss < 3.0:
+            print(f"  ⚠ SCL loss high ({scl_loss:.4f}) - Still learning")
+        elif abs(scl_loss - math.log(self.config.batch_size)) < 0.5:
+            print(f"  ✗ SCL loss ≈ log(batch_size)={math.log(self.config.batch_size):.2f}")
+            print(f"    WARNING: Possible representation collapse!")
+            print(f"    Check: Are z_struct embeddings diverse?")
+        else:
+            print(f"  ? SCL loss: {scl_loss:.4f}")
+        
+        # Temperature tracking (if learnable)
+        if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'temperature'):
+            temp = self.loss_fn.scl.temperature
+            if hasattr(temp, 'item'):
+                print(f"  Current temperature: {temp.item():.4f}")
+        
+        # Validation metrics
+        if val_metrics:
+            print(f"\nValidation Metrics:")
+            print(f"  Loss:     {val_metrics.get('val_loss', 0):.6f}")
+            print(f"  Pixel Acc: {val_metrics.get('pixel_accuracy', 0)*100:.2f}%")
+            print(f"  Task Acc:  {val_metrics.get('task_accuracy', 0)*100:.2f}%")
+            
+            # Best tracker
+            print(f"\nBest So Far:")
+            print(f"  Best Task Acc: {self.best_val_accuracy*100:.2f}%")
+            print(f"  Best Val Loss: {self.best_val_loss:.6f}")
+        
+        # GPU memory
+        if torch.cuda.is_available():
+            mem_alloc = torch.cuda.memory_allocated() / 1024**3
+            mem_reserved = torch.cuda.memory_reserved() / 1024**3
+            mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            print(f"\nGPU Memory: {mem_reserved:.1f}GB reserved / {mem_total:.1f}GB total")
+        
+        print(f"{'='*60}")
+    
     def load_checkpoint(self, path: str):
         """Load checkpoint."""
         checkpoint = torch.load(path, map_location=self.device)
@@ -669,7 +796,11 @@ class SCIARCTrainer:
         print(f"{'='*60}")
         for key, value in self.config.__dict__.items():
             print(f"  {key}: {value}")
-        print(f"{'='*60}\n")
+        print(f"{'='*60}")
+        
+        # === DIAGNOSTIC: Dataset info for debugging infinite data ===
+        self._log_dataset_info()
+        print()
         
         for epoch in range(self.current_epoch, self.config.max_epochs):
             self.current_epoch = epoch
@@ -696,6 +827,7 @@ class SCIARCTrainer:
                 torch.cuda.empty_cache()
             
             # Validate
+            val_metrics = None
             if (epoch + 1) % self.config.eval_every == 0:
                 print("Starting validation...")
                 sys.stdout.flush()
@@ -714,6 +846,9 @@ class SCIARCTrainer:
                 # Save checkpoint
                 if (epoch + 1) % self.config.save_every == 0 or is_best:
                     self.save_checkpoint(is_best=is_best)
+            
+            # Log detailed epoch summary
+            self._log_epoch_summary(epoch, train_losses, val_metrics)
         
         print("\nTraining complete!")
         print(f"Best validation accuracy: {self.best_val_accuracy:.4f}")
