@@ -36,8 +36,8 @@ training:
   grad_clip: 1.0
   grad_accumulation_steps: 1
   
-  # Reduced batch sizes to prevent VRAM overflow
-  batch_size: 32
+  # Batch size optimized for SCL learning on RTX 3090 24GB
+  batch_size: 64
   eval_batch_size: 64
   
   scl_weight: 0.1
@@ -54,8 +54,8 @@ data:
   # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
   arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: null
-  # With 24 CPU cores and 1 GPU, 8 workers keeps GPU fed without overhead
-  num_workers: 8
+  # With batch_size=64, 12 workers keeps GPU fed
+  num_workers: 12
   pin_memory: true
   augment: true
 
