@@ -21,6 +21,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass
+from functools import partial
 
 import numpy as np
 import torch
@@ -434,7 +435,7 @@ def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = 0) -> torch.Ten
     return padded
 
 
-def collate_sci_arc(batch: List[Dict], max_size: int = 30) -> Dict[str, Any]:
+def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = None) -> Dict[str, Any]:
     """
     Collate function for batching variable-size ARC grids.
     
@@ -446,6 +447,7 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30) -> Dict[str, Any]:
     Args:
         batch: List of samples from SCIARCDataset
         max_size: Maximum grid size for padding
+        max_grid_size: Alias for max_size (for compatibility)
     
     Returns:
         Batched dictionary with:
@@ -458,6 +460,10 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30) -> Dict[str, Any]:
         - num_pairs: [B] actual number of train pairs per sample
         - grid_masks: [B, max_pairs] mask for valid train pairs
     """
+    # Handle both parameter names
+    if max_grid_size is not None:
+        max_size = max_grid_size
+    
     batch_size = len(batch)
     
     # Find max number of train pairs
@@ -565,7 +571,7 @@ def create_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=lambda b: collate_sci_arc(b, max_grid_size),
+        collate_fn=partial(collate_sci_arc, max_grid_size=max_grid_size),
         pin_memory=True,
         drop_last=True if shuffle else False,
         worker_init_fn=worker_init,
