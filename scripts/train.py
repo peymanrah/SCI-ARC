@@ -142,6 +142,7 @@ def build_training_config(config: dict) -> TrainingConfig:
         use_wandb=log_cfg.get('use_wandb', True),
         wandb_project=log_cfg.get('wandb_project', 'sci-arc'),
         wandb_run_name=log_cfg.get('wandb_run_name'),
+        log_to_file=log_cfg.get('log_to_file', True),  # Enable file logging by default
         use_curriculum=train_cfg.get('use_curriculum', True),
         curriculum_stages=train_cfg.get('curriculum_stages', [10, 30, 60]),
         device=hw_cfg.get('device', 'cuda'),

@@ -8,14 +8,17 @@ Implements:
 4. Wandb logging
 5. Checkpoint saving/loading
 6. Gradient accumulation
+7. File-based logging for reproducibility
 """
 
 import os
+import sys
 import time
 import math
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -30,6 +33,30 @@ try:
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
+
+
+class TeeLogger:
+    """
+    Logger that writes to both stdout and a file.
+    Captures all print() output for debugging and reproducibility.
+    """
+    def __init__(self, log_path: Path):
+        self.terminal = sys.stdout
+        self.log_path = log_path
+        self.log_file = open(log_path, 'w', encoding='utf-8', buffering=1)  # Line buffered
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log_file.write(message)
+        self.log_file.flush()  # Ensure immediate write
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+        
+    def close(self):
+        self.log_file.close()
+        sys.stdout = self.terminal
 
 
 @dataclass
@@ -70,6 +97,7 @@ class TrainingConfig:
     use_wandb: bool = True
     wandb_project: str = 'sci-arc'
     wandb_run_name: Optional[str] = None
+    log_to_file: bool = True  # Enable file logging
     
     # Curriculum learning
     use_curriculum: bool = True
@@ -127,6 +155,21 @@ class SCIARCTrainer:
         # Checkpoint directory
         self.checkpoint_dir = Path(config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        # File logging
+        self.tee_logger = None
+        if config.log_to_file:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_path = self.checkpoint_dir / f'training_log_{timestamp}.txt'
+            self.tee_logger = TeeLogger(log_path)
+            sys.stdout = self.tee_logger
+            print(f"Logging to: {log_path}")
+            print(f"Timestamp: {datetime.now().isoformat()}")
+            print(f"Python: {sys.version}")
+            print(f"PyTorch: {torch.__version__}")
+            print(f"CUDA available: {torch.cuda.is_available()}")
+            if torch.cuda.is_available():
+                print(f"CUDA device: {torch.cuda.get_device_name(0)}")
         
         # Initialize wandb
         self.wandb_run = None
@@ -504,8 +547,14 @@ class SCIARCTrainer:
     
     def train(self):
         """Full training loop."""
-        print(f"Starting training on {self.device}")
+        print(f"\nStarting training on {self.device}")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        print(f"\n{'='*60}")
+        print("Training Configuration:")
+        print(f"{'='*60}")
+        for key, value in self.config.__dict__.items():
+            print(f"  {key}: {value}")
+        print(f"{'='*60}\n")
         
         for epoch in range(self.current_epoch, self.config.max_epochs):
             self.current_epoch = epoch
@@ -544,9 +593,15 @@ class SCIARCTrainer:
         
         print("\nTraining complete!")
         print(f"Best validation accuracy: {self.best_val_accuracy:.4f}")
+        print(f"Finished at: {datetime.now().isoformat()}")
         
         if self.wandb_run:
             wandb.finish()
+        
+        # Close file logger
+        if self.tee_logger:
+            print(f"\nLog saved to: {self.tee_logger.log_path}")
+            self.tee_logger.close()
 
 
 def train_sci_arc(

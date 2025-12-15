@@ -110,6 +110,9 @@ logging:
   save_every: 5                 # Save checkpoint every N epochs
   keep_last_n: 3                # Keep last N checkpoints
   
+  # File logging (for reproducibility and debugging)
+  log_to_file: true             # Save all terminal output to log file
+  
   # Weights & Biases
   use_wandb: true
   wandb_project: sci-arc

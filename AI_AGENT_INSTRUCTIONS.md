@@ -565,6 +565,78 @@ print(f'cuDNN benchmark: {torch.backends.cudnn.benchmark}')
 "
 ```
 
+### Debugging: Training Logs and Prediction Outputs
+
+All terminal output during training is automatically saved to a log file in the checkpoint directory:
+
+```
+checkpoints/
+├── training_log_20241215_143022.txt   # Full terminal output
+├── checkpoint_epoch_5.pt
+├── checkpoint_epoch_10.pt
+└── best_model.pt
+```
+
+**Key features:**
+- File logging is enabled by default (`logging.log_to_file=true`)
+- Log includes: config, epoch progress, losses, LR, validation metrics
+- Timestamps are included for performance analysis
+
+**Disable file logging (not recommended):**
+```bash
+python scripts/train.py --config configs/default.yaml logging.log_to_file=false
+```
+
+### Debugging: Detailed Evaluation Output
+
+To debug model predictions, use the `--detailed-output` flag during evaluation:
+
+```bash
+python scripts/evaluate.py \
+    --checkpoint checkpoints/best_model.pt \
+    --data ./data/arc-agi/data/evaluation \
+    --output ./evaluation_results \
+    --detailed-output
+```
+
+This creates detailed prediction files:
+
+```
+evaluation_results/
+├── evaluation_log_20241215_150000.txt     # Full terminal output
+├── metrics.json                            # Aggregate metrics
+└── detailed_predictions/
+    ├── all_predictions.json                # All tasks in one file
+    ├── task_00576224.json                  # Per-task prediction details
+    ├── task_007bbfb7.json
+    └── ... (one file per task)
+```
+
+**Each task file contains:**
+```json
+{
+  "task_id": "00576224",
+  "is_correct": false,
+  "input_grid": [[0,1,2,...], ...],
+  "target_grid": [[3,4,5,...], ...],
+  "prediction_grid": [[3,4,6,...], ...],
+  "input_shape": [10, 10],
+  "target_shape": [10, 10],
+  "prediction_shape": [10, 10],
+  "size_match": true,
+  "pixels_correct": 95,
+  "pixels_total": 100,
+  "pixel_accuracy": 0.95,
+  "diff_positions": [[3, 5], [7, 8], ...],
+  "num_diff_positions": 5
+}
+```
+
+This allows you to:
+1. Identify which pixels the model got wrong
+2. Compare input → target transformation visually
+3. Debug systematic errors (e.g., edge handling, color mapping)
+
 ---
 
 ## SUMMARY: KEY POINTS FOR PUBLICATION
@@ -658,6 +730,12 @@ This makes SCI-ARC's insights directly applicable to compositional reasoning in 
 - [ ] Software versions logged
 - [ ] Results exported to JSON
 - [ ] Figures generated
+
+### Logging & Debugging
+- [ ] Training logs saved (training_log_*.txt in checkpoint dir)
+- [ ] Evaluation logs saved (evaluation_log_*.txt in output dir)
+- [ ] Detailed predictions exported (--detailed-output flag)
+- [ ] Failure cases analyzed using diff_positions in prediction JSON
 
 ---
 
