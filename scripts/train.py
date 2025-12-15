@@ -189,9 +189,9 @@ def main():
     print(f"\nLoading data from: {data_cfg['arc_dir']}")
     
     # Windows with multiprocessing: use reasonable number of workers
-    # With 24 CPU cores, 4 workers is safe and efficient
+    # With 24 CPU cores, 8 workers is efficient for keeping GPU fed
     # Set to 0 only if you encounter multiprocessing errors
-    num_workers = data_cfg.get('num_workers', 4)
+    num_workers = data_cfg.get('num_workers', 8)
     print(f"Using {num_workers} data loading workers")
     
     train_loader = create_dataloader(

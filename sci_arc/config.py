@@ -167,7 +167,7 @@ class TrainingConfig:
     num_epochs: int = 100
     batch_size: int = 32
     eval_batch_size: int = 64
-    num_workers: int = 4
+    num_workers: int = 8
     
     # Optimization
     learning_rate: float = 1e-4

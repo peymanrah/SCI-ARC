@@ -83,7 +83,10 @@ data:
   rearc_dir: null               # Optional: path to RE-ARC
   
   # Data loading
-  num_workers: 4
+  # With 24 CPU cores and 1 GPU, 8 workers keeps GPU fed without overhead
+  # Rule: 2-4 workers per GPU, but can go higher with many cores
+  # Reduce to 4 if you see CPU memory issues
+  num_workers: 8
   pin_memory: true
   
   # Augmentation
