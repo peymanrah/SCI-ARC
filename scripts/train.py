@@ -187,9 +187,11 @@ def main():
     
     print(f"\nLoading data from: {data_cfg['arc_dir']}")
     
-    # Windows multiprocessing fix: use 0 workers or proper function
-    import sys
-    num_workers = 0 if sys.platform == 'win32' else data_cfg.get('num_workers', 4)
+    # Windows with multiprocessing: use reasonable number of workers
+    # With 24 CPU cores, 4 workers is safe and efficient
+    # Set to 0 only if you encounter multiprocessing errors
+    num_workers = data_cfg.get('num_workers', 4)
+    print(f"Using {num_workers} data loading workers")
     
     train_loader = create_dataloader(
         data_dir=data_cfg['arc_dir'],
