@@ -1,0 +1,68 @@
+# SCI-ARC Small Model Configuration
+# ~3M parameters for quick experiments
+
+model:
+  hidden_dim: 128
+  num_colors: 10
+  max_grid_size: 30
+  
+  num_structure_slots: 4
+  num_abstraction_layers: 2
+  structure_heads: 4
+  
+  max_objects: 8
+  content_heads: 4
+  
+  binding_heads: 4
+  
+  H_cycles: 2
+  L_cycles: 2
+  L_layers: 2
+  
+  dropout: 0.1
+
+training:
+  learning_rate: 5.0e-4
+  weight_decay: 0.01
+  max_epochs: 50
+  warmup_epochs: 3
+  grad_clip: 1.0
+  grad_accumulation_steps: 1
+  
+  batch_size: 64
+  eval_batch_size: 128
+  
+  scl_weight: 0.1
+  ortho_weight: 0.01
+  deep_supervision_weight: 0.5
+  
+  scheduler_type: cosine
+  min_lr: 1.0e-6
+  
+  use_amp: true
+  use_curriculum: false         # Faster training without curriculum
+
+data:
+  arc_dir: ./data/arc-agi
+  rearc_dir: null
+  num_workers: 4
+  pin_memory: true
+  augment: true
+
+evaluation:
+  num_attempts: 2
+  use_voting: false
+  temperature: 1.0
+
+logging:
+  log_every: 20
+  eval_every: 2
+  save_every: 10
+  keep_last_n: 2
+  use_wandb: true
+  wandb_project: sci-arc-small
+  checkpoint_dir: ./checkpoints/small
+
+hardware:
+  device: cuda
+  seed: 42

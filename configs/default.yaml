@@ -1,0 +1,119 @@
+# SCI-ARC Default Configuration
+# Training configuration for Structural Causal Invariance model on ARC
+
+# =============================================================================
+# MODEL ARCHITECTURE
+# =============================================================================
+model:
+  # Core dimensions
+  hidden_dim: 256
+  num_colors: 10
+  max_grid_size: 30
+  
+  # Structural encoder
+  num_structure_slots: 8        # Number of transformation prototypes
+  num_abstraction_layers: 3     # Depth of abstraction hierarchy
+  structure_heads: 8            # Attention heads for structure
+  
+  # Content encoder  
+  max_objects: 16               # Maximum number of objects to track
+  content_heads: 8              # Attention heads for content
+  
+  # Causal binding
+  binding_heads: 8              # Attention heads for binding
+  
+  # Recursive refinement (TRM-style)
+  H_cycles: 3                   # Outer refinement cycles
+  L_cycles: 4                   # Inner refinement cycles
+  L_layers: 2                   # Layers per L cycle
+  
+  # Output
+  dropout: 0.1
+
+# =============================================================================
+# TRAINING
+# =============================================================================
+training:
+  # Optimization
+  learning_rate: 3.0e-4
+  weight_decay: 0.01
+  max_epochs: 100
+  warmup_epochs: 5
+  grad_clip: 1.0
+  grad_accumulation_steps: 1
+  
+  # Batch size
+  batch_size: 32
+  eval_batch_size: 64
+  
+  # Loss weights
+  scl_weight: 0.1               # Structural Contrastive Loss
+  ortho_weight: 0.01            # Orthogonality constraint
+  deep_supervision_weight: 0.5  # Intermediate supervision
+  
+  # Learning rate schedule
+  scheduler_type: cosine        # cosine, onecycle, constant
+  min_lr: 1.0e-6
+  
+  # Mixed precision
+  use_amp: true
+  
+  # Curriculum learning
+  use_curriculum: true
+  curriculum_stages:            # Epoch thresholds
+    - 10  # Stage 1: easy tasks (small grids, many examples)
+    - 30  # Stage 2: medium tasks
+    - 60  # Stage 3: hard tasks (all data)
+
+# =============================================================================
+# DATA
+# =============================================================================
+data:
+  # Dataset paths
+  arc_dir: ./data/arc-agi      # Path to ARC-AGI data
+  rearc_dir: null               # Optional: path to RE-ARC
+  
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+  
+  # Augmentation
+  augment: true
+  augment_rotation: true        # Random 90° rotations
+  augment_flip: true            # Random flips
+  augment_color: true           # Color permutation
+
+# =============================================================================
+# EVALUATION
+# =============================================================================
+evaluation:
+  num_attempts: 2               # Official ARC allows 2 attempts
+  use_voting: true              # Ensemble voting
+  temperature: 1.0              # Sampling temperature
+  batch_size: 1                 # For evaluation
+
+# =============================================================================
+# LOGGING & CHECKPOINTS
+# =============================================================================
+logging:
+  log_every: 10                 # Log every N steps
+  eval_every: 1                 # Evaluate every N epochs
+  save_every: 5                 # Save checkpoint every N epochs
+  keep_last_n: 3                # Keep last N checkpoints
+  
+  # Weights & Biases
+  use_wandb: true
+  wandb_project: sci-arc
+  wandb_run_name: null          # Auto-generated if null
+  
+  # Directories
+  checkpoint_dir: ./checkpoints
+  output_dir: ./outputs
+
+# =============================================================================
+# HARDWARE
+# =============================================================================
+hardware:
+  device: cuda
+  seed: 42
+  deterministic: false          # Slower but reproducible

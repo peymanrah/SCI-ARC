@@ -1,0 +1,72 @@
+# SCI-ARC Large Model Configuration
+# ~15M parameters for best performance
+
+model:
+  hidden_dim: 384
+  num_colors: 10
+  max_grid_size: 30
+  
+  num_structure_slots: 16
+  num_abstraction_layers: 4
+  structure_heads: 12
+  
+  max_objects: 24
+  content_heads: 12
+  
+  binding_heads: 12
+  
+  H_cycles: 4
+  L_cycles: 6
+  L_layers: 3
+  
+  dropout: 0.1
+
+training:
+  learning_rate: 2.0e-4
+  weight_decay: 0.02
+  max_epochs: 150
+  warmup_epochs: 10
+  grad_clip: 1.0
+  grad_accumulation_steps: 2
+  
+  batch_size: 16
+  eval_batch_size: 32
+  
+  scl_weight: 0.15
+  ortho_weight: 0.02
+  deep_supervision_weight: 0.5
+  
+  scheduler_type: cosine
+  min_lr: 1.0e-7
+  
+  use_amp: true
+  use_curriculum: true
+  curriculum_stages:
+    - 15
+    - 50
+    - 100
+
+data:
+  arc_dir: ./data/arc-agi
+  rearc_dir: ./data/rearc       # Include synthetic data
+  num_workers: 8
+  pin_memory: true
+  augment: true
+
+evaluation:
+  num_attempts: 2
+  use_voting: true
+  temperature: 0.8              # Slightly lower for more confident predictions
+
+logging:
+  log_every: 5
+  eval_every: 1
+  save_every: 5
+  keep_last_n: 5
+  use_wandb: true
+  wandb_project: sci-arc-large
+  checkpoint_dir: ./checkpoints/large
+
+hardware:
+  device: cuda
+  seed: 42
