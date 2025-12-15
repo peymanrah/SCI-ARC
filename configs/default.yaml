@@ -1,11 +1,12 @@
 # SCI-ARC Default Configuration
 # Training configuration for Structural Causal Invariance model on ARC
+# Optimized for: NVIDIA RTX 3090 (24GB VRAM) with CUDA 12.6
 
 # =============================================================================
 # MODEL ARCHITECTURE
 # =============================================================================
 model:
-  # Core dimensions
+  # Core dimensions (optimized for 24GB VRAM)
   hidden_dim: 256
   num_colors: 10
   max_grid_size: 30
@@ -42,7 +43,8 @@ training:
   grad_clip: 1.0
   grad_accumulation_steps: 1
   
-  # Batch size
+  # Batch size (optimized for RTX 3090 24GB VRAM)
+  # Can increase to 64 if memory allows, reduce to 16 if OOM
   batch_size: 32
   eval_batch_size: 64
   
@@ -55,7 +57,7 @@ training:
   scheduler_type: cosine        # cosine, onecycle, constant
   min_lr: 1.0e-6
   
-  # Mixed precision
+  # Mixed precision (REQUIRED for RTX 3090 efficiency)
   use_amp: true
   
   # Curriculum learning
@@ -111,9 +113,13 @@ logging:
   output_dir: ./outputs
 
 # =============================================================================
-# HARDWARE
+# HARDWARE (RTX 3090 24GB VRAM, CUDA 12.6)
 # =============================================================================
 hardware:
-  device: cuda
+  device: cuda                  # Use 'cuda' for GPU, 'cpu' for CPU-only
   seed: 42
-  deterministic: false          # Slower but reproducible
+  deterministic: false          # Set true for reproducibility (slower)
+  
+  # Memory optimization for 24GB VRAM
+  # These are applied automatically when use_amp: true
+  # If you run out of memory, reduce batch_size or increase grad_accumulation_steps

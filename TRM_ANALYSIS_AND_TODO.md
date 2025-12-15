@@ -15,6 +15,28 @@ All critical TRM best practices have been implemented and validated:
 6. ✅ **TRM Token Format** - PAD=0, EOS=1, colors=2-11, vocab_size=12
 7. ✅ **Translational Augmentation** - Random grid translation
 
+### Priority Implementation Status:
+
+| Priority | Item | Status | File |
+|----------|------|--------|------|
+| **P0** | Fix Color Permutation Bug | ✅ DONE | `sci_arc/data/dataset.py` |
+| **P0** | Add Missing Dihedral Transforms | ✅ DONE | `sci_arc/data/dataset.py` |
+| **P0** | Fix Token Format | ✅ DONE | `sci_arc/data/dataset.py` |
+| **P1** | stablemax_cross_entropy | ✅ DONE | `sci_arc/training/losses.py` |
+| **P1** | EMA Support | ✅ DONE | `sci_arc/training/ema.py` |
+| **P1** | Augmentation Voting | ✅ DONE | `sci_arc/evaluation/voting.py` |
+| **P1** | Translational Augmentation | ✅ DONE | `sci_arc/data/dataset.py` |
+| **P2** | pass@K Evaluation | ✅ DONE | `sci_arc/evaluation/voting.py` |
+| **P2** | Puzzle Embeddings | ⬜ OPTIONAL | Not needed for SCI approach |
+| **P2** | Distributed Training | ⬜ SKIPPED | Single GPU (RTX 3090) sufficient |
+
+### GPU/CUDA Setup:
+- **Target GPU**: NVIDIA RTX 3090 (24GB VRAM)
+- **CUDA Version**: 12.6
+- **Mixed Precision**: Enabled (FP16/BF16)
+- **Batch Size**: 32 (adjustable)
+- **Verification Script**: `scripts/verify_gpu_setup.py`
+
 ---
 
 ## TinyRecursiveModels Folder Structure Examined

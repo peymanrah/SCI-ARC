@@ -1,7 +1,8 @@
 # SCI-ARC: Structural Causal Invariance for Abstract Reasoning Corpus
 # Core dependencies
 
-# PyTorch
+# PyTorch with CUDA 12.6 support
+# Install with: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 torch>=2.1.0
 torchvision>=0.16.0
 
