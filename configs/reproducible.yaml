@@ -57,7 +57,7 @@ training:
   # 192 uses ~18-19GB VRAM on RTX 3090 with good SCL performance
   batch_size: 192
   eval_batch_size: 192
-  scl_weight: 0.1
+  scl_weight: 1.0               # SCL weight (BatchNorm fix makes SCL work)
   ortho_weight: 0.01
   deep_supervision_weight: 0.5
   scheduler_type: cosine
@@ -73,12 +73,18 @@ training:
 # DATA
 # =============================================================================
 data:
-  # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
+  # Dataset paths
   arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: null
-  # With batch_size=256 and 48 vCPUs, 24 workers keeps GPU fed
+  
+  # Data loading
   num_workers: 24
   pin_memory: true
+  
+  # Caching - enabled for reproducibility (fixed dataset)
+  cache_samples: true           # Fixed samples for exact reproduction
+  cache_augmentations: 8        # 8 versions per task (deterministic with seed)
+  
   augment: true
   augment_rotation: true
   augment_flip: true

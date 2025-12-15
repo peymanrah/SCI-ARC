@@ -36,31 +36,38 @@ training:
   grad_clip: 1.0
   grad_accumulation_steps: 1
   
-  # Batch size optimal for RTX 3090 24GB
-  # 192 uses ~18-19GB for default model; large model may need 128
-  batch_size: 192
-  eval_batch_size: 192
+  # Batch size for RTX 3090 24GB
+  # Large model uses more memory, so we reduce batch size
+  batch_size: 128               # Reduced from 192 for larger model
+  eval_batch_size: 128
   
-  scl_weight: 0.15
-  ortho_weight: 0.02
+  scl_weight: 1.0               # SCL weight (BatchNorm fix makes SCL work)
+  ortho_weight: 0.01
   deep_supervision_weight: 0.5
   
   scheduler_type: cosine
-  min_lr: 1.0e-7
+  min_lr: 1.0e-6
   
   use_amp: true
   use_curriculum: true
   curriculum_stages:
-    - 15
-    - 50
+    - 20
+    - 60
     - 100
 
 data:
-  # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
+  # Dataset paths
   arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
-  rearc_dir: ./data/rearc       # Include synthetic data
+  rearc_dir: null               # Set to ./data/rearc if available
+  
+  # Data loading
   num_workers: 24
   pin_memory: true
+  
+  # LARGE MODEL: Use infinite data to prevent overfitting
+  cache_samples: false          # Infinite data generation
+  cache_augmentations: 8        # Ignored when cache_samples=false
+  
   augment: true
   
   # SCL Transform Family Assignment

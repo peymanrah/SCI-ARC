@@ -40,7 +40,7 @@ training:
   batch_size: 192
   eval_batch_size: 192
   
-  scl_weight: 0.1
+  scl_weight: 1.0               # SCL weight (BatchNorm fix makes SCL work)
   ortho_weight: 0.01
   deep_supervision_weight: 0.5
   
@@ -51,12 +51,18 @@ training:
   use_curriculum: false         # Faster training without curriculum
 
 data:
-  # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
+  # Dataset paths
   arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
   rearc_dir: null
-  # With batch_size=256 and 48 vCPUs, 24 workers keeps GPU fed
+  
+  # Data loading
   num_workers: 24
   pin_memory: true
+  
+  # Caching - enabled for fast iteration during debugging
+  cache_samples: true           # Pre-cache for speed
+  cache_augmentations: 8        # 8 versions per task
+  
   augment: true
   
   # SCL Transform Family Assignment

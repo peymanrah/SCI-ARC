@@ -116,6 +116,38 @@ evaluation:
   batch_size: 1                 # For evaluation
 
 # =============================================================================
+# INFERENCE MODULES (Disabled by default for faster dev iteration)
+# =============================================================================
+# For competitive evaluation, use configs/competitive.yaml which enables these.
+# These modules add overhead but significantly improve accuracy.
+#
+inference:
+  # Component toggles (all disabled for fast dev)
+  use_ttt: false                # Test-Time Training
+  use_stochastic_sampling: false
+  use_augmentation_voting: true # Basic voting still enabled
+  use_consistency_verification: false
+  
+  # TTT parameters (used when use_ttt=true)
+  ttt_steps: 10
+  ttt_learning_rate: 1.0e-4
+  ttt_grad_clip: 1.0
+  ttt_modules:
+    - grid_encoder
+    - structural_encoder
+  
+  # Sampling parameters
+  num_samples: 16
+  sampling_temperature: 1.0
+  use_mc_dropout: false
+  
+  # Voting parameters
+  voting_num_dihedral: 8
+  
+  # Output
+  top_k: 2
+
+# =============================================================================
 # LOGGING & CHECKPOINTS
 # =============================================================================
 logging:

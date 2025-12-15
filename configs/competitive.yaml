@@ -4,9 +4,10 @@
 # Target: ARC-AGI-1 and ARC-AGI-2 benchmarks
 # Goal: Beat TRM's 45% task accuracy with statistical significance
 #
-# Hardware: NVIDIA RTX 3090 (24GB VRAM), CUDA 12.6
-# Training Time: ~36-48 hours
-# Expected Params: ~10-12M (competitive range, same order as TRM's 7M)
+# Hardware: 24-core CPU (48 threads), 128GB RAM, RTX 3090 (24GB VRAM)
+# Training Strategy: INFINITE ON-THE-FLY DATA GENERATION
+# Training Time: ~72-96 hours (500 epochs with infinite data)
+# Expected Params: ~7-8M (matching TRM for fair comparison)
 # ===========================================================================
 
 # =============================================================================
@@ -16,28 +17,31 @@
 # We scale up slightly while staying in same order of magnitude
 
 model:
-  # Core dimensions - INCREASED for more capacity
-  hidden_dim: 384               # TRM uses 256; we use 384 for more capacity
+  # Core dimensions - MATCHING TRM for fair comparison
+  # Keeping 256 to maximize batch size (critical for SCL)
+  hidden_dim: 256               # TRM uses 256; we match for fair comparison
   num_colors: 10                # Fixed for ARC (0-9)
   max_grid_size: 30             # Fixed for ARC (max 30x30)
   
   # Structural encoder - CRITICAL for ARC transformations
-  num_structure_slots: 12       # More slots = more transformation patterns
-  num_abstraction_layers: 4     # Deeper abstraction hierarchy
-  structure_heads: 12           # More heads = finer-grained attention
+  num_structure_slots: 8        # 8 slots for transformation patterns
+  num_abstraction_layers: 3     # Depth of abstraction hierarchy
+  structure_heads: 8            # Attention heads for structure
+  use_difference: false         # DISABLED: saves VRAM for larger batch size
+                                # Batch size 192 > Batch size 64 + difference
   
-  # Content encoder - CRITICAL for object tracking
-  max_objects: 20               # ARC tasks can have many objects
-  content_heads: 12             # Match structure heads
+  # Content encoder - CRITICAL for object tracking  
+  max_objects: 16               # Maximum objects to track
+  content_heads: 8              # Match structure heads
   
   # Causal binding - CRITICAL for structure-content interaction
-  binding_heads: 12             # More heads for complex bindings
+  binding_heads: 8              # Attention heads for binding
   
   # Recursive refinement (TRM-style) - KEY ARCHITECTURE
   # TRM: H_cycles=3, L_cycles=4-6
-  H_cycles: 4                   # Slightly more outer cycles for harder tasks
-  L_cycles: 6                   # Match TRM's best L_cycles
-  L_layers: 3                   # More layers per L cycle
+  H_cycles: 3                   # Match TRM's outer cycles
+  L_cycles: 4                   # Match TRM's inner cycles
+  L_layers: 2                   # Layers per L cycle
   
   # Regularization
   dropout: 0.1                  # Standard dropout
@@ -46,48 +50,62 @@ model:
 # TRAINING (OPTIMIZED FOR CONVERGENCE AND GENERALIZATION)
 # =============================================================================
 training:
-  # Optimization - tuned for stability
-  learning_rate: 2.5e-4         # Slightly lower for larger model
-  weight_decay: 0.015           # Stronger regularization
-  max_epochs: 150               # More epochs for full convergence
-  warmup_epochs: 8              # Longer warmup for larger model
+  # Optimization - tuned for infinite data training
+  learning_rate: 3.0e-4         # Standard LR for this model size
+  weight_decay: 0.01            # Standard regularization
+  max_epochs: 500               # CRITICAL: More epochs for infinite data
+                                # With infinite data, model never sees same sample twice
+  warmup_epochs: 10             # Longer warmup for stability
   grad_clip: 1.0
-  grad_accumulation_steps: 1    # No accumulation needed with batch_size=192
+  grad_accumulation_steps: 1    # No accumulation needed
   
-  # Batch size - optimal for SCL learning on RTX 3090 24GB
-  # 192 uses ~18-19GB VRAM with excellent positive pair density
+  # Batch size - MAXIMUM for RTX 3090 24GB VRAM
+  # 192 uses ~18-19GB VRAM with excellent SCL performance
+  # CRITICAL: SCL quality scales with batch size (more negatives = better)
   batch_size: 192
-  eval_batch_size: 192
+  eval_batch_size: 128          # Slightly lower for validation stability
   
-  # Loss weights - TUNED for SCI-ARC
-  scl_weight: 0.15              # Slightly higher for structure learning
-  ortho_weight: 0.02            # Stronger orthogonality constraint
+  # Loss weights - TUNED for SCI-ARC with BatchNorm fix
+  scl_weight: 1.0               # CRITICAL: SCL is now working, give it full weight
+  ortho_weight: 0.01            # Standard orthogonality constraint
   deep_supervision_weight: 0.5  # Keep intermediate supervision
   
   # Learning rate schedule
   scheduler_type: cosine
-  min_lr: 1.0e-7                # Lower minimum for fine-grained convergence
+  min_lr: 1.0e-6                # Standard minimum LR
   
-  # Mixed precision - REQUIRED
+  # Mixed precision - REQUIRED for RTX 3090
   use_amp: true
   
-  # Curriculum learning - CRITICAL for ARC
+  # Curriculum learning - Tuned for 500 epochs
   use_curriculum: true
   curriculum_stages:
-    - 15    # Stage 1: easy tasks (small grids, 3+ examples)
-    - 50    # Stage 2: medium tasks
-    - 100   # Stage 3: hard tasks (all data)
+    - 50    # Stage 1 (epochs 0-49): easy tasks (small grids, 3+ examples)
+    - 150   # Stage 2 (epochs 50-149): medium tasks
+    - 300   # Stage 3 (epochs 150-299): hard tasks
+            # Stage 4 (epochs 300+): all data mixed
 
 # =============================================================================
 # DATA (MAXIMUM AUGMENTATION)
 # =============================================================================
 data:
-  # Dataset paths (PRODUCTION: D:\SCI-ARC with data at ./data/arc-agi/data/)
+  # Dataset paths
   arc_dir: ./data/arc-agi/data  # Contains training/ and evaluation/ subdirectories
-  rearc_dir: ./data/rearc       # INCLUDE RE-ARC for more training data
+  rearc_dir: null               # Set to ./data/rearc if available for extra data
   
-  num_workers: 24               # 24 workers for 48 vCPU server
+  # Data loading - OPTIMIZED for 48-thread CPU
+  num_workers: 24               # 50% of threads = GPU never starves for data
   pin_memory: true
+  prefetch_factor: 4            # Pre-fetch 4 batches per worker
+  
+  # ==========================================================================
+  # INFINITE DATA GENERATION - THE KEY TO COMPETITION PERFORMANCE
+  # ==========================================================================
+  # With cache_samples=false, every single batch is UNIQUE.
+  # The model never sees the same grid twice across 500 epochs.
+  # This is how TRM and other top models train.
+  cache_samples: false          # CRITICAL: Disable caching for infinite data
+  cache_augmentations: 8        # Ignored when cache_samples=false
   
   # ALL augmentations enabled - CRITICAL for generalization
   augment: true
@@ -110,6 +128,72 @@ evaluation:
   num_color_samples: 3          # Multiple color permutations for voting
   temperature: 0.8              # Lower temp = more confident predictions
   batch_size: 1
+
+# =============================================================================
+# INFERENCE MODULES (Ablation Study Support)
+# =============================================================================
+# These modules are EVALUATION-TIME only, they do not affect training.
+# Each can be toggled for ablation studies to measure individual impact.
+# 
+# Ablation modes for reporting:
+#   - 'baseline': SCI-ARC only (no inference modules)
+#   - 'voting_only': + Augmentation Voting
+#   - 'sampling_only': + Stochastic Sampling
+#   - 'ttt_only': + Test-Time Training
+#   - 'full': All modules enabled
+#
+# Results should be reported as:
+#   ARC-AGI-1/2 Accuracy: X% (baseline) / Y% (full pipeline)
+#
+inference:
+  # === COMPONENT TOGGLES ===
+  
+  # Test-Time Training: Fine-tune on task demos before inference
+  # CRITICAL for ARC performance (TRM uses this to achieve 45%+)
+  use_ttt: true
+  
+  # Stochastic Sampling: MC Dropout + Temperature sampling
+  # Generates diverse candidates for voting
+  use_stochastic_sampling: true
+  
+  # Augmentation Voting: Dihedral transforms + majority vote
+  # Leverages geometric symmetry of most ARC tasks
+  use_augmentation_voting: true
+  
+  # Consistency Verification: Cross-validate candidates
+  # Penalizes predictions inconsistent under augmentation
+  use_consistency_verification: true
+  
+  # === TTT PARAMETERS ===
+  # Only applied when use_ttt=true
+  
+  ttt_steps: 20                 # Adaptation steps (10-50 recommended)
+  ttt_learning_rate: 1.0e-4     # MUST be low to prevent catastrophic forgetting
+  ttt_grad_clip: 1.0            # Gradient clipping (critical for small batches)
+  ttt_use_augmentation: true    # Augment demos during TTT for more signal
+  
+  # Modules to fine-tune during TTT
+  # WARNING: NEVER include SCL components (would destroy contrastive space)
+  # Safe options: grid_encoder, structural_encoder, content_encoder, causal_binding
+  ttt_modules:
+    - grid_encoder
+    - structural_encoder
+  
+  # === SAMPLING PARAMETERS ===
+  # Only applied when use_stochastic_sampling=true
+  
+  num_samples: 32               # Candidates per test input
+  sampling_temperature: 0.8     # <1.0 = more confident, >1.0 = more diverse
+  use_mc_dropout: true          # Enable dropout during inference
+  
+  # === VOTING PARAMETERS ===
+  # Only applied when use_augmentation_voting=true
+  
+  voting_num_dihedral: 8        # All 8 dihedral transforms (D4 group)
+  
+  # === OUTPUT ===
+  
+  top_k: 3                      # Return top-k candidates (ARC allows 2-3 attempts)
 
 # =============================================================================
 # LOGGING
@@ -142,18 +226,24 @@ hardware:
 # NOTES FOR PUBLICATION
 # =============================================================================
 # Expected Results (based on architecture analysis):
-#   - Task Accuracy: Target 50%+ (vs TRM's 45%)
-#   - Pixel Accuracy: Target 85%+ 
-#   - Parameters: ~10-12M (1.5x TRM, still small)
-#   - Training Time: ~36-48 hours on RTX 3090
+#   - Task Accuracy: Target 20-30% without TTT (vs TRM's 45% with TTT)
+#   - Task Accuracy with TTT: Target 50%+
+#   - Pixel Accuracy: Target 90%+ on training tasks
+#   - Parameters: ~7-8M (matching TRM for fair comparison)
+#   - Training Time: ~72-96 hours on RTX 3090 (500 epochs)
 #
 # Key Advantages over TRM:
 #   1. Explicit structure-content separation (z_struct, z_content)
-#   2. Structural Contrastive Loss (SCL) for transformation learning
+#   2. Structural Contrastive Loss (SCL) with BatchNorm fix
 #   3. Causal Binding Module for relational reasoning
-#   4. More structure slots (12 vs implicit in TRM)
+#   4. Structure slots (8) for transformation pattern learning
 #
-# If you want even more performance, consider:
-#   - Increase hidden_dim to 512 (but check memory)
-#   - Add more H_cycles (5) for harder tasks
-#   - Use Test-Time Training (TTT) on test examples
+# CRITICAL TRAINING DIFFERENCES vs cached training:
+#   - cache_samples=false: Every batch is unique (infinite data)
+#   - 500 epochs: Model sees ~3200 * 500 = 1.6M+ unique variations
+#   - SCL weight=1.0: Full weight now that BatchNorm fix is in place
+#
+# For maximum performance, implement Test-Time Training (TTT):
+#   - Fine-tune on the 3 examples provided in each test task
+#   - This is how TRM achieves 45%+ accuracy
+#   - See scripts/ttt_inference.py (to be implemented)
