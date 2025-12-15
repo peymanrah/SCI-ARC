@@ -36,10 +36,10 @@ training:
   grad_clip: 1.0
   grad_accumulation_steps: 1
   
-  # Batch size optimized for SCL learning on RTX 3090 24GB
-  # Note: Large model may need to reduce to 128 if OOM
-  batch_size: 256
-  eval_batch_size: 256
+  # Batch size balanced for SCL learning and speed on RTX 3090 24GB
+  # 128 uses ~12GB VRAM for default model, may need 64 for large model
+  batch_size: 128
+  eval_batch_size: 128
   
   scl_weight: 0.15
   ortho_weight: 0.02
