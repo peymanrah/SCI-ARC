@@ -100,6 +100,11 @@ data:
   augment_rotation: true        # Random 90° rotations
   augment_flip: true            # Random flips
   augment_color: true           # Color permutation
+  
+  # SCL Transform Family Assignment
+  # CRITICAL for SCL learning: Use augmentation type (dihedral 0-7) as transform_family
+  # This ensures samples with same augmentation are positive pairs in contrastive learning
+  use_augment_family: true      # Use augmentation type as transform_family for SCL
 
 # =============================================================================
 # EVALUATION

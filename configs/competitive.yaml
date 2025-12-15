@@ -95,6 +95,10 @@ data:
   augment_flip: true            # Included in dihedral
   augment_color: true           # Color permutation (9! possibilities)
   augment_translation: true     # Translational augmentation
+  
+  # SCL Transform Family Assignment
+  # CRITICAL: Use augmentation type as transform_family for proper SCL learning
+  use_augment_family: true
 
 # =============================================================================
 # EVALUATION (MAXIMUM ACCURACY)

@@ -62,6 +62,9 @@ data:
   num_workers: 24
   pin_memory: true
   augment: true
+  
+  # SCL Transform Family Assignment
+  use_augment_family: true      # Use augmentation type as transform_family for SCL
 
 evaluation:
   num_attempts: 2

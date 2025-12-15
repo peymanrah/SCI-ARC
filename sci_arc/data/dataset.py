@@ -131,6 +131,7 @@ class SCIARCDataset(Dataset):
         curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
         cache_samples: bool = False,  # Enable in-memory caching
         cache_augmentations: int = 8,  # Number of augmented versions to pre-generate per task
+        use_augment_family: bool = True,  # Use augmentation type as transform_family for SCL
     ):
         """
         Initialize the dataset.
@@ -147,6 +148,9 @@ class SCIARCDataset(Dataset):
             curriculum_stage: Curriculum learning stage
             cache_samples: If True, cache processed samples in memory
             cache_augmentations: Number of pre-generated augmentations per task (only used when cache_samples=True and augment=True)
+            use_augment_family: If True, use augmentation type (dihedral_id 0-7) as transform_family.
+                This is CRITICAL for SCL to work properly - samples with same augmentation
+                type become positive pairs. Default True for proper SCL learning.
         """
         self.data_dir = Path(data_dir)
         self.split = split
@@ -157,6 +161,7 @@ class SCIARCDataset(Dataset):
         self.curriculum_stage = curriculum_stage
         self.cache_samples = cache_samples
         self.cache_augmentations = cache_augmentations
+        self.use_augment_family = use_augment_family
         
         # Cache storage
         self._cache: Dict[int, Any] = {}
@@ -373,11 +378,18 @@ class SCIARCDataset(Dataset):
         input_grids = [pair[0] for pair in task.train_pairs]
         output_grids = [pair[1] for pair in task.train_pairs]
         
+        # Default to task's transform family
+        transform_family = task.transform_family
+        
         # Apply augmentation if requested
         if apply_augment:
-            input_grids, output_grids, test_input, test_output = self._augment(
+            input_grids, output_grids, test_input, test_output, augment_info = self._augment(
                 input_grids, output_grids, test_input, test_output
             )
+            # Use augmentation type as transform_family for SCL
+            # This ensures samples with same augmentation (e.g., all rotate_90) are positive pairs
+            if self.use_augment_family:
+                transform_family = augment_info['dihedral_id']
         
         # Custom transform
         if self.transform_fn:
@@ -387,7 +399,7 @@ class SCIARCDataset(Dataset):
                 'output_grids': output_grids,
                 'test_input': test_input,
                 'test_output': test_output,
-                'transform_family': task.transform_family,
+                'transform_family': transform_family,
             })
         
         # Convert to tensors
@@ -400,7 +412,7 @@ class SCIARCDataset(Dataset):
             'output_grids': output_tensors,
             'test_input': torch.tensor(test_input, dtype=torch.long),
             'test_output': torch.tensor(test_output, dtype=torch.long),
-            'transform_family': task.transform_family,
+            'transform_family': transform_family,
             'num_train_pairs': len(task.train_pairs),
         }
     
@@ -410,7 +422,7 @@ class SCIARCDataset(Dataset):
         output_grids: List[np.ndarray],
         test_input: np.ndarray,
         test_output: np.ndarray
-    ) -> Tuple[List[np.ndarray], List[np.ndarray], np.ndarray, np.ndarray]:
+    ) -> Tuple[List[np.ndarray], List[np.ndarray], np.ndarray, np.ndarray, Dict[str, Any]]:
         """
         Apply data augmentation matching TRM exactly.
         
@@ -420,6 +432,11 @@ class SCIARCDataset(Dataset):
         3. Translational augmentation (optional)
         
         CRITICAL: All augmentations match TRM's dataset/build_arc_dataset.py
+        
+        Returns:
+            Tuple of (aug_inputs, aug_outputs, aug_test_in, aug_test_out, augment_info)
+            where augment_info contains {'dihedral_id': int, 'color_permuted': bool}
+            for use in SCL transform_family assignment.
         """
         # Dihedral transform (0-7)
         dihedral_id = random.randint(0, 7)
@@ -480,7 +497,14 @@ class SCIARCDataset(Dataset):
         aug_test_in = transform_grid(test_input)
         aug_test_out = transform_grid(test_output)
         
-        return aug_inputs, aug_outputs, aug_test_in, aug_test_out
+        # Return augmentation info for SCL transform_family assignment
+        augment_info = {
+            'dihedral_id': dihedral_id,  # 0-7, used as transform_family for SCL
+            'color_permuted': do_color_perm,
+            'translated': do_translate,
+        }
+        
+        return aug_inputs, aug_outputs, aug_test_in, aug_test_out, augment_info
 
 
 def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = 0) -> torch.Tensor:

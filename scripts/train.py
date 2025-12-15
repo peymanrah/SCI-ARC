@@ -259,6 +259,7 @@ def main():
         seed=seed if hw_cfg.get('deterministic', False) else None,
         cache_samples=cache_samples,
         cache_augmentations=cache_augmentations,
+        use_augment_family=data_cfg.get('use_augment_family', True),  # Critical for SCL learning
     )
     
     val_loader = create_dataloader(
