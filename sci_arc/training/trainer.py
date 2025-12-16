@@ -388,29 +388,101 @@ class SCIARCTrainer:
         return epoch_losses
     
     def _compute_losses(self, outputs: Dict, batch: Dict) -> Dict[str, torch.Tensor]:
-        """Compute all losses."""
+        """Compute all losses.
+        
+        IMPORTANT: Uses self.loss_fn.deep_supervision for task/deep losses which includes:
+        - Focal Loss (gamma > 0): Down-weights easy examples (background pixels)
+        - Class Weights: Penalizes non-background errors more heavily  
+        - Label Smoothing: Prevents overconfident predictions
+        
+        These are CRITICAL for preventing background collapse on ARC's ~85% background grids.
+        """
         losses = {}
         
         # Main task loss (grid prediction)
         logits = outputs['logits']  # [B, H, W, num_colors]
         targets = batch['test_outputs']  # [B, H, W]
-        
-        # Reshape for cross entropy
         B, H, W, C = logits.shape
-        logits_flat = logits.view(B * H * W, C)
-        targets_flat = targets.view(B * H * W)
         
-        task_loss = F.cross_entropy(logits_flat, targets_flat)
-        losses['task'] = task_loss
-        
-        # Deep supervision loss (intermediate predictions)
-        deep_loss = torch.tensor(0.0, device=self.device)
-        if 'intermediate_logits' in outputs and outputs['intermediate_logits']:
-            for inter_logits in outputs['intermediate_logits']:
-                inter_flat = inter_logits.view(B * H * W, C)
-                deep_loss += F.cross_entropy(inter_flat, targets_flat)
-            deep_loss /= len(outputs['intermediate_logits'])
-        losses['deep'] = deep_loss
+        # === USE LOSS_FN.DEEP_SUPERVISION FOR FOCAL LOSS SUPPORT ===
+        # This is the CRITICAL fix: use the deep_supervision component that has
+        # Focal Loss, Class Weights, and Label Smoothing built-in
+        if hasattr(self.loss_fn, 'deep_supervision'):
+            # Build list with final prediction for deep supervision loss
+            # deep_supervision expects list of [B, H, W, C] predictions
+            all_predictions = []
+            
+            # Add intermediate predictions if available
+            if 'intermediate_logits' in outputs and outputs['intermediate_logits']:
+                all_predictions.extend(outputs['intermediate_logits'])
+            
+            # Add final prediction
+            all_predictions.append(logits)
+            
+            # Compute combined task + deep loss using Focal Loss / Class Weights
+            combined_loss = self.loss_fn.deep_supervision(all_predictions, targets)
+            
+            # Split into task (final) and deep (intermediate) for logging
+            # For logging, compute what final prediction contributed
+            task_loss = self.loss_fn.deep_supervision([logits], targets)
+            deep_loss = combined_loss - task_loss if len(all_predictions) > 1 else torch.tensor(0.0, device=self.device)
+            
+            losses['task'] = task_loss
+            losses['deep'] = deep_loss
+            
+            # === DIAGNOSTIC: Log Focal Loss effect on first few batches ===
+            if not hasattr(self, '_focal_debug_count'):
+                self._focal_debug_count = 0
+            if self._focal_debug_count < 3:
+                ds = self.loss_fn.deep_supervision
+                focal_gamma = getattr(ds, 'focal_gamma', 0.0)
+                class_weights = getattr(ds, 'class_weights', None)
+                
+                # Compute per-class prediction distribution
+                with torch.no_grad():
+                    preds = logits.argmax(dim=-1)  # [B, H, W]
+                    total_pixels = preds.numel()
+                    
+                    # Count background vs non-background predictions
+                    bg_preds = (preds == 0).sum().item()
+                    content_preds = total_pixels - bg_preds
+                    bg_targets = (targets == 0).sum().item()
+                    content_targets = total_pixels - bg_targets
+                    
+                    print(f"\n[FOCAL LOSS DEBUG - Batch {self._focal_debug_count + 1}]")
+                    print(f"  Focal gamma: {focal_gamma:.1f}, Class weights: {'Active' if class_weights is not None else 'None'}")
+                    print(f"  Target distribution: {bg_targets/total_pixels*100:.1f}% background, {content_targets/total_pixels*100:.1f}% content")
+                    print(f"  Pred distribution:   {bg_preds/total_pixels*100:.1f}% background, {content_preds/total_pixels*100:.1f}% content")
+                    print(f"  Task loss: {task_loss.item():.4f}")
+                    
+                    # Compare with what standard CE would give
+                    logits_flat = logits.view(B * H * W, C)
+                    targets_flat = targets.view(B * H * W)
+                    standard_ce = F.cross_entropy(logits_flat, targets_flat)
+                    print(f"  Standard CE (for comparison): {standard_ce.item():.4f}")
+                    
+                    if focal_gamma > 0 and task_loss.item() < standard_ce.item():
+                        print(f"  ✓ Focal Loss is DOWN-WEIGHTING easy samples (loss reduced by {standard_ce.item() - task_loss.item():.4f})")
+                    elif focal_gamma > 0:
+                        print(f"  ✓ Focal Loss active (may increase loss on hard samples)")
+                
+                self._focal_debug_count += 1
+        else:
+            # Fallback to standard CE (without Focal Loss) if loss_fn doesn't have deep_supervision
+            logits_flat = logits.view(B * H * W, C)
+            targets_flat = targets.view(B * H * W)
+            
+            task_loss = F.cross_entropy(logits_flat, targets_flat)
+            losses['task'] = task_loss
+            
+            # Deep supervision loss (intermediate predictions)
+            deep_loss = torch.tensor(0.0, device=self.device)
+            if 'intermediate_logits' in outputs and outputs['intermediate_logits']:
+                for inter_logits in outputs['intermediate_logits']:
+                    inter_flat = inter_logits.view(B * H * W, C)
+                    deep_loss += F.cross_entropy(inter_flat, targets_flat)
+                deep_loss /= len(outputs['intermediate_logits'])
+            losses['deep'] = deep_loss
         
         # SCL loss - use the loss_fn's scl component if available
         scl_loss = torch.tensor(0.0, device=self.device)
@@ -658,6 +730,83 @@ class SCIARCTrainer:
             old_ckpt = checkpoints.pop(0)
             old_ckpt.unlink()
     
+    def _log_loss_config(self):
+        """Log loss function configuration to verify Focal Loss, Class Weights, etc are active.
+        
+        This is CRITICAL for debugging background collapse issues.
+        If Focal Loss/Class Weights are not active, the model will collapse to predicting background.
+        """
+        print(f"\n{'='*60}")
+        print("Loss Function Configuration:")
+        print(f"{'='*60}")
+        
+        if not hasattr(self.loss_fn, 'deep_supervision'):
+            print("  ⚠ WARNING: loss_fn has no deep_supervision component!")
+            print("  ⚠ Focal Loss, Class Weights, Label Smoothing will NOT be used!")
+            print(f"  Loss function type: {type(self.loss_fn).__name__}")
+            return
+        
+        ds = self.loss_fn.deep_supervision
+        
+        # Focal Loss
+        focal_gamma = getattr(ds, 'focal_gamma', 0.0)
+        if focal_gamma > 0:
+            print(f"  ✓ FOCAL LOSS: gamma={focal_gamma:.1f} (DOWN-WEIGHTS EASY/BACKGROUND PIXELS)")
+            print(f"    Formula: FL(pt) = -(1-pt)^{focal_gamma:.1f} * log(pt)")
+            print(f"    Effect: Easy samples (background) get ~{(1-0.85)**focal_gamma:.3f}x weight")
+            print(f"            Hard samples (content) get ~{(1-0.15)**focal_gamma:.3f}x weight")
+        else:
+            print(f"  ✗ Focal Loss: DISABLED (gamma=0)")
+            print(f"    ⚠ Model may collapse to predicting mostly background!")
+        
+        # Class Weights
+        class_weights = getattr(ds, 'class_weights', None)
+        if class_weights is not None:
+            print(f"\n  ✓ CLASS WEIGHTS: ACTIVE")
+            bg_weight = class_weights[0].item() if class_weights.numel() > 0 else 1.0
+            other_weight = class_weights[1].item() if class_weights.numel() > 1 else 1.0
+            print(f"    Background (0): {bg_weight:.2f}")
+            print(f"    Other colors:   {other_weight:.2f}")
+            print(f"    Effect: Non-background errors penalized {other_weight/bg_weight:.0f}x more")
+        else:
+            print(f"\n  ✗ Class Weights: DISABLED")
+            print(f"    ⚠ All colors weighted equally (background dominates)")
+        
+        # Label Smoothing
+        label_smoothing = getattr(ds, 'label_smoothing', 0.0)
+        if label_smoothing > 0:
+            print(f"\n  ✓ LABEL SMOOTHING: {label_smoothing:.2f}")
+            print(f"    Effect: Prevents overconfident predictions")
+        else:
+            print(f"\n  ✗ Label Smoothing: DISABLED")
+        
+        # Deep Supervision
+        num_steps = getattr(ds, 'num_steps', 1)
+        weight_schedule = getattr(ds, 'weight_schedule', 'unknown')
+        print(f"\n  Deep Supervision:")
+        print(f"    Refinement steps: {num_steps}")
+        print(f"    Weight schedule: {weight_schedule}")
+        
+        # Summary
+        print(f"\n  === ANTI-BACKGROUND-COLLAPSE STATUS ===")
+        active_defenses = []
+        if focal_gamma > 0:
+            active_defenses.append(f"Focal(γ={focal_gamma})")
+        if class_weights is not None:
+            active_defenses.append("ClassWeights")
+        if label_smoothing > 0:
+            active_defenses.append(f"LabelSmooth({label_smoothing})")
+        
+        if active_defenses:
+            print(f"  ✓ Active: {', '.join(active_defenses)}")
+            print(f"  Model should focus on content pixels, not just background.")
+        else:
+            print(f"  ⚠ NO DEFENSES ACTIVE!")
+            print(f"  ⚠ Model will likely collapse to predicting all background!")
+            print(f"  ⚠ Enable focal_gamma, use_class_weights in config!")
+        
+        print(f"{'='*60}")
+    
     def _log_dataset_info(self):
         """Log dataset configuration for debugging (especially for infinite data mode)."""
         dataset = self.train_loader.dataset
@@ -797,6 +946,9 @@ class SCIARCTrainer:
         for key, value in self.config.__dict__.items():
             print(f"  {key}: {value}")
         print(f"{'='*60}")
+        
+        # === LOG LOSS FUNCTION CONFIGURATION (CRITICAL FOR DEBUGGING) ===
+        self._log_loss_config()
         
         # === DIAGNOSTIC: Dataset info for debugging infinite data ===
         self._log_dataset_info()

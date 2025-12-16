@@ -248,6 +248,16 @@ def main():
     # Load model
     model = load_model(args.checkpoint, device)
     
+    # === LOG MODEL CONFIGURATION FOR DEBUGGING ===
+    print("\n" + "=" * 60)
+    print("Model Configuration Check:")
+    print("=" * 60)
+    print(f"  Hidden dim: {model.config.hidden_dim}")
+    print(f"  H_cycles: {model.config.H_cycles}")
+    print(f"  L_cycles: {model.config.L_cycles}")
+    print(f"  Deep Supervision: {model.config.deep_supervision}")
+    print("=" * 60)
+    
     # Load data
     print(f"\nLoading data from: {args.data}/{args.split}")
     

@@ -45,6 +45,11 @@ training:
   ortho_weight: 0.01
   deep_supervision_weight: 0.5
   
+  # Anti-background-collapse (CRITICAL for ARC's ~85% background grids)
+  focal_gamma: 2.0              # Focal Loss gamma (down-weights easy/background pixels)
+  use_class_weights: true       # Background weight=0.1, others=1.0
+  label_smoothing: 0.1          # Prevents overconfident predictions
+  
   scheduler_type: cosine
   min_lr: 1.0e-6
   
