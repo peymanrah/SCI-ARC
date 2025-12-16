@@ -9,26 +9,45 @@ refines its prediction over T steps, conditioning on:
 - Input grid (for residual/copy connections)
 
 Key Features:
-- ConvGRU for iterative refinement
+- ConvGRU for iterative refinement (with optional SwiGLU activation)
 - Multi-scale feature integration
 - Predicate-based gating for conditional computation
 - Deep supervision at each step
+- Adaptive Computation Time (ACT) for variable reasoning depth
 
 Architecture:
     For t = 1 to T:
         1. Aggregate clue features
         2. Inject count information
         3. Modulate by predicates
-        4. ConvGRU update
+        4. ConvGRU update (with SwiGLU)
         5. Predict logits
+        6. (Optional) ACT halt decision
+
+Module Integrations:
+    - SwiGLU: Used in FFN for improved gradient flow
+    - RoPE-inspired: Position-aware updates (via MSRE)
+    - ACT: Adaptive halting for variable reasoning depth
 """
 
 import math
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Import SwiGLU for enhanced FFN
+try:
+    from .activations import SwiGLU, SwiGLUConv2d
+    SWIGLU_AVAILABLE = True
+except ImportError:
+    SWIGLU_AVAILABLE = False
+
+
+def _find_multiple(a: int, b: int) -> int:
+    """Round up a to the nearest multiple of b."""
+    return (-(a // -b)) * b
 
 
 class ConvGRUCell(nn.Module):
@@ -37,6 +56,8 @@ class ConvGRUCell(nn.Module):
     
     Unlike standard GRU which operates on vectors, ConvGRU
     maintains spatial structure while performing recurrent updates.
+    
+    Enhanced with SwiGLU option for better gradient flow (TRM-style).
     """
     
     def __init__(
@@ -44,10 +65,12 @@ class ConvGRUCell(nn.Module):
         input_dim: int,
         hidden_dim: int,
         kernel_size: int = 3,
+        use_swiglu: bool = True,
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
+        self.use_swiglu = use_swiglu and SWIGLU_AVAILABLE
         padding = kernel_size // 2
         
         # Reset gate
@@ -63,10 +86,25 @@ class ConvGRUCell(nn.Module):
         )
         
         # Candidate state
-        self.candidate = nn.Conv2d(
-            input_dim + hidden_dim, hidden_dim,
-            kernel_size=kernel_size, padding=padding
-        )
+        if self.use_swiglu:
+            # Use SwiGLUConv2d for candidate generation (more expressive)
+            # Input is (input_dim + hidden_dim), output is hidden_dim
+            self.candidate = SwiGLUConv2d(
+                channels=hidden_dim, # SwiGLUConv2d takes channels as input/output
+                expansion=2.0,       # Expansion factor
+                kernel_size=kernel_size
+            )
+            # Projection to match SwiGLU input requirement
+            self.candidate_proj = nn.Conv2d(
+                input_dim + hidden_dim, hidden_dim,
+                kernel_size=1
+            )
+        else:
+            # Standard Tanh candidate
+            self.candidate = nn.Conv2d(
+                input_dim + hidden_dim, hidden_dim,
+                kernel_size=kernel_size, padding=padding
+            )
         
         self.norm = nn.GroupNorm(8, hidden_dim)
     
@@ -97,9 +135,16 @@ class ConvGRUCell(nn.Module):
         r = torch.sigmoid(self.reset_gate(combined))
         z = torch.sigmoid(self.update_gate(combined))
         
-        # Compute candidate with reset gate
+        # Compute candidate
         combined_reset = torch.cat([x, r * h], dim=1)
-        h_candidate = torch.tanh(self.candidate(combined_reset))
+        
+        if self.use_swiglu:
+            # SwiGLU path
+            proj = self.candidate_proj(combined_reset)
+            h_candidate = self.candidate(proj)
+        else:
+            # Standard Tanh path
+            h_candidate = torch.tanh(self.candidate(combined_reset))
         
         # Update hidden state
         h_new = (1 - z) * h + z * h_candidate
@@ -163,6 +208,8 @@ class RecursiveSolver(nn.Module):
     
     Generates output predictions by iteratively refining a hidden state,
     conditioned on clue features, count embeddings, and predicates.
+    
+    Now supports Adaptive Computation Time (ACT) for variable steps.
     """
     
     def __init__(
@@ -173,6 +220,7 @@ class RecursiveSolver(nn.Module):
         num_predicates: int = 8,
         num_colors: int = 10,
         dropout: float = 0.1,
+        use_act: bool = False,  # Enable Adaptive Computation Time
     ):
         """
         Args:
@@ -182,12 +230,14 @@ class RecursiveSolver(nn.Module):
             num_predicates: Number of predicate inputs
             num_colors: Number of input colors (for count embedding)
             dropout: Dropout probability
+            use_act: Whether to use Adaptive Computation Time
         """
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.num_classes = num_classes
         self.num_steps = num_steps
+        self.use_act = use_act
         
         # Clue feature aggregation
         self.clue_aggregator = nn.Sequential(
@@ -206,8 +256,8 @@ class RecursiveSolver(nn.Module):
         # Predicate gating
         self.predicate_gate = PredicateGating(hidden_dim, num_predicates)
         
-        # ConvGRU for iterative refinement
-        self.gru = ConvGRUCell(hidden_dim * 2, hidden_dim)
+        # ConvGRU for iterative refinement (with SwiGLU)
+        self.gru = ConvGRUCell(hidden_dim * 2, hidden_dim, use_swiglu=True)
         
         # Input grid embedding (for copy/residual connections)
         self.input_embed = nn.Embedding(num_colors + 1, hidden_dim)  # +1 for padding
@@ -219,6 +269,19 @@ class RecursiveSolver(nn.Module):
             nn.GroupNorm(8, hidden_dim),
             nn.Conv2d(hidden_dim, num_classes, 1),
         )
+        
+        # ACT Controller (optional)
+        if use_act:
+            try:
+                from .adaptive_computation import ACTController
+                self.act_controller = ACTController(
+                    hidden_dim=hidden_dim,
+                    max_steps=num_steps,
+                    use_q_continue=True
+                )
+            except ImportError:
+                print("Warning: ACTController not found, disabling ACT")
+                self.use_act = False
         
         self.dropout = nn.Dropout(dropout)
     
@@ -326,14 +389,59 @@ class RecursiveSolver(nn.Module):
         h = None
         all_logits = []
         
+        # ACT state initialization
+        act_state = None
+        act_outputs = {}
+        if self.use_act:
+            act_state = self.act_controller.init_state(B, device)
+        
         # Iterative refinement
         for t in range(self.num_steps):
+            # Check if all samples have halted (inference only)
+            if self.use_act and not self.training and act_state.halted.all():
+                break
+                
             # Combine aggregated features with input embedding
             combined = torch.cat([aggregated, input_embed], dim=1)  # (B, 2D, H, W)
             combined = self.dropout(combined)
             
             # GRU update
-            h = self.gru(combined, h)
+            h_new = self.gru(combined, h)
+            
+            # Handle ACT updates
+            if self.use_act:
+                # Decide whether to halt based on new state
+                halt_decision, step_outputs = self.act_controller.should_halt(h_new, act_state)
+                
+                # Update state (only for non-halted samples)
+                # During training we run all steps but mask loss
+                # During inference we can actually stop computation
+                
+                if self.training:
+                    h = h_new  # Always update during training
+                    
+                    # Store ACT outputs for loss
+                    for k, v in step_outputs.items():
+                        if k not in act_outputs:
+                            act_outputs[k] = []
+                        act_outputs[k].append(v)
+                        
+                    # Update ACT state counters
+                    act_state.steps += 1
+                    act_state.halted = act_state.halted | halt_decision
+                else:
+                    # Inference: only update non-halted
+                    active_mask = ~act_state.halted
+                    if h is None:
+                        h = h_new
+                    else:
+                        # Only update active samples
+                        h = torch.where(active_mask.view(B, 1, 1, 1), h_new, h)
+                    
+                    act_state.steps += active_mask.long()
+                    act_state.halted = act_state.halted | halt_decision
+            else:
+                h = h_new
             
             # Predict output
             logits = self.output_head(h)  # (B, num_classes, H, W)

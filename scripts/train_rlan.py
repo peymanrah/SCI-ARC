@@ -190,6 +190,7 @@ def create_model(config: dict) -> RLAN:
         max_clues=model_config['max_clues'],
         num_predicates=model_config['num_predicates'],
         num_solver_steps=model_config['num_solver_steps'],
+        use_act=model_config.get('use_act', False),
         dropout=model_config['dropout'],
     )
     
@@ -442,7 +443,7 @@ def evaluate(
     dataloader: DataLoader,
     device: torch.device,
 ) -> Dict[str, float]:
-    """Evaluate model on validation set with detailed metrics."""
+    """Evaluate model on validation set with detailed metrics for debugging."""
     model.eval()
     
     total_correct = 0
@@ -456,6 +457,12 @@ def evaluate(
     color_predictions = [0] * 11  # Count predictions per color
     color_targets = [0] * 11
     
+    # Module-specific debugging metrics
+    dsc_entropy_sum = 0.0
+    dsc_usage_sum = 0.0  # How many clues are used (non-stopped)
+    predicate_activation_sum = 0.0
+    num_eval_samples = 0
+    
     with torch.no_grad():
         for batch in dataloader:
             test_inputs = batch['test_inputs'].to(device)
@@ -466,14 +473,17 @@ def evaluate(
             train_outputs = batch['output_grids'].to(device)
             pair_mask = batch['grid_masks'].to(device)
             
-            # Predict with low temperature (sharp) and context
-            logits = model(
+            # Predict with low temperature (sharp) and context, return intermediates
+            outputs = model(
                 test_inputs,
                 train_inputs=train_inputs,
                 train_outputs=train_outputs,
                 pair_mask=pair_mask,
-                temperature=0.1
+                temperature=0.1,
+                return_intermediates=True,
             )
+            
+            logits = outputs['logits']
             predictions = logits.argmax(dim=1)
             
             # Pixel accuracy
@@ -499,6 +509,28 @@ def evaluate(
                 if (predictions[i] == test_outputs[i]).all():
                     correct_tasks += 1
                 total_tasks += 1
+            
+            # DSC metrics (attention maps)
+            if 'attention_maps' in outputs:
+                attn = outputs['attention_maps']  # (B, K, H, W)
+                attn_flat = attn.view(attn.shape[0], attn.shape[1], -1)
+                # Entropy of attention (lower = sharper = better)
+                attn_clamp = attn_flat.clamp(min=1e-10)
+                entropy = -(attn_clamp * attn_clamp.log()).sum(dim=-1).mean()
+                dsc_entropy_sum += entropy.item() * batch_size
+            
+            # DSC usage (from stop_logits)
+            if 'stop_logits' in outputs:
+                stop_probs = torch.sigmoid(outputs['stop_logits'])  # (B, K)
+                usage = (stop_probs < 0.5).float().sum(dim=-1).mean()  # Avg clues used
+                dsc_usage_sum += usage.item() * batch_size
+            
+            # Predicate activations
+            if 'predicates' in outputs:
+                pred_act = outputs['predicates'].abs().mean()
+                predicate_activation_sum += pred_act.item() * batch_size
+            
+            num_eval_samples += batch_size
     
     pixel_accuracy = total_correct / max(total_pixels, 1)
     task_accuracy = correct_tasks / max(total_tasks, 1)
@@ -508,12 +540,21 @@ def evaluate(
     bg_ratio_pred = color_predictions[0] / max(sum(color_predictions), 1)
     bg_ratio_target = color_targets[0] / max(sum(color_targets), 1)
     
+    # Color diversity (how many colors are actually predicted)
+    colors_used = sum(1 for c in color_predictions if c > 0)
+    colors_target = sum(1 for c in color_targets if c > 0)
+    
     return {
         'pixel_accuracy': pixel_accuracy,
         'task_accuracy': task_accuracy,
         'non_bg_accuracy': non_bg_accuracy,
         'bg_ratio_pred': bg_ratio_pred,
         'bg_ratio_target': bg_ratio_target,
+        'colors_used': colors_used,
+        'colors_target': colors_target,
+        'dsc_entropy': dsc_entropy_sum / max(num_eval_samples, 1),
+        'dsc_clues_used': dsc_usage_sum / max(num_eval_samples, 1),
+        'predicate_activation': predicate_activation_sum / max(num_eval_samples, 1),
     }
 
 
@@ -801,6 +842,10 @@ Config Overrides:
     print(f"\nStarting training from epoch {start_epoch} to {max_epochs}")
     print("=" * 60)
     
+    # Collapse detection state
+    collapse_warnings = 0
+    max_collapse_warnings = 5  # Stop after this many consecutive warnings
+    
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
         
@@ -821,7 +866,11 @@ Config Overrides:
         print(f"Epoch {epoch + 1} Summary:")
         print(f"  Train Loss: {train_losses['total_loss']:.4f}")
         print(f"  Focal Loss: {train_losses['focal_loss']:.4f}")
-        print(f"  Time: {epoch_time:.1f}s")
+        print(f"  Entropy Loss: {train_losses.get('entropy_loss', 0):.4f}")
+        print(f"  Sparsity Loss: {train_losses.get('sparsity_loss', 0):.4f}")
+        print(f"  Predicate Loss: {train_losses.get('predicate_loss', 0):.4f}")
+        print(f"  Curriculum Loss: {train_losses.get('curriculum_loss', 0):.4f}")
+        print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:
@@ -833,16 +882,66 @@ Config Overrides:
                 eval_model = model
             
             eval_metrics = evaluate(eval_model, eval_loader, device)
+            
+            # Core metrics
             print(f"  Pixel Accuracy: {eval_metrics['pixel_accuracy']:.4f}")
             print(f"  Task Accuracy: {eval_metrics['task_accuracy']:.4f}")
             print(f"  Non-BG Accuracy: {eval_metrics['non_bg_accuracy']:.4f}")
             print(f"  BG Ratio (pred/target): {eval_metrics['bg_ratio_pred']:.2%} / {eval_metrics['bg_ratio_target']:.2%}")
+            print(f"  Colors Used (pred/target): {eval_metrics['colors_used']} / {eval_metrics['colors_target']}")
+            
+            # Module-specific metrics for debugging
+            print(f"  DSC Entropy: {eval_metrics['dsc_entropy']:.4f} (lower=sharper)")
+            print(f"  DSC Clues Used: {eval_metrics['dsc_clues_used']:.2f}")
+            print(f"  Predicate Activation: {eval_metrics['predicate_activation']:.4f}")
+            
             if ema is not None:
                 print("  (Using EMA weights for evaluation)")
             
-            # Detect background collapse
-            if eval_metrics['bg_ratio_pred'] > eval_metrics['bg_ratio_target'] + 0.1:
-                print("  [WARNING] Possible background collapse detected!")
+            # ============================================================
+            # BACKGROUND COLLAPSE DETECTION - CRITICAL FOR DEBUGGING
+            # ============================================================
+            is_collapsing = False
+            collapse_reasons = []
+            
+            # Check 1: Excessive background prediction
+            bg_excess = eval_metrics['bg_ratio_pred'] - eval_metrics['bg_ratio_target']
+            if bg_excess > 0.15:  # 15% more BG than target
+                is_collapsing = True
+                collapse_reasons.append(f"BG excess: {bg_excess:.1%}")
+            
+            # Check 2: Zero non-background accuracy
+            if eval_metrics['non_bg_accuracy'] < 0.01 and epoch > 10:
+                is_collapsing = True
+                collapse_reasons.append(f"Non-BG acc: {eval_metrics['non_bg_accuracy']:.1%}")
+            
+            # Check 3: Too few colors predicted
+            if eval_metrics['colors_used'] < eval_metrics['colors_target'] - 3:
+                is_collapsing = True
+                collapse_reasons.append(f"Colors: {eval_metrics['colors_used']}/{eval_metrics['colors_target']}")
+            
+            # Check 4: DSC not differentiating (very high entropy)
+            if eval_metrics['dsc_entropy'] > 5.0 and epoch > 20:
+                is_collapsing = True
+                collapse_reasons.append(f"DSC entropy: {eval_metrics['dsc_entropy']:.2f}")
+            
+            if is_collapsing:
+                collapse_warnings += 1
+                print(f"\n  ⚠️  [WARNING] BACKGROUND COLLAPSE DETECTED! ({collapse_warnings}/{max_collapse_warnings})")
+                print(f"      Reasons: {', '.join(collapse_reasons)}")
+                print(f"      Consider: Lower learning rate, increase focal_alpha, check ContextEncoder")
+                
+                if collapse_warnings >= max_collapse_warnings:
+                    print(f"\n  🛑 [CRITICAL] {max_collapse_warnings} consecutive collapse warnings!")
+                    print(f"      Training appears to have failed. Please review:")
+                    print(f"      1. ContextEncoder - is it receiving training pairs?")
+                    print(f"      2. focal_alpha - try increasing to 0.5-0.75")
+                    print(f"      3. learning_rate - try reducing by 2-5x")
+                    print(f"      4. lambda_entropy - try increasing to focus attention")
+                    print(f"\n      Stopping training to prevent wasted compute.")
+                    break
+            else:
+                collapse_warnings = 0  # Reset on good epoch
             
             # Log to wandb - all loss components for complete monitoring
             if wandb_enabled:
@@ -861,9 +960,16 @@ Config Overrides:
                     'non_bg_accuracy': eval_metrics['non_bg_accuracy'],
                     'bg_ratio_pred': eval_metrics['bg_ratio_pred'],
                     'bg_ratio_target': eval_metrics['bg_ratio_target'],
+                    'colors_used': eval_metrics['colors_used'],
+                    'colors_target': eval_metrics['colors_target'],
+                    # Module debugging
+                    'dsc_entropy': eval_metrics['dsc_entropy'],
+                    'dsc_clues_used': eval_metrics['dsc_clues_used'],
+                    'predicate_activation': eval_metrics['predicate_activation'],
                     # Training state
                     'lr': optimizer.param_groups[0]['lr'],
                     'temperature': get_temperature(epoch, config),
+                    'collapse_warnings': collapse_warnings,
                 })
             
             # Save best model

@@ -78,6 +78,7 @@ class RLANConfig:
     
     # Solver parameters
     num_solver_steps: int = 6
+    use_act: bool = False  # Adaptive Computation Time
     
     # Training parameters
     dropout: float = 0.1
@@ -115,6 +116,7 @@ class RLAN(nn.Module):
         max_clues: int = 5,
         num_predicates: int = 8,
         num_solver_steps: int = 6,
+        use_act: bool = False,
         dropout: float = 0.1,
         config: Optional[RLANConfig] = None,
     ):
@@ -129,6 +131,7 @@ class RLAN(nn.Module):
             max_clues: Maximum spatial anchors to discover
             num_predicates: Number of binary predicates
             num_solver_steps: Refinement iterations
+            use_act: Whether to use Adaptive Computation Time
             dropout: Dropout probability
             config: Optional RLANConfig (overrides individual params)
         """
@@ -143,6 +146,7 @@ class RLAN(nn.Module):
             max_clues = config.max_clues
             num_predicates = config.num_predicates
             num_solver_steps = config.num_solver_steps
+            use_act = config.use_act
             dropout = config.dropout
         
         self.hidden_dim = hidden_dim
@@ -151,6 +155,7 @@ class RLAN(nn.Module):
         self.max_clues = max_clues
         self.num_predicates = num_predicates
         self.num_solver_steps = num_solver_steps
+        self.use_act = use_act
         self.max_grid_size = max_grid_size
         
         # Grid Encoder (reuse existing implementation)
@@ -410,6 +415,7 @@ class RLAN(nn.Module):
                 "max_clues": self.max_clues,
                 "num_predicates": self.num_predicates,
                 "num_solver_steps": self.num_solver_steps,
+                "use_act": self.use_act,
                 "max_grid_size": self.max_grid_size,
             },
             **extra_data,

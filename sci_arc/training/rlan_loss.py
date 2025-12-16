@@ -5,10 +5,11 @@ Comprehensive loss module for training RLAN on ARC tasks.
 
 Loss Components:
 1. Focal Loss - Primary task loss with class imbalance handling
-2. Entropy Regularization - Encourage sharp attention maps
-3. Sparsity Regularization - Encourage stopping early when possible
-4. Predicate Diversity - Decorrelate predicate activations
-5. Curriculum Penalty - Progressive complexity scheduling
+2. Stablemax Loss - Numerically stable alternative (from TRM)
+3. Entropy Regularization - Encourage sharp attention maps
+4. Sparsity Regularization - Encourage stopping early when possible
+5. Predicate Diversity - Decorrelate predicate activations
+6. Curriculum Penalty - Progressive complexity scheduling
 
 The combined loss enables stable training while encouraging:
 - Sharp, interpretable attention patterns
@@ -22,6 +23,201 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def stablemax(x: torch.Tensor, epsilon: float = 1e-30) -> torch.Tensor:
+    """
+    Stablemax activation function (from TRM).
+    
+    More numerically stable than softmax for extreme values.
+    s(x) = 1/(1-x) for x < 0, else x + 1
+    
+    Args:
+        x: Input tensor
+        epsilon: Small constant for stability
+        
+    Returns:
+        Stablemax activations
+    """
+    return torch.where(
+        x < 0,
+        1 / (1 - x + epsilon),
+        x + 1
+    )
+
+
+def log_stablemax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """
+    Log stablemax for stable cross entropy computation.
+    
+    Args:
+        x: Input logits
+        dim: Dimension to normalize over
+        
+    Returns:
+        Log probabilities using stablemax normalization
+    """
+    s_x = stablemax(x)
+    return torch.log(s_x / torch.sum(s_x, dim=dim, keepdim=True))
+
+
+class StablemaxCrossEntropy(nn.Module):
+    """
+    Stablemax Cross Entropy Loss (from TRM).
+    
+    Uses stablemax instead of softmax for better numerical stability.
+    Particularly useful when logits can have extreme values.
+    
+    Args:
+        reduction: 'mean', 'sum', or 'none'
+        ignore_index: Label to ignore
+    """
+    
+    def __init__(
+        self,
+        reduction: str = "mean",
+        ignore_index: int = -100,
+    ):
+        super().__init__()
+        self.reduction = reduction
+        self.ignore_index = ignore_index
+    
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute stablemax cross entropy loss.
+        
+        Args:
+            logits: Shape (B, C, H, W) unnormalized logits
+            targets: Shape (B, H, W) target class indices
+            
+        Returns:
+            loss: Scalar or per-pixel loss
+        """
+        B, C, H, W = logits.shape
+        
+        # Flatten for loss computation
+        logits_flat = logits.permute(0, 2, 3, 1).reshape(-1, C)  # (B*H*W, C)
+        targets_flat = targets.reshape(-1)  # (B*H*W,)
+        
+        # Create mask for valid positions
+        valid_mask = targets_flat != self.ignore_index
+        
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+        
+        # Filter to valid positions
+        logits_valid = logits_flat[valid_mask]
+        targets_valid = targets_flat[valid_mask]
+        
+        # Compute log stablemax probabilities (use float64 for precision)
+        logprobs = log_stablemax(logits_valid.to(torch.float64), dim=-1)
+        
+        # Gather log probs for target classes
+        prediction_logprobs = torch.gather(
+            logprobs,
+            index=targets_valid.unsqueeze(-1).to(torch.long),
+            dim=-1
+        ).squeeze(-1)
+        
+        # Negative log likelihood
+        loss = -prediction_logprobs.to(logits.dtype)
+        
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        else:
+            full_loss = torch.zeros(B * H * W, device=logits.device)
+            full_loss[valid_mask] = loss
+            return full_loss.view(B, H, W)
+
+
+class FocalStablemaxLoss(nn.Module):
+    """
+    Focal Loss with Stablemax denominator.
+    
+    Combines the class-balancing benefits of Focal Loss
+    with the numerical stability of Stablemax.
+    
+    Best of both worlds for ARC training.
+    
+    Args:
+        gamma: Focusing parameter
+        alpha: Class weight for foreground
+        reduction: 'mean', 'sum', or 'none'
+        ignore_index: Label to ignore
+    """
+    
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        alpha: float = 0.25,
+        reduction: str = "mean",
+        ignore_index: int = -100,
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+        self.ignore_index = ignore_index
+    
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute focal stablemax loss.
+        """
+        B, C, H, W = logits.shape
+        
+        logits_flat = logits.permute(0, 2, 3, 1).reshape(-1, C)
+        targets_flat = targets.reshape(-1)
+        
+        valid_mask = targets_flat != self.ignore_index
+        
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+        
+        logits_valid = logits_flat[valid_mask]
+        targets_valid = targets_flat[valid_mask]
+        
+        # Use stablemax for probabilities
+        s_x = stablemax(logits_valid.to(torch.float64))
+        probs = s_x / s_x.sum(dim=-1, keepdim=True)
+        probs = probs.to(logits.dtype)
+        
+        # Get target probabilities
+        target_probs = probs.gather(1, targets_valid.unsqueeze(1)).squeeze(1)
+        target_probs = target_probs.clamp(min=1e-7, max=1.0 - 1e-7)
+        
+        # Focal weight
+        focal_weight = (1 - target_probs) ** self.gamma
+        
+        # Alpha weight
+        is_background = (targets_valid == 0).float()
+        alpha_weight = is_background * (1 - self.alpha) + (1 - is_background) * self.alpha
+        
+        # Cross entropy using log stablemax
+        logprobs = log_stablemax(logits_valid.to(torch.float64), dim=-1).to(logits.dtype)
+        ce_loss = -torch.gather(logprobs, 1, targets_valid.unsqueeze(1)).squeeze(1)
+        ce_loss = ce_loss.clamp(max=100.0)
+        
+        # Combined focal loss
+        focal_loss = alpha_weight * focal_weight * ce_loss
+        
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            full_loss = torch.zeros(B * H * W, device=logits.device)
+            full_loss[valid_mask] = focal_loss
+            return full_loss.view(B, H, W)
 
 
 class FocalLoss(nn.Module):

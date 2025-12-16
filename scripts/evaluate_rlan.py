@@ -492,6 +492,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> RLAN:
         max_clues=model_config.get('max_clues', 5),
         num_predicates=model_config.get('num_predicates', 8),
         num_solver_steps=model_config.get('num_solver_steps', 6),
+        use_act=model_config.get('use_act', False),
     )
     
     # Load weights

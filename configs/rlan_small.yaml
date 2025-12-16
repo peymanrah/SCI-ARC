@@ -13,6 +13,7 @@ model:
   max_clues: 5
   num_predicates: 8
   num_solver_steps: 6
+  use_act: false
   dropout: 0.1
   
   # DSC parameters
@@ -32,7 +33,7 @@ training:
   # For hidden_dim=128 (small model): batch_size=128 fits easily (~12GB)
   batch_size: 128
   learning_rate: 1.0e-4
-  weight_decay: 1.0e-5
+  weight_decay: 0.1  # Match TRM for regularization
   gradient_clip: 1.0
   
   # Temperature schedule for Gumbel-softmax
@@ -90,7 +91,8 @@ data:
     enabled: true
     rotation: true
     flip: true
-    color_permutation: false  # NOT used in RLAN - spatial reasoning only
+    transpose: true
+    color_permutation: true  # Full augmentation for maximum diversity
 
 evaluation:
   num_guesses: 2
