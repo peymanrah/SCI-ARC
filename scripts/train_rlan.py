@@ -215,8 +215,14 @@ def create_loss(config: dict) -> RLANLoss:
     return loss_fn
 
 
-def create_optimizer(model: nn.Module, config: dict):
-    """Create optimizer and scheduler."""
+def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None):
+    """Create optimizer and scheduler.
+    
+    Args:
+        model: The model to optimize
+        config: Configuration dict
+        steps_per_epoch: Number of training batches per epoch (for OneCycle)
+    """
     train_config = config['training']
     
     # Separate parameters with and without weight decay
@@ -253,12 +259,16 @@ def create_optimizer(model: nn.Module, config: dict):
             eta_min=min_lr,
         )
     elif scheduler_type == 'onecycle':
+        # OneCycleLR needs total_steps = epochs × steps_per_epoch
+        total_steps = max_epochs * (steps_per_epoch or 1)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
             max_lr=train_config['learning_rate'],
-            total_steps=max_epochs,
-            pct_start=warmup_epochs / max_epochs,
+            total_steps=total_steps,
+            pct_start=warmup_epochs / max_epochs,  # Warmup fraction
             anneal_strategy='cos',
+            div_factor=25.0,  # initial_lr = max_lr / 25
+            final_div_factor=1000.0,  # final_lr = max_lr / 1000
         )
     else:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -324,11 +334,19 @@ def train_epoch(
         test_inputs = batch['test_inputs'].to(device)
         test_outputs = batch['test_outputs'].to(device)
         
+        # Get training context (CRITICAL for ARC learning!)
+        train_inputs = batch['input_grids'].to(device)  # (B, N, H, W)
+        train_outputs = batch['output_grids'].to(device)  # (B, N, H, W)
+        pair_mask = batch['grid_masks'].to(device)  # (B, N)
+        
         # Forward pass with optional mixed precision
         if use_amp and scaler is not None:
             with autocast('cuda'):
                 outputs = model(
                     test_inputs,
+                    train_inputs=train_inputs,
+                    train_outputs=train_outputs,
+                    pair_mask=pair_mask,
                     temperature=temperature,
                     return_intermediates=True,
                 )
@@ -365,6 +383,9 @@ def train_epoch(
         else:
             outputs = model(
                 test_inputs,
+                train_inputs=train_inputs,
+                train_outputs=train_outputs,
+                pair_mask=pair_mask,
                 temperature=temperature,
                 return_intermediates=True,
             )
@@ -421,7 +442,7 @@ def evaluate(
     dataloader: DataLoader,
     device: torch.device,
 ) -> Dict[str, float]:
-    """Evaluate model on validation set."""
+    """Evaluate model on validation set with detailed metrics."""
     model.eval()
     
     total_correct = 0
@@ -429,19 +450,48 @@ def evaluate(
     total_tasks = 0
     correct_tasks = 0
     
+    # Additional metrics for debugging
+    total_non_bg_correct = 0
+    total_non_bg_pixels = 0
+    color_predictions = [0] * 11  # Count predictions per color
+    color_targets = [0] * 11
+    
     with torch.no_grad():
         for batch in dataloader:
             test_inputs = batch['test_inputs'].to(device)
             test_outputs = batch['test_outputs'].to(device)
             
-            # Predict with low temperature (sharp)
-            logits = model(test_inputs, temperature=0.1)
+            # Get training context for proper evaluation
+            train_inputs = batch['input_grids'].to(device)
+            train_outputs = batch['output_grids'].to(device)
+            pair_mask = batch['grid_masks'].to(device)
+            
+            # Predict with low temperature (sharp) and context
+            logits = model(
+                test_inputs,
+                train_inputs=train_inputs,
+                train_outputs=train_outputs,
+                pair_mask=pair_mask,
+                temperature=0.1
+            )
             predictions = logits.argmax(dim=1)
             
             # Pixel accuracy
             correct = (predictions == test_outputs).float()
             total_correct += correct.sum().item()
             total_pixels += test_outputs.numel()
+            
+            # Non-background accuracy (critical for detecting background collapse)
+            non_bg_mask = test_outputs > 0  # Non-background pixels
+            if non_bg_mask.any():
+                non_bg_correct = ((predictions == test_outputs) & non_bg_mask).float()
+                total_non_bg_correct += non_bg_correct.sum().item()
+                total_non_bg_pixels += non_bg_mask.sum().item()
+            
+            # Color distribution tracking
+            for c in range(11):
+                color_predictions[c] += (predictions == c).sum().item()
+                color_targets[c] += (test_outputs == c).sum().item()
             
             # Task accuracy (all pixels correct)
             batch_size = test_inputs.shape[0]
@@ -452,10 +502,18 @@ def evaluate(
     
     pixel_accuracy = total_correct / max(total_pixels, 1)
     task_accuracy = correct_tasks / max(total_tasks, 1)
+    non_bg_accuracy = total_non_bg_correct / max(total_non_bg_pixels, 1)
+    
+    # Calculate background ratio in predictions
+    bg_ratio_pred = color_predictions[0] / max(sum(color_predictions), 1)
+    bg_ratio_target = color_targets[0] / max(sum(color_targets), 1)
     
     return {
         'pixel_accuracy': pixel_accuracy,
         'task_accuracy': task_accuracy,
+        'non_bg_accuracy': non_bg_accuracy,
+        'bg_ratio_pred': bg_ratio_pred,
+        'bg_ratio_target': bg_ratio_target,
     }
 
 
@@ -625,27 +683,29 @@ Config Overrides:
     # Create loss function
     loss_fn = create_loss(config)
     
-    # Create optimizer and scheduler
-    optimizer, scheduler = create_optimizer(model, config)
-    
     # Create datasets
     data_cfg = config['data']
     max_grid_size = data_cfg.get('max_grid_size', 30)
-    augment_enabled = data_cfg.get('augmentation', {}).get('enabled', True)
+    augment_cfg = data_cfg.get('augmentation', {})
+    augment_enabled = augment_cfg.get('enabled', True)
+    color_permutation = augment_cfg.get('color_permutation', False)
     
     print(f"\nLoading data from: {data_cfg['train_path']}")
     print(f"Cache samples: {data_cfg.get('cache_samples', False)}")
+    print(f"Augmentation: dihedral={augment_enabled}, color_perm={color_permutation}")
     
     train_dataset = ARCDataset(
         data_cfg['train_path'],
         max_size=max_grid_size,
         augment=augment_enabled,
+        color_permutation=color_permutation,
     )
     
     eval_dataset = ARCDataset(
         data_cfg['eval_path'],
         max_size=max_grid_size,
         augment=False,
+        color_permutation=False,
     )
     
     # Create data loaders with collate function
@@ -653,8 +713,16 @@ Config Overrides:
     eval_batch_size = config['training'].get('eval_batch_size', batch_size)
     num_workers = data_cfg.get('num_workers', 0)
     pin_memory = data_cfg.get('pin_memory', True)
+    prefetch_factor = data_cfg.get('prefetch_factor', 2) if num_workers > 0 else None
+    persistent_workers = data_cfg.get('persistent_workers', False) and num_workers > 0
     
     collate_fn = partial(collate_sci_arc, max_grid_size=max_grid_size)
+    
+    # Calculate augmentation diversity
+    dihedral_transforms = 8  # D4 group
+    color_perms = 362880 if color_permutation else 1  # 9! or 1
+    total_augmentations = dihedral_transforms * color_perms
+    print(f"Augmentation diversity: {dihedral_transforms} dihedral × {color_perms} color = {total_augmentations:,} per task")
     
     train_loader = DataLoader(
         train_dataset,
@@ -662,20 +730,26 @@ Config Overrides:
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
         collate_fn=collate_fn,
+        drop_last=True,  # Drop incomplete batches for consistent training
     )
     
     eval_loader = DataLoader(
         eval_dataset,
         batch_size=eval_batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=min(num_workers, 4),  # Fewer workers for eval
         pin_memory=pin_memory,
         collate_fn=collate_fn,
     )
     
     print(f"Train samples: {len(train_dataset)}, batches: {len(train_loader)}")
     print(f"Eval samples: {len(eval_dataset)}, batches: {len(eval_loader)}")
+    
+    # Create optimizer and scheduler (needs loader length for OneCycle)
+    optimizer, scheduler = create_optimizer(model, config, steps_per_epoch=len(train_loader))
     
     # Setup mixed precision
     scaler = None
@@ -761,8 +835,14 @@ Config Overrides:
             eval_metrics = evaluate(eval_model, eval_loader, device)
             print(f"  Pixel Accuracy: {eval_metrics['pixel_accuracy']:.4f}")
             print(f"  Task Accuracy: {eval_metrics['task_accuracy']:.4f}")
+            print(f"  Non-BG Accuracy: {eval_metrics['non_bg_accuracy']:.4f}")
+            print(f"  BG Ratio (pred/target): {eval_metrics['bg_ratio_pred']:.2%} / {eval_metrics['bg_ratio_target']:.2%}")
             if ema is not None:
                 print("  (Using EMA weights for evaluation)")
+            
+            # Detect background collapse
+            if eval_metrics['bg_ratio_pred'] > eval_metrics['bg_ratio_target'] + 0.1:
+                print("  [WARNING] Possible background collapse detected!")
             
             # Log to wandb - all loss components for complete monitoring
             if wandb_enabled:
@@ -778,6 +858,9 @@ Config Overrides:
                     # Evaluation metrics
                     'pixel_accuracy': eval_metrics['pixel_accuracy'],
                     'task_accuracy': eval_metrics['task_accuracy'],
+                    'non_bg_accuracy': eval_metrics['non_bg_accuracy'],
+                    'bg_ratio_pred': eval_metrics['bg_ratio_pred'],
+                    'bg_ratio_target': eval_metrics['bg_ratio_target'],
                     # Training state
                     'lr': optimizer.param_groups[0]['lr'],
                     'temperature': get_temperature(epoch, config),

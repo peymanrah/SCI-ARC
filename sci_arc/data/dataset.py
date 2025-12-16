@@ -47,8 +47,13 @@ class ARCDataset(Dataset):
     - Single combined JSON file (e.g., arc-agi_training_combined.json)
     - Directory with individual JSON task files (e.g., ./data/arc-agi/data/training/)
     
-    Unlike SCIARCDataset which is designed for complex curriculum and SCL training,
-    this class provides a simple interface for RLAN's supervised learning.
+    Augmentation:
+    - 8 dihedral transforms (D4 group): rotations + flips + transposes
+    - Color permutation (9! = 362,880 possibilities): permute colors 1-9, keep 0 fixed
+    - Total: 8 × 362,880 = 2,903,040 unique augmentations per task!
+    
+    With cache_samples=false (default), EVERY __getitem__ call generates a NEW
+    random augmentation, providing infinite diversity during training.
     """
     
     def __init__(
@@ -56,6 +61,7 @@ class ARCDataset(Dataset):
         data_path: str,
         max_size: int = 30,
         augment: bool = True,
+        color_permutation: bool = False,
     ):
         """
         Initialize ARCDataset.
@@ -63,11 +69,13 @@ class ARCDataset(Dataset):
         Args:
             data_path: Path to JSON file or directory containing task JSONs
             max_size: Maximum grid size (grids are padded to this size)
-            augment: Whether to apply data augmentation (rotation, flip)
+            augment: Whether to apply dihedral augmentation (rotation, flip, transpose)
+            color_permutation: Whether to apply random color permutation (9! possibilities)
         """
         self.data_path = Path(data_path)
         self.max_size = max_size
         self.augment = augment
+        self.color_permutation = color_permutation
         
         # Load tasks
         self.tasks = self._load_tasks()
@@ -116,7 +124,7 @@ class ARCDataset(Dataset):
         return len(self.tasks)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get a single sample."""
+        """Get a single sample with fresh random augmentation."""
         task = self.tasks[idx]
         
         # Parse train pairs
@@ -133,9 +141,15 @@ class ARCDataset(Dataset):
         test_input = np.array(test_pair['input'], dtype=np.int64)
         test_output = np.array(test_pair.get('output', test_pair['input']), dtype=np.int64)
         
-        # Apply augmentation
+        # Apply dihedral augmentation (rotation, flip, transpose)
         if self.augment:
-            train_inputs, train_outputs, test_input, test_output = self._augment(
+            train_inputs, train_outputs, test_input, test_output = self._augment_dihedral(
+                train_inputs, train_outputs, test_input, test_output
+            )
+        
+        # Apply color permutation (9! = 362,880 possibilities)
+        if self.color_permutation:
+            train_inputs, train_outputs, test_input, test_output = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )
         
@@ -165,14 +179,14 @@ class ARCDataset(Dataset):
         padded[:min(h, self.max_size), :min(w, self.max_size)] = grid[:min(h, self.max_size), :min(w, self.max_size)]
         return padded
     
-    def _augment(
+    def _augment_dihedral(
         self,
         train_inputs: List[np.ndarray],
         train_outputs: List[np.ndarray],
         test_input: np.ndarray,
         test_output: np.ndarray
     ) -> Tuple:
-        """Apply random augmentation (rotation, flip)."""
+        """Apply random dihedral augmentation (8 transforms from D4 group)."""
         # Random dihedral transform (0-7)
         dihedral_id = random.randint(0, 7)
         
@@ -190,9 +204,9 @@ class ARCDataset(Dataset):
             elif dihedral_id == 5:
                 return np.flipud(g).copy()
             elif dihedral_id == 6:
-                return g.T.copy()
+                return g.T.copy()  # transpose
             else:  # 7
-                return np.fliplr(np.rot90(g, k=1)).copy()
+                return np.fliplr(np.rot90(g, k=1)).copy()  # anti-transpose
         
         aug_inputs = [transform(g) for g in train_inputs]
         aug_outputs = [transform(g) for g in train_outputs]
@@ -200,6 +214,44 @@ class ARCDataset(Dataset):
         aug_test_out = transform(test_output)
         
         return aug_inputs, aug_outputs, aug_test_in, aug_test_out
+    
+    def _augment_color(
+        self,
+        train_inputs: List[np.ndarray],
+        train_outputs: List[np.ndarray],
+        test_input: np.ndarray,
+        test_output: np.ndarray
+    ) -> Tuple:
+        """
+        Apply random color permutation (9! = 362,880 possibilities).
+        
+        Permutes colors 1-9 while keeping 0 (black/background) fixed.
+        This is the SAME augmentation used by TRM.
+        """
+        # Generate random permutation of colors 1-9
+        perm = np.arange(10)  # [0, 1, 2, ..., 9]
+        perm[1:] = np.random.permutation(9) + 1  # Shuffle 1-9, keep 0 fixed
+        
+        def apply_perm(g):
+            return perm[g].astype(g.dtype)
+        
+        aug_inputs = [apply_perm(g) for g in train_inputs]
+        aug_outputs = [apply_perm(g) for g in train_outputs]
+        aug_test_in = apply_perm(test_input)
+        aug_test_out = apply_perm(test_output)
+        
+        return aug_inputs, aug_outputs, aug_test_in, aug_test_out
+    
+    # Keep old method name for backward compatibility
+    def _augment(
+        self,
+        train_inputs: List[np.ndarray],
+        train_outputs: List[np.ndarray],
+        test_input: np.ndarray,
+        test_output: np.ndarray
+    ) -> Tuple:
+        """Backward compatibility: alias for _augment_dihedral."""
+        return self._augment_dihedral(train_inputs, train_outputs, test_input, test_output)
 
 
 # ============================================================================

@@ -3,6 +3,7 @@ RLAN: Recursive Latent Attractor Networks for ARC
 
 The main RLAN model that orchestrates all submodules:
 - GridEncoder: Embeds input grids
+- ContextEncoder: Encodes training examples to understand task (CRITICAL!)
 - DynamicSaliencyController: Discovers spatial anchors
 - MultiScaleRelativeEncoding: Computes relative coordinates
 - LatentCountingRegisters: Soft color counting
@@ -10,12 +11,21 @@ The main RLAN model that orchestrates all submodules:
 - RecursiveSolver: Iterative output generation
 
 RLAN treats reasoning as coordinate transformation relative to
-dynamically discovered spatial features, rather than absolute
-position-based pattern matching.
+dynamically discovered spatial features, conditioned on the task
+context learned from training examples.
 
 Example Usage:
     model = RLAN(hidden_dim=128, max_clues=5)
-    logits = model(input_grid)  # (B, 11, H, W)
+    
+    # With training context (recommended for ARC)
+    logits = model(
+        test_input,
+        train_inputs=train_input_grids,
+        train_outputs=train_output_grids,
+    )
+    
+    # Or for legacy single-grid mode
+    logits = model(input_grid)
     
     # With intermediate outputs for loss computation
     outputs = model(input_grid, return_intermediates=True)
@@ -36,6 +46,8 @@ from sci_arc.models.rlan_modules import (
     LatentCountingRegisters,
     SymbolicPredicateHeads,
     RecursiveSolver,
+    ContextEncoder,
+    ContextInjector,
 )
 
 
@@ -139,6 +151,7 @@ class RLAN(nn.Module):
         self.max_clues = max_clues
         self.num_predicates = num_predicates
         self.num_solver_steps = num_solver_steps
+        self.max_grid_size = max_grid_size
         
         # Grid Encoder (reuse existing implementation)
         self.encoder = GridEncoder(
@@ -154,6 +167,19 @@ class RLAN(nn.Module):
             nn.GELU(),
             nn.LayerNorm(hidden_dim),
         )
+        
+        # Context Encoder - learns from training examples (CRITICAL for ARC!)
+        self.context_encoder = ContextEncoder(
+            hidden_dim=hidden_dim,
+            num_colors=num_colors,
+            max_size=max_grid_size,
+            max_pairs=5,  # ARC has 2-5 training pairs
+            num_heads=config.dsc_num_heads if config else 4,
+            dropout=dropout,
+        )
+        
+        # Context Injector - modulates features based on task context
+        self.context_injector = ContextInjector(hidden_dim=hidden_dim)
         
         # Dynamic Saliency Controller
         self.dsc = DynamicSaliencyController(
@@ -221,6 +247,9 @@ class RLAN(nn.Module):
     def forward(
         self,
         input_grid: torch.Tensor,
+        train_inputs: Optional[torch.Tensor] = None,
+        train_outputs: Optional[torch.Tensor] = None,
+        pair_mask: Optional[torch.Tensor] = None,
         temperature: float = 1.0,
         return_intermediates: bool = False,
         return_all_steps: bool = False,
@@ -230,6 +259,9 @@ class RLAN(nn.Module):
         
         Args:
             input_grid: Shape (B, H, W) input grid with color indices 0-9
+            train_inputs: Shape (B, N, H, W) training input grids (RECOMMENDED!)
+            train_outputs: Shape (B, N, H, W) training output grids
+            pair_mask: Shape (B, N) boolean mask for valid pairs
             temperature: Gumbel-softmax temperature for DSC and SPH
             return_intermediates: If True, return all intermediate outputs
             return_all_steps: If True, return predictions at all solver steps
@@ -247,29 +279,39 @@ class RLAN(nn.Module):
                     - predicates: (B, P)
                     - count_embedding: (B, num_colors, D)
                     - features: (B, D, H, W)
+                    - context: (B, D) if train_inputs provided
         """
         B, H, W = input_grid.shape
         
         # 1. Encode grid
         features = self.encode(input_grid)  # (B, D, H, W)
         
-        # 2. Dynamic Saliency Controller - find clue anchors
+        # 2. Encode training context if provided (CRITICAL for ARC!)
+        context = None
+        if train_inputs is not None and train_outputs is not None:
+            context = self.context_encoder(
+                train_inputs, train_outputs, pair_mask
+            )  # (B, D)
+            # Inject context into features via FiLM
+            features = self.context_injector(features, context)
+        
+        # 3. Dynamic Saliency Controller - find clue anchors
         centroids, attention_maps, stop_logits = self.dsc(
             features, temperature=temperature
         )  # (B, K, 2), (B, K, H, W), (B, K)
         
-        # 3. Multi-Scale Relative Encoding - compute relative coordinates
+        # 4. Multi-Scale Relative Encoding - compute relative coordinates
         clue_features = self.msre(
             features, centroids, grid_sizes=None
         )  # (B, K, D, H, W)
         
-        # 4. Latent Counting Registers - soft counting
+        # 5. Latent Counting Registers - soft counting
         count_embedding = self.lcr(input_grid, features)  # (B, num_colors, D)
         
-        # 5. Symbolic Predicate Heads - binary predicates
+        # 6. Symbolic Predicate Heads - binary predicates
         predicates = self.sph(features, temperature=temperature)  # (B, P)
         
-        # 6. Recursive Solver - generate output
+        # 7. Recursive Solver - generate output
         if return_all_steps or return_intermediates:
             all_logits = self.solver(
                 clue_features=clue_features,
@@ -292,7 +334,7 @@ class RLAN(nn.Module):
             all_logits = None
         
         if return_intermediates:
-            return {
+            result = {
                 "logits": logits,
                 "all_logits": all_logits,
                 "centroids": centroids,
@@ -302,22 +344,37 @@ class RLAN(nn.Module):
                 "count_embedding": count_embedding,
                 "features": features,
             }
+            if context is not None:
+                result["context"] = context
+            return result
         else:
             return logits
     
-    def predict(self, input_grid: torch.Tensor) -> torch.Tensor:
+    def predict(
+        self,
+        input_grid: torch.Tensor,
+        train_inputs: Optional[torch.Tensor] = None,
+        train_outputs: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Make a prediction (argmax of logits).
         
         Args:
             input_grid: Shape (B, H, W) input grid
+            train_inputs: Optional (B, N, H, W) training inputs for context
+            train_outputs: Optional (B, N, H, W) training outputs for context
             
         Returns:
             prediction: Shape (B, H, W) predicted grid
         """
         self.eval()
         with torch.no_grad():
-            logits = self.forward(input_grid, temperature=0.1)
+            logits = self.forward(
+                input_grid,
+                train_inputs=train_inputs,
+                train_outputs=train_outputs,
+                temperature=0.1
+            )
             prediction = logits.argmax(dim=1)
         return prediction
     
@@ -326,6 +383,8 @@ class RLAN(nn.Module):
         counts = {
             "encoder": sum(p.numel() for p in self.encoder.parameters()),
             "feature_proj": sum(p.numel() for p in self.feature_proj.parameters()),
+            "context_encoder": sum(p.numel() for p in self.context_encoder.parameters()),
+            "context_injector": sum(p.numel() for p in self.context_injector.parameters()),
             "dsc": sum(p.numel() for p in self.dsc.parameters()),
             "msre": sum(p.numel() for p in self.msre.parameters()),
             "lcr": sum(p.numel() for p in self.lcr.parameters()),
@@ -351,6 +410,7 @@ class RLAN(nn.Module):
                 "max_clues": self.max_clues,
                 "num_predicates": self.num_predicates,
                 "num_solver_steps": self.num_solver_steps,
+                "max_grid_size": self.max_grid_size,
             },
             **extra_data,
         }
@@ -359,7 +419,7 @@ class RLAN(nn.Module):
     @classmethod
     def load_from_checkpoint(cls, path: str, device: str = "cpu") -> "RLAN":
         """Load model from checkpoint."""
-        checkpoint = torch.load(path, map_location=device)
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
         
         model = cls(**checkpoint["config"])
         model.load_state_dict(checkpoint["model_state_dict"])

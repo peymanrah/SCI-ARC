@@ -1,12 +1,16 @@
-# RLAN Base Configuration - TRM-Equivalent (7.8M params)
-# For fair apple-to-apple comparison with TinyRecursiveModels (~7M params)
+# RLAN Base Configuration - Production Competitive Training
+# Optimized for RTX 3090 (24GB VRAM), 48 vCPU, 128GB RAM
 #
-# PRODUCTION ENVIRONMENT: RTX 3090 (24GB VRAM), 48 vCPU, 128GB RAM
-# Data Path: ./data/arc-agi/data/training/ and ./data/arc-agi/data/evaluation/
+# Key Design Decisions (aligned with ARC-AGI competition requirements):
+# - Long training (1000 epochs) with infinite augmentation diversity
+# - Large effective batch via gradient accumulation
+# - AdamW + OneCycleLR (proven effective for ARC tasks)
+# - Full 8 dihedral + color permutation augmentation
+# - Multi-worker data loading for CPU utilization
 
 model:
   type: "rlan"
-  hidden_dim: 256  # Scaled to match TRM's ~7M parameters
+  hidden_dim: 256  # ~12M params with ContextEncoder
   num_colors: 10
   num_classes: 11  # 10 colors + background
   max_grid_size: 30
@@ -15,86 +19,88 @@ model:
   num_solver_steps: 6
   dropout: 0.1
   
-  # DSC parameters (scaled)
+  # DSC parameters
   dsc_num_heads: 8
   
-  # MSRE parameters (scaled)
+  # MSRE parameters
   msre_encoding_dim: 64
   msre_num_freq: 8
   
-  # LCR parameters (scaled)
+  # LCR parameters
   lcr_num_freq: 8
   lcr_num_heads: 8
 
 training:
-  max_epochs: 250
-  # Batch size optimized for RTX 3090 24GB VRAM with AMP
-  # For hidden_dim=256 (base model): batch_size=64 is safe (~18GB)
-  # batch_size=128 may work with gradient accumulation
-  batch_size: 64
-  learning_rate: 1.0e-4
-  weight_decay: 1.0e-5
+  # Long training for ARC (TRM trains for 5000+ epochs on similar data)
+  max_epochs: 1000
+  
+  # Batch size: 128 fits in 24GB with AMP (~18-20GB usage)
+  # With grad_accumulation_steps=2, effective_batch = 256
+  batch_size: 128
+  learning_rate: 3.0e-4  # Higher LR for OneCycle (peak LR)
+  weight_decay: 0.1      # TRM uses 0.1, not 1e-5
   gradient_clip: 1.0
   
-  # Temperature schedule
+  # Temperature schedule (slower annealing for longer training)
   temperature_start: 5.0
   temperature_end: 0.1
   
-  # Loss weights
+  # Loss weights - focal loss dominates
   focal_gamma: 2.0
   focal_alpha: 0.25
-  lambda_entropy: 0.1
-  lambda_sparsity: 0.05
-  lambda_predicate: 0.01
-  lambda_curriculum: 0.1
-  lambda_deep_supervision: 0.5
+  lambda_entropy: 0.01
+  lambda_sparsity: 0.005
+  lambda_predicate: 0.001
+  lambda_curriculum: 0.01
+  lambda_deep_supervision: 0.3
   
-  # Curriculum phases
-  pretrain_epochs: 50
-  finetune_start_epoch: 201
+  # Curriculum phases (scaled for 1000 epochs)
+  pretrain_epochs: 100
+  finetune_start_epoch: 800
   
-  # Optimizer and scheduler
+  # Optimizer: AdamW is standard and works well
+  # Scheduler: OneCycle gives faster convergence than cosine
   optimizer: "adamw"
-  scheduler: "cosine"  # cosine, onecycle, constant
-  warmup_epochs: 10
+  scheduler: "onecycle"  # onecycle > cosine for ARC
+  warmup_epochs: 20      # 2% warmup
   min_lr: 1.0e-6
   
   # EMA for stable evaluation
   use_ema: true
   ema_decay: 0.999
-  grad_accumulation_steps: 1  # Increase to 2-4 for effective larger batch
+  
+  # Gradient accumulation for larger effective batch
+  # effective_batch_size = batch_size * grad_accumulation_steps = 128 * 2 = 256
+  grad_accumulation_steps: 2
 
 data:
-  # PRODUCTION data paths - ARC-AGI directory structure
+  # Data paths
   train_path: "./data/arc-agi/data/training"
   eval_path: "./data/arc-agi/data/evaluation"
-  # For combined JSON files, use:
-  # train_path: "data/arc-agi_training_combined.json"
-  # eval_path: "data/arc-agi_evaluation_combined.json"
   
   max_grid_size: 30
   
-  # Data loading optimization
-  # Windows: num_workers=0 is fastest (multiprocessing overhead)
-  # Linux: Use 4-8 workers  
-  num_workers: 0
+  # Multi-worker data loading - USE YOUR CPU CORES!
+  # 48 vCPU available, use 8-12 workers for optimal GPU feeding
+  # More workers = more parallel augmentation = infinite diversity
+  num_workers: 8
   pin_memory: true
+  prefetch_factor: 4  # How many batches each worker prefetches
+  persistent_workers: true  # Keep workers alive between epochs
   
-  # Caching strategy (CRITICAL for competitive training)
-  # cache_samples=true: Pre-cache all samples in memory (GPU becomes bottleneck)
-  #   - Use for testing/debugging to eliminate data loading variance
-  #   - Limited diversity (only cache_augmentations versions per task)
-  # cache_samples=false: Infinite augmented samples (maximum diversity)
-  #   - Use for competitive training to maximize generalization
-  #   - Each epoch sees different augmentations
-  cache_samples: false  # Set to true for testing, false for competitive
-  cache_augmentations: 8  # Number of pre-generated augmentations when caching
+  # INFINITE DIVERSITY MODE (CRITICAL for ARC generalization!)
+  # cache_samples=false means every __getitem__ call generates NEW augmentation
+  # With 400 tasks × 8 dihedral × 362880 color perms = billions of unique samples
+  cache_samples: false
   
+  # Full augmentation pipeline (matching TRM)
   augmentation:
     enabled: true
-    rotation: true
-    flip: true
-    color_permutation: false
+    rotation: true           # 4 rotations (0°, 90°, 180°, 270°)
+    flip: true               # 2 flips (horizontal, vertical)
+    transpose: true          # 2 transposes (main diagonal, anti-diagonal)
+    color_permutation: true  # 9! = 362,880 color permutations
+    # Total: 8 dihedral × 362,880 color = 2,903,040 augmentations per task!
 
 evaluation:
   num_guesses: 2
@@ -103,25 +109,25 @@ evaluation:
   tta_flips: [false, true]
 
 logging:
-  log_every: 10  # Log every N steps
-  save_every: 10  # Save checkpoint every N epochs
-  eval_every: 1  # Evaluate every N epochs
-  keep_last_n: 5  # Keep last N checkpoints
+  log_every: 1  # Log EVERY batch for visibility (only ~3-4 batches per epoch)
+  save_every: 25  # Save checkpoint every 25 epochs (less disk I/O)
+  eval_every: 5   # Evaluate every 5 epochs (faster training)
+  keep_last_n: 5  # Keep last 5 checkpoints
   checkpoint_dir: "checkpoints/rlan_base"
-  log_to_file: true  # Save all output to log file
+  log_to_file: true
   
-  # Weights & Biases (optional - disabled by default, not installed in production)
-  use_wandb: false  # Set to true only if wandb is installed
+  # WandB (optional)
+  use_wandb: false
   wandb_project: "rlan-arc"
-  wandb_run_name: null  # Auto-generated if null
+  wandb_run_name: null
 
-# Hardware settings (RTX 3090 24GB VRAM)
+# Hardware settings
 hardware:
   device: "cuda"
   seed: 42
-  deterministic: false  # Set true for reproducibility (slower)
+  deterministic: false
 
 device:
   use_cuda: true
-  mixed_precision: true  # REQUIRED for efficient RTX 3090 training
+  mixed_precision: true  # AMP for memory efficiency
   compile: false

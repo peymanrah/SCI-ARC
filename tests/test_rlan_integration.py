@@ -80,11 +80,21 @@ class TestRLANIntegration:
                 f"Batch {batch_size}: Expected batch dim {batch_size}, got {logits.shape[0]}"
     
     def test_gradient_flow_all_params(self, model):
-        """Test that gradients flow to all parameters."""
+        """Test that gradients flow to all parameters (with context for full coverage)."""
         input_grid = torch.randint(0, 10, (2, 10, 10))
         target = torch.randint(0, 11, (2, 10, 10))
         
-        logits = model(input_grid)
+        # Use training context to exercise context_encoder
+        train_inputs = torch.randint(0, 10, (2, 3, 10, 10))
+        train_outputs = torch.randint(0, 10, (2, 3, 10, 10))
+        pair_mask = torch.ones(2, 3, dtype=torch.bool)
+        
+        logits = model(
+            input_grid,
+            train_inputs=train_inputs,
+            train_outputs=train_outputs,
+            pair_mask=pair_mask,
+        )
         loss = nn.functional.cross_entropy(logits, target)
         loss.backward()
         
@@ -100,7 +110,7 @@ class TestRLANIntegration:
                 elif param.grad.abs().sum() == 0:
                     params_without_grad.append(f"{name} (zero grad)")
         
-        # At least 90% of parameters should receive gradients
+        # At least 85% of parameters should receive gradients
         grad_ratio = 1 - len(params_without_grad) / total_params
         assert grad_ratio >= 0.85, \
             f"Only {grad_ratio:.1%} of parameters got gradients. Missing: {params_without_grad[:5]}..."

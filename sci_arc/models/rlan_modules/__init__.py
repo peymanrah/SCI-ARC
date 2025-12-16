@@ -9,6 +9,7 @@ Modules:
 - LatentCountingRegisters: Soft counting for numerical reasoning
 - SymbolicPredicateHeads: Binary predicates for conditional logic
 - RecursiveSolver: Iterative refinement decoder
+- ContextEncoder: Encodes training examples to understand task
 """
 
 from .dynamic_saliency_controller import DynamicSaliencyController
@@ -16,6 +17,7 @@ from .multi_scale_relative_encoding import MultiScaleRelativeEncoding
 from .latent_counting_registers import LatentCountingRegisters
 from .symbolic_predicate_heads import SymbolicPredicateHeads
 from .recursive_solver import RecursiveSolver
+from .context_encoder import ContextEncoder, ContextInjector, PairEncoder
 
 __all__ = [
     "DynamicSaliencyController",
@@ -23,4 +25,8 @@ __all__ = [
     "LatentCountingRegisters",
     "SymbolicPredicateHeads",
     "RecursiveSolver",
+    "ContextEncoder",
+    "ContextInjector",
+    "PairEncoder",
 ]
+
