@@ -73,12 +73,15 @@ training:
   # 3. L_var: Batch variance regularization (prevents collapse to zeros)
   # 4. L_recon: Standard reconstruction loss (already exists as task_loss)
   #
+  # CRITICAL: L_variance must be high enough to prevent directional collapse!
+  # Previous setting (0.1) was too weak - embeddings collapsed to cosine_sim=1.0
+  #
   # Note: Config params use 'cicl_' prefix for backward compatibility
   # Set use_cicl=true to enable CISL (recommended for ARC), false for legacy SCL
   use_cicl: true                # Enable CISL instead of SCL
   cicl_consist_weight: 0.5      # Within-task consistency weight (λ₁)
   cicl_color_inv_weight: 0.5    # Content invariance weight (λ₂, key SCI principle!)
-  cicl_variance_weight: 0.1     # Batch variance weight (λ₃, anti-collapse)
+  cicl_variance_weight: 1.0     # Batch variance weight (λ₃, INCREASED to prevent collapse!)
   cicl_target_std: 0.5          # Target std (γ) for variance regularization
   
   # Anti-background-collapse (CRITICAL for ARC's ~85% background grids)

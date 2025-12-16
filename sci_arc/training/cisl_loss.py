@@ -197,7 +197,12 @@ class BatchVarianceLoss(nn.Module):
     Ensures that structure embeddings are diverse across the batch.
     Prevents the "constant zero" collapse where encoder outputs zeros for everything.
     
-    L_var = ReLU(γ - std(Z_batch))
+    CRITICAL FIX: We compute variance on L2-NORMALIZED embeddings to measure
+    DIRECTIONAL diversity, not magnitude. Without this, embeddings can grow
+    unboundedly (norm 40→950) while all pointing in the same direction
+    (cosine_sim=1.0), causing the variance loss to be 0 (fooled by large magnitudes).
+    
+    L_var = ReLU(γ - std(normalize(Z_batch)))
     
     where γ is a target standard deviation (e.g., 0.5).
     
@@ -216,7 +221,7 @@ class BatchVarianceLoss(nn.Module):
     
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """
-        Compute variance regularization loss.
+        Compute variance regularization loss on NORMALIZED embeddings.
         
         Args:
             z: Embeddings [B, D] or [B, K, D]
@@ -232,6 +237,11 @@ class BatchVarianceLoss(nn.Module):
         
         if B < 2:
             return torch.tensor(0.0, device=z.device)
+        
+        # CRITICAL: Normalize embeddings to unit sphere BEFORE computing variance
+        # This measures DIRECTIONAL diversity, not magnitude
+        # Without this, embeddings can collapse to same direction while growing in norm
+        z = F.normalize(z, dim=-1)
         
         # Compute std per dimension, then average
         z_centered = z - z.mean(dim=0, keepdim=True)

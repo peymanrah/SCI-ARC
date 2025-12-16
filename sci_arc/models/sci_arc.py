@@ -286,7 +286,7 @@ class SCIARC(nn.Module):
         Encode a single demo pair. Extracted for gradient checkpointing.
         
         Returns:
-            structure_rep: [B, K, D]
+            structure_rep: [B, K, D] - L2 normalized to prevent unbounded growth
             content_rep: [B, M, D]
             z_task_demo: [B, D]
         """
@@ -296,6 +296,13 @@ class SCIARC(nn.Module):
         
         # Extract structure
         structure_rep = self.structural_encoder(input_emb, output_emb)  # [B, K, D]
+        
+        # CRITICAL FIX: Normalize structure embeddings to unit sphere
+        # Prevents unbounded embedding growth (norm 40→950) which causes:
+        # 1. L_variance to be fooled (sees high magnitude std, misses directional collapse)
+        # 2. Numerical instability in cosine similarity (all become 1.0)
+        # 3. Training instability as gradients explode
+        structure_rep = F.normalize(structure_rep, dim=-1)
         
         # Extract content
         content_rep = self.content_encoder(input_emb, structure_rep)  # [B, M, D]

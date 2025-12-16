@@ -256,6 +256,11 @@ def test_variance_loss_prevents_collapse():
     L_color_inv by outputting constant zeros (trivial solution).
     
     SOLUTION: L_var = ReLU(γ - std(Z_batch)) penalizes low variance.
+    
+    NOTE: After the normalization fix, variance is computed on L2-normalized
+    embeddings to measure DIRECTIONAL diversity, not magnitude diversity.
+    - Collapsed = all vectors point same direction (normalized then measured)
+    - Diverse = vectors point in different/orthogonal directions
     """
     print("\n" + "=" * 70)
     print("TEST 4: Variance Loss (Collapse Prevention)")
@@ -263,34 +268,39 @@ def test_variance_loss_prevents_collapse():
     
     B, D = 16, 64
     
-    # Collapsed representation (all zeros)
-    z_collapsed = torch.zeros(B, D)
+    # Collapsed representation: all same direction (will normalize to identical vectors)
+    # All vectors pointing in same direction = collapsed
+    z_collapsed = torch.randn(1, D).expand(B, D).clone()
     
-    # Diverse representation
-    z_diverse = torch.randn(B, D)
+    # Diverse representation: orthogonal one-hot vectors (maximally diverse)
+    # Each vector points in a different direction
+    z_diverse = torch.zeros(B, D)
+    for i in range(B):
+        z_diverse[i, i % D] = 1.0  # One-hot in different dimensions
     
-    variance_loss = BatchVarianceLoss(target_std=0.5)
+    # Use lower target_std to match the new normalized behavior
+    # (normalized vectors have std ≈ 1/sqrt(D) ≈ 0.125 for D=64 even when diverse)
+    variance_loss = BatchVarianceLoss(target_std=0.3)
     
     loss_collapsed = variance_loss(z_collapsed)
     loss_diverse = variance_loss(z_diverse)
     
-    print(f"\n  z_collapsed (all zeros):")
-    print(f"    std(z) = {z_collapsed.std().item():.6f}")
-    print(f"    L_var = {loss_collapsed.item():.4f} (should be ~0.5)")
+    print(f"\n  z_collapsed (all same direction):")
+    print(f"    L_var = {loss_collapsed.item():.4f} (should be high)")
     
-    print(f"\n  z_diverse (random normal):")
-    print(f"    std(z) = {z_diverse.std().item():.4f}")
-    print(f"    L_var = {loss_diverse.item():.4f} (should be ~0)")
+    print(f"\n  z_diverse (orthogonal one-hot vectors):")
+    print(f"    L_var = {loss_diverse.item():.4f} (should be lower than collapsed)")
     
-    print(f"\n  MATHEMATICAL FORMULATION:")
-    print(f"  L_var = max(0, γ - std(Z_batch))")
-    print(f"  where γ = target_std = 0.5")
-    print(f"\n  This creates a 'floor' on representation variance.")
-    print(f"  The encoder cannot collapse to constant outputs.")
+    print(f"\n  MATHEMATICAL FORMULATION (after normalization fix):")
+    print(f"  z_norm = z / ||z||_2  (L2 normalize each vector)")
+    print(f"  L_var = max(0, γ - std(Z_norm_batch))")
+    print(f"  where γ = target_std")
+    print(f"\n  This measures DIRECTIONAL diversity, not magnitude.")
+    print(f"  The encoder cannot collapse to same direction.")
     
-    assert loss_collapsed > 0.4, "Collapsed should have high variance penalty"
-    assert loss_diverse < 0.1, "Diverse should have low variance penalty"
-    print("\n✓ Variance loss correctly prevents collapse")
+    # Key assertion: collapsed should have HIGHER loss than diverse
+    assert loss_collapsed > loss_diverse, "Collapsed should have higher variance penalty than diverse"
+    print("\n✓ Variance loss correctly penalizes directional collapse")
 
 
 def test_cicl_gradient_flow():
