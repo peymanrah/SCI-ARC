@@ -52,9 +52,10 @@ training:
   grad_accumulation_steps: 1
   
   # Batch size (optimized for RTX 3090 24GB VRAM)
-  # 192 uses ~18-19GB VRAM with good SCL performance
-  batch_size: 192
-  eval_batch_size: 192
+  # 128 fits comfortably in 24GB VRAM (~18GB), avoiding slow shared memory
+  # Larger batches overflow VRAM causing PCIe transfers (7s/batch -> 4s/batch)
+  batch_size: 128
+  eval_batch_size: 128
   
   # Loss weights
   # NOTE: SCL at 1.0 dominates training (97% of loss). Reduce to 0.1 to let task loss drive learning.
@@ -110,10 +111,9 @@ data:
   rearc_dir: null               # Optional: path to RE-ARC
   
   # Data loading
-  # With batch_size=256 and 48 vCPUs, 24 workers keeps GPU fed
-  # Rule: 2-4 workers per GPU, but can go higher with many cores
-  # Reduce to 16 if you see CPU memory issues
-  num_workers: 24
+  # Windows: num_workers=0 is fastest with cache_samples=true (all data in memory)
+  # Linux: Use 4-8 workers. Windows multiprocessing has high overhead.
+  num_workers: 0
   pin_memory: true
   
   # Caching (eliminates data loading stalls)
