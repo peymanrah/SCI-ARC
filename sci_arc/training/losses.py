@@ -354,12 +354,26 @@ class DeepSupervisionLoss(nn.Module):
         
         Args:
             predictions: List of predictions at each step [B, H, W, C]
+                        Can be any length - weights are computed dynamically
             target: Ground truth grid [B, H, W]
         
         Returns:
             loss: Weighted average CE/Focal loss
         """
         device = predictions[0].device
+        num_preds = len(predictions)
+        
+        # Dynamically compute step weights based on actual number of predictions
+        # This allows passing any number of intermediate predictions
+        if self.weight_schedule == "linear":
+            step_weights = torch.arange(1, num_preds + 1, device=device).float() / num_preds
+        elif self.weight_schedule == "exponential":
+            step_weights = torch.pow(2.0, torch.arange(num_preds, device=device).float()) / (2 ** num_preds - 1)
+        elif self.weight_schedule == "uniform":
+            step_weights = torch.ones(num_preds, device=device) / num_preds
+        else:
+            # Fallback to uniform if unknown schedule
+            step_weights = torch.ones(num_preds, device=device) / num_preds
         
         total_loss = torch.tensor(0.0, device=device)
         total_weight = torch.tensor(0.0, device=device)
@@ -399,7 +413,7 @@ class DeepSupervisionLoss(nn.Module):
                     label_smoothing=self.label_smoothing
                 )
             
-            weight = self.step_weights[t]
+            weight = step_weights[t]  # Use dynamically computed weights
             total_loss = total_loss + weight * step_loss
             total_weight = total_weight + weight
         
