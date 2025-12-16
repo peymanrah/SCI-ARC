@@ -1,13 +1,14 @@
 # RLAN Fair Comparison Configuration
 # ==================================
-# Matches TRM capacity (~10M params) for fair comparison
+# Matches TRM's ~7M parameter count for fair comparison
 # 
-# TRM Config (from TinyRecursiveModels/config/arch/trm.yaml):
-#   - hidden_size: 512
-#   - num_heads: 8
-#   - L_layers: 2, L_cycles: 6, H_cycles: 3 (total 18 reasoning passes)
-#   - expansion: 4 (SwiGLU)
-#   - global_batch_size: 768 (requires 8+ A100 GPUs!)
+# TRM Config: hidden_size=512, but TRM is a simpler transformer
+# RLAN has more modules (DSC, MSRE, LCR, SPH, ContextEncoder)
+# so hidden_dim=256 yields ~7.8M params ≈ TRM's ~7M
+#
+# TRM Reference:
+#   - Parameters: ~7M
+#   - global_batch_size: 768 (8+ A100 GPUs)
 #   - epochs: 100,000
 #
 # RLAN Advantages over TRM (same parameter count):
@@ -24,7 +25,7 @@
 
 model:
   type: "rlan"
-  hidden_dim: 512   # Match TRM's hidden_size=512
+  hidden_dim: 256   # ~7.8M params to match TRM's ~7M (NOT 512!)
   num_colors: 10
   num_classes: 11   # 10 colors + background
   max_grid_size: 30
@@ -34,15 +35,15 @@ model:
   use_act: true  # Enable Adaptive Computation Time
   dropout: 0.1
   
-  # Attention heads - match TRM's num_heads=8
+  # Attention heads
   dsc_num_heads: 8
   lcr_num_heads: 8
   
-  # MSRE parameters (unique to RLAN)
+  # MSRE parameters
   msre_encoding_dim: 64
   msre_num_freq: 8
   
-  # LCR parameters (unique to RLAN)
+  # LCR parameters
   lcr_num_freq: 8
 
 training:
@@ -57,13 +58,13 @@ training:
   # TRM: global_batch=768 across 8 A100 GPUs
   # RLAN target: effective_batch=320 (4GB headroom)
   # 
-  # hidden_dim=512: ~500MB/sample with AMP + grads
-  # Batch: 40 samples (~20GB VRAM, 4GB headroom)
-  # grad_accumulation=8 → effective_batch = 40 × 8 = 320
+  # hidden_dim=256: ~250MB/sample with AMP + grads
+  # Batch: 80 samples (~20GB VRAM, 4GB headroom)
+  # grad_accumulation=4 → effective_batch = 80 × 4 = 320
   # =============================================================
-  batch_size: 40
-  grad_accumulation_steps: 8
-  # effective_batch_size = 40 × 8 = 320
+  batch_size: 80
+  grad_accumulation_steps: 4
+  # effective_batch_size = 80 × 4 = 320
   
   learning_rate: 1.0e-4  # Match TRM's lr=1e-4
   weight_decay: 0.1      # Match TRM's weight_decay=0.1
