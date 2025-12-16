@@ -6,31 +6,31 @@
 # RLAN: hidden_dim=256, but more modules (DSC, MSRE, LCR, SPH, ContextEncoder)
 # Result: Both ~7-8M params = FAIR comparison
 #
-# Module Scaling Rules:
-#   num_heads = hidden_dim / 64 (standard transformer scaling)
-#   max_clues, num_predicates = task-specific (fixed across all configs)
-#   msre/lcr params = positional encoding (fixed)
+# Module Scaling Analysis:
+#   - hidden_dim: Main capacity driver (scales with hidden_dim²)
+#   - num_heads: hidden_dim / 64 (standard transformer scaling)
+#   - msre_encoding_dim: hidden_dim / 8 (proportional, not critical)
+#   - max_clues, num_predicates: Task-specific (not capacity)
+#   - msre/lcr_num_freq: Fixed at 8 (covers 30×30 grids)
 #
-# RLAN Advantages over TRM (same parameter count):
-#   1. Preserves 2D spatial structure (TRM flattens to 1D)
-#   2. ContextEncoder learns task rules (TRM uses puzzle_emb)
-#   3. DSC discovers spatial anchors (TRM has none)
-#   4. MSRE computes relative coordinates (TRM uses RoPE only)
-#   5. LCR provides soft counting (TRM cannot count)
-#   6. SPH extracts symbolic predicates (TRM has none)
+# Parameter breakdown:
+#   - ContextEncoder: ~2.5M (32% of total)
+#   - RecursiveSolver: ~4.5M (58% of total)
+#   - Other modules: ~0.8M (10% of total)
+#   - max_clues/num_predicates: <0.01M (negligible)
 #
 # Optimized for RTX 3090 (24GB VRAM), single GPU training
 
 model:
   type: "rlan"
-  hidden_dim: 256   # ~7.8M params to match TRM's ~7M
+  hidden_dim: 256   # Main capacity driver (~7.8M total params)
   num_colors: 10
   num_classes: 11   # 10 colors + background
   max_grid_size: 30
   
-  # Task-specific (NOT capacity-dependent) - same across all configs
-  max_clues: 6       # Ceiling slightly above ARC max (~5) for generalization
-  num_predicates: 8  # Covers most spatial relationships
+  # Task-specific (NOT capacity-dependent) - fixed across configs
+  max_clues: 6       # ARC puzzles have ~3-5 anchors, +1 headroom
+  num_predicates: 8  # Spatial relationships (negligible params)
   num_solver_steps: 6  # Comparable to TRM's L_cycles=6
   
   use_act: true  # Enable Adaptive Computation Time
@@ -40,10 +40,10 @@ model:
   dsc_num_heads: 4
   lcr_num_heads: 4
   
-  # Positional encoding (fixed, task-independent)
-  msre_encoding_dim: 64  # Slightly larger for fair comparison
-  msre_num_freq: 8       # 2^0 to 2^7 covers 30x30 grids
-  lcr_num_freq: 8        # Covers counts 0-30
+  # Positional encoding - can be smaller than hidden_dim
+  msre_encoding_dim: 32  # hidden_dim/8, sufficient for relative positions
+  msre_num_freq: 8       # Fixed: 2^0 to 2^7 covers 30×30 grids
+  lcr_num_freq: 8        # Fixed: covers counts 0-30
 
 training:
   # TRM trains for 100K epochs on 8+ GPUs
