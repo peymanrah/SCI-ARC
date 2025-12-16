@@ -126,6 +126,45 @@ def load_config(config_path: str) -> dict:
     return config
 
 
+def override_config(config: dict, overrides: list) -> dict:
+    """Apply command-line overrides to config.
+    
+    Format: key.subkey=value
+    Examples:
+        training.batch_size=32
+        training.max_epochs=100
+        logging.use_wandb=true
+        model.hidden_dim=512
+    """
+    import ast
+    for override in overrides:
+        if '=' not in override:
+            continue
+        key_path, value = override.split('=', 1)
+        keys = key_path.split('.')
+        
+        # Navigate to the right level
+        current = config
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+            current = current[key]
+        
+        # Set value with type inference
+        final_key = keys[-1]
+        try:
+            # Try to parse as Python literal (bool, int, float, list)
+            value = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            # Keep as string
+            pass
+        
+        current[final_key] = value
+        print(f"  Override: {key_path} = {value}")
+    
+    return config
+
+
 def get_temperature(epoch: int, config: dict) -> float:
     """Get temperature for Gumbel-softmax based on epoch."""
     tau_start = config['training']['temperature_start']
@@ -485,7 +524,19 @@ def cleanup_old_checkpoints(checkpoint_dir: Path, keep_last_n: int = 5):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train RLAN on ARC")
+    parser = argparse.ArgumentParser(
+        description="Train RLAN on ARC",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Config Overrides:
+  You can override any config value using: key.subkey=value
+  
+  Examples:
+    python scripts/train_rlan.py --config configs/rlan_base.yaml training.batch_size=32
+    python scripts/train_rlan.py --config configs/rlan_base.yaml training.max_epochs=100 logging.use_wandb=true
+    python scripts/train_rlan.py --config configs/rlan_base.yaml model.hidden_dim=512 training.learning_rate=3e-4
+        """
+    )
     parser.add_argument('--config', type=str, default='configs/rlan_base.yaml',
                         help='Path to configuration file')
     parser.add_argument('--resume', type=str, default=None,
@@ -494,10 +545,18 @@ def main():
                         help='Start fresh even if checkpoints exist')
     parser.add_argument('--device', type=str, default=None,
                         help='Device to use (cuda/cpu)')
+    parser.add_argument('overrides', nargs='*',
+                        help='Config overrides in format key.subkey=value')
     args = parser.parse_args()
     
     # Load configuration
     config = load_config(args.config)
+    
+    # Apply command-line overrides
+    if args.overrides:
+        print("Applying config overrides:")
+        config = override_config(config, args.overrides)
+    
     print(f"=" * 60)
     print(f"RLAN Training")
     print(f"=" * 60)
