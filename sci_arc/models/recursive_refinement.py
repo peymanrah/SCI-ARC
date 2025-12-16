@@ -122,10 +122,21 @@ class RecursiveRefinement(nn.Module):
         # Input projection (combine x, y, z)
         self.input_proj = nn.Linear(hidden_dim * 2, hidden_dim)
         
-        # === ANSWER UPDATE: g(y, z) ===
-        # Option to share with latent_encoder for maximum parameter efficiency
+        # === SPATIAL CROSS-ATTENTION (Critical for spatial reasoning) ===
+        # Answer y attends to full spatial input x_test_emb
+        # This preserves WHERE information, not just WHAT
+        self.spatial_cross_attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.spatial_norm = nn.LayerNorm(hidden_dim)
+        
+        # === ANSWER UPDATE: g(y, z, x_spatial) ===
+        # Now includes spatial context from cross-attention
         self.answer_update = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
+            nn.Linear(hidden_dim * 3, hidden_dim * 2),  # y + z + spatial_context
             nn.SiLU(),  # Changed from GELU to SiLU (like TRM's SwiGLU base)
             nn.Dropout(dropout),
             nn.Linear(hidden_dim * 2, hidden_dim)
@@ -166,29 +177,30 @@ class RecursiveRefinement(nn.Module):
         y = self.y_init[:, :num_cells, :].expand(B, -1, -1).clone()
         z = self.z_init.expand(B, -1, -1).clone()
         
-        # Pool input for combination with latent
-        x_pool = x_test_emb.mean(dim=1)  # [B, D]
+        # Keep full spatial input for cross-attention (NO POOLING - preserves spatial info)
+        # x_test_emb: [B, N_in, D] - full spatial context
         
         outputs = []
         
         # === TRM MEMORY OPTIMIZATION ===
         # Run H_cycles-1 without gradients to save memory
         # Only the last H_cycle needs gradients for backprop
+        # NOTE: When memory_efficient=True, deep supervision on early steps is ineffective
         if memory_efficient and self.training and self.H_cycles > 1:
             with torch.no_grad():
                 for h in range(self.H_cycles - 1):
-                    y, z = self._single_h_cycle(x_pool, y, z, z_task, num_cells)
+                    y, z = self._single_h_cycle(x_test_emb, y, z, z_task, num_cells)
                     logits = self.to_logits(y).view(B, H_out, W_out, -1)
                     outputs.append(logits.detach())
             
             # Last H_cycle with gradients
-            y, z = self._single_h_cycle(x_pool, y, z, z_task, num_cells)
+            y, z = self._single_h_cycle(x_test_emb, y, z, z_task, num_cells)
             logits = self.to_logits(y).view(B, H_out, W_out, -1)
             outputs.append(logits)
         else:
             # Standard mode: all cycles with gradients
             for h in range(self.H_cycles):
-                y, z = self._single_h_cycle(x_pool, y, z, z_task, num_cells)
+                y, z = self._single_h_cycle(x_test_emb, y, z, z_task, num_cells)
                 logits = self.to_logits(y).view(B, H_out, W_out, -1)
                 outputs.append(logits)
         
@@ -196,7 +208,7 @@ class RecursiveRefinement(nn.Module):
     
     def _single_h_cycle(
         self,
-        x_pool: torch.Tensor,
+        x_test_emb: torch.Tensor,  # [B, N_in, D] - FULL spatial input (not pooled!)
         y: torch.Tensor,
         z: torch.Tensor,
         z_task: torch.Tensor,
@@ -206,13 +218,17 @@ class RecursiveRefinement(nn.Module):
         Execute a single H-cycle (outer loop iteration).
         
         Extracted for memory-efficient training pattern.
+        
+        Key improvement: Uses cross-attention to x_test_emb to preserve
+        spatial information (WHERE things are, not just WHAT).
         """
         # === INNER RECURSION (L_cycles) ===
         for l in range(self.L_cycles):
-            # Pool current answer and latent
+            # Pool current answer for latent update signal
             y_pool = y.mean(dim=1)  # [B, D]
+            x_pool = x_test_emb.mean(dim=1)  # [B, D] - for latent update only
             
-            # Combine inputs
+            # Combine inputs for latent update
             combined = torch.cat([x_pool, y_pool], dim=-1)  # [B, 2D]
             update_signal = self.input_proj(combined)  # [B, D]
             
@@ -228,12 +244,23 @@ class RecursiveRefinement(nn.Module):
             z = self.latent_encoder(z_input)
             z = self.z_norm(z)
         
+        # === SPATIAL CROSS-ATTENTION (Critical fix for spatial reasoning) ===
+        # Answer y attends to full spatial input x_test_emb
+        # Query: y (current answer cells), Key/Value: x_test_emb (input pixels)
+        # This allows each output cell to "look at" relevant input locations
+        spatial_context, _ = self.spatial_cross_attention(
+            query=y,           # [B, num_cells, D] - where we're predicting
+            key=x_test_emb,    # [B, N_in, D] - full spatial input
+            value=x_test_emb   # [B, N_in, D]
+        )
+        spatial_context = self.spatial_norm(spatial_context + y)  # Residual + norm
+        
         # === ANSWER UPDATE ===
         # Broadcast z to match y
         z_broadcast = z.mean(dim=1, keepdim=True).expand(-1, num_cells, -1)
         
-        # Update answer
-        update_input = torch.cat([y, z_broadcast], dim=-1)  # [B, N, 2D]
+        # Update answer with y, z, AND spatial context
+        update_input = torch.cat([y, z_broadcast, spatial_context], dim=-1)  # [B, N, 3D]
         y_update = self.answer_update(update_input)
         y = y + y_update  # Residual
         y = self.y_norm(y)
@@ -253,7 +280,7 @@ class RecursiveRefinement(nn.Module):
         
         y = self.y_init[:, :num_cells, :].expand(B, -1, -1).clone()
         z = self.z_init.expand(B, -1, -1).clone()
-        x_pool = x_test_emb.mean(dim=1)
+        # Keep full spatial input (no pooling)
         
         outputs = []
         states = []
@@ -261,7 +288,7 @@ class RecursiveRefinement(nn.Module):
         for h in range(self.H_cycles):
             for l in range(self.L_cycles):
                 y_pool = y.mean(dim=1)
-                z_pool = z.mean(dim=1)
+                x_pool = x_test_emb.mean(dim=1)  # Pool only for latent update
                 
                 combined = torch.cat([x_pool, y_pool], dim=-1)
                 update_signal = self.input_proj(combined)
@@ -275,8 +302,14 @@ class RecursiveRefinement(nn.Module):
                 z_input = z + update_signal.unsqueeze(1)
                 z = self.z_norm(self.latent_encoder(z_input))
             
+            # Spatial cross-attention: y attends to x_test_emb
+            spatial_context, _ = self.spatial_cross_attention(
+                query=y, key=x_test_emb, value=x_test_emb
+            )
+            spatial_context = self.spatial_norm(spatial_context + y)
+            
             z_broadcast = z.mean(dim=1, keepdim=True).expand(-1, num_cells, -1)
-            update_input = torch.cat([y, z_broadcast], dim=-1)
+            update_input = torch.cat([y, z_broadcast, spatial_context], dim=-1)
             y = self.y_norm(y + self.answer_update(update_input))
             
             logits = self.to_logits(y).view(B, H_out, W_out, -1)

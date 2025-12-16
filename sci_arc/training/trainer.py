@@ -165,10 +165,10 @@ class SCIARCTrainer:
                 debug=True  # Enable per-batch statistics
             ).to(self.device)
             print(f"[CISL] Enabled Content-Invariant Structure Learning:")
-            print(f"  - Consistency weight (λ₁): {config.cicl_consist_weight}")
-            print(f"  - Content invariance weight (λ₂): {config.cicl_color_inv_weight}")
-            print(f"  - Variance weight (λ₃): {config.cicl_variance_weight}")
-            print(f"  - Target std (γ): {config.cicl_target_std}")
+            print(f"  - Consistency weight (L1): {config.cicl_consist_weight}")
+            print(f"  - Content invariance weight (L2): {config.cicl_color_inv_weight}")
+            print(f"  - Variance weight (L3): {config.cicl_variance_weight}")
+            print(f"  - Target std (gamma): {config.cicl_target_std}")
         
         # Setup optimizer
         self.optimizer = self._create_optimizer()
