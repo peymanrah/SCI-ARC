@@ -281,6 +281,29 @@ def main():
     # Build loss function with flattened slots for SCL (prevents representation collapse)
     hidden_dim = config['model']['hidden_dim']
     num_structure_slots = config['model'].get('num_structure_slots', 8)
+    
+    # === CLASS WEIGHTS FOR BACKGROUND COLLAPSE PREVENTION ===
+    # ARC grids are ~85% background (color 0). Standard CE optimizes for accuracy,
+    # so the model learns "predict 0 everywhere" = 85% accuracy (local minimum).
+    # Class weights penalize background errors less, forcing focus on content.
+    device = hw_cfg.get('device', 'cuda')
+    class_weights = None
+    if train_cfg.get('use_class_weights', False):
+        # Background (0) gets low weight, non-background gets high weight
+        class_weights = torch.ones(config['model']['num_colors'], device=device)
+        class_weights[0] = 0.1  # Background weight = 0.1 (10x less important)
+        print(f"Using class weights: background=0.1, others=1.0")
+    
+    # Focal loss gamma: 0 = disabled, 2.0 = recommended for class imbalance
+    focal_gamma = train_cfg.get('focal_gamma', 0.0)
+    if focal_gamma > 0:
+        print(f"Using Focal Loss with gamma={focal_gamma}")
+    
+    # Label smoothing: prevents overconfident predictions
+    label_smoothing = train_cfg.get('label_smoothing', 0.0)
+    if label_smoothing > 0:
+        print(f"Using label smoothing: {label_smoothing}")
+    
     loss_fn = SCIARCLoss(
         H_cycles=config['model']['H_cycles'],
         scl_weight=train_cfg['scl_weight'],
@@ -289,6 +312,9 @@ def main():
         hidden_dim=hidden_dim,
         projection_dim=hidden_dim // 2,
         num_structure_slots=num_structure_slots,  # For SCL slot flattening
+        label_smoothing=label_smoothing,
+        focal_gamma=focal_gamma,
+        class_weights=class_weights,
     )
     
     # Build training config

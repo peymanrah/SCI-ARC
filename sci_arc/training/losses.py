@@ -290,10 +290,13 @@ class OrthogonalityLoss(nn.Module):
 
 class DeepSupervisionLoss(nn.Module):
     """
-    Deep supervision loss from TRM.
+    Deep supervision loss from TRM with Focal Loss support.
     
     Apply CE loss at each refinement step, with later steps weighted more.
     This helps the model learn to progressively improve its answer.
+    
+    NEW: Supports Focal Loss to combat class imbalance (85% background in ARC).
+    Focal Loss down-weights easy examples (background) and focuses on hard ones.
     
     Weight schedule: linear from 1/K to 1 (later steps more important)
     """
@@ -302,20 +305,34 @@ class DeepSupervisionLoss(nn.Module):
         self,
         num_steps: int,
         weight_schedule: str = "linear",
-        ignore_index: int = -1
+        ignore_index: int = -1,
+        label_smoothing: float = 0.0,
+        focal_gamma: float = 0.0,  # 0 = disabled, 2.0 = recommended
+        class_weights: Optional[torch.Tensor] = None
     ):
         """
         Args:
             num_steps: Number of refinement steps (H_cycles)
             weight_schedule: "linear", "exponential", or "uniform"
             ignore_index: Label value to ignore (for padding)
+            label_smoothing: Label smoothing factor (0.0 = disabled, 0.1 = recommended)
+            focal_gamma: Focal loss gamma (0.0 = standard CE, 2.0 = recommended for imbalance)
+            class_weights: Optional per-class weights [num_classes]
         """
         super().__init__()
         self.num_steps = num_steps
         self.weight_schedule = weight_schedule
         self.ignore_index = ignore_index
+        self.label_smoothing = label_smoothing
+        self.focal_gamma = focal_gamma
         
-        # Compute weights
+        # Register class weights as buffer (moves to correct device automatically)
+        if class_weights is not None:
+            self.register_buffer('class_weights', class_weights)
+        else:
+            self.class_weights = None
+        
+        # Compute step weights
         if weight_schedule == "linear":
             weights = torch.arange(1, num_steps + 1).float() / num_steps
         elif weight_schedule == "exponential":
@@ -333,14 +350,14 @@ class DeepSupervisionLoss(nn.Module):
         target: torch.Tensor               # [B, H, W] ground truth
     ) -> torch.Tensor:
         """
-        Compute deep supervision loss.
+        Compute deep supervision loss with optional Focal Loss.
         
         Args:
             predictions: List of predictions at each step [B, H, W, C]
             target: Ground truth grid [B, H, W]
         
         Returns:
-            loss: Weighted average CE loss
+            loss: Weighted average CE/Focal loss
         """
         device = predictions[0].device
         
@@ -353,13 +370,34 @@ class DeepSupervisionLoss(nn.Module):
             pred_flat = pred.reshape(-1, C)  # [B*H*W, C]
             target_flat = target.reshape(-1)  # [B*H*W]
             
-            # Use standard CE with ignore_index (avoids CPU-GPU sync from .any())
-            step_loss = F.cross_entropy(
-                pred_flat,
-                target_flat,
-                ignore_index=self.ignore_index,
-                reduction='mean'
-            )
+            # Compute loss based on focal_gamma setting
+            if self.focal_gamma > 0:
+                # Focal Loss: down-weights easy examples (background)
+                # FL(p_t) = -(1-p_t)^gamma * log(p_t)
+                # This forces model to focus on hard examples (non-background)
+                ce_loss = F.cross_entropy(
+                    pred_flat,
+                    target_flat,
+                    weight=self.class_weights,
+                    ignore_index=self.ignore_index,
+                    reduction='none',
+                    label_smoothing=self.label_smoothing
+                )
+                # pt = probability of correct class
+                pt = torch.exp(-ce_loss)
+                # Focal weight: (1-pt)^gamma
+                focal_weight = (1 - pt) ** self.focal_gamma
+                step_loss = (focal_weight * ce_loss).mean()
+            else:
+                # Standard weighted CE with optional label smoothing
+                step_loss = F.cross_entropy(
+                    pred_flat,
+                    target_flat,
+                    weight=self.class_weights,
+                    ignore_index=self.ignore_index,
+                    reduction='mean',
+                    label_smoothing=self.label_smoothing
+                )
             
             weight = self.step_weights[t]
             total_loss = total_loss + weight * step_loss
@@ -376,12 +414,14 @@ class SCIARCLoss(nn.Module):
     """
     Combined loss for SCI-ARC training.
     
-    L_total = L_CE (deep supervision)
+    L_total = L_CE (deep supervision with optional Focal Loss)
             + λ_scl * L_SCL (structural contrastive)
             + λ_orth * L_orth (orthogonality)
     
     This combines the TRM insight (deep supervision) with
     SCI innovations (SCL + orthogonality).
+    
+    NEW: Supports Focal Loss and class weighting to combat background collapse.
     """
     
     def __init__(
@@ -394,7 +434,11 @@ class SCIARCLoss(nn.Module):
         ignore_index: int = -1,
         hidden_dim: int = 256,  # For SCL projection head
         projection_dim: int = 128,
-        num_structure_slots: int = 8  # Number of structure slots (K)
+        num_structure_slots: int = 8,  # Number of structure slots (K)
+        # NEW: Anti-background-collapse parameters
+        label_smoothing: float = 0.0,  # 0.0 = disabled, 0.1 = recommended
+        focal_gamma: float = 0.0,  # 0.0 = standard CE, 2.0 = focal loss
+        class_weights: Optional[torch.Tensor] = None  # Per-class weights
     ):
         """
         Args:
@@ -407,6 +451,9 @@ class SCIARCLoss(nn.Module):
             hidden_dim: Hidden dimension for SCL projection head
             projection_dim: Output dimension of SCL projection head
             num_structure_slots: Number of structure slots for SCL flattening
+            label_smoothing: Label smoothing for CE (prevents overconfidence)
+            focal_gamma: Focal loss gamma (down-weights easy/background examples)
+            class_weights: Per-class weights to combat class imbalance
         """
         super().__init__()
         
@@ -417,7 +464,10 @@ class SCIARCLoss(nn.Module):
         self.deep_supervision = DeepSupervisionLoss(
             num_steps=H_cycles,
             weight_schedule=weight_schedule,
-            ignore_index=ignore_index
+            ignore_index=ignore_index,
+            label_smoothing=label_smoothing,
+            focal_gamma=focal_gamma,
+            class_weights=class_weights
         )
         self.scl = StructuralContrastiveLoss(
             temperature=temperature,

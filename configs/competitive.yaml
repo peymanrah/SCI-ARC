@@ -78,6 +78,24 @@ training:
   ortho_weight: 0.01            # Orthogonality constraint
   deep_supervision_weight: 0.5  # Intermediate supervision
   
+  # ==========================================================================
+  # ANTI-BACKGROUND-COLLAPSE: CRITICAL FOR ARC
+  # ==========================================================================
+  # ARC grids are ~85% background (color 0). Standard CE optimizes for accuracy,
+  # so the model learns "predict 0 everywhere" = 85% accuracy (local minimum).
+  # These settings force the model to focus on actual content, not background.
+  #
+  # Focal Loss: FL(p_t) = -(1-p_t)^gamma * log(p_t)
+  # - gamma=0: standard CE (what failed before)
+  # - gamma=2: down-weights easy examples (background), focuses on hard (content)
+  focal_gamma: 2.0              # CRITICAL: Focus on hard examples (non-background)
+  
+  # Class weights: penalize background errors less
+  use_class_weights: true       # Background weight=0.1, others=1.0
+  
+  # Label smoothing: prevents overconfident predictions
+  label_smoothing: 0.1          # Mild regularization
+  
   # Learning rate schedule - cosine annealing
   scheduler_type: cosine
   min_lr: 1.0e-6
