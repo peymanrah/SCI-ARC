@@ -51,10 +51,20 @@ training:
   # (thanks to infinite augmentation + structured inductive biases)
   max_epochs: 1000
   
-  # TRM: global_batch=768 across 8 GPUs = 96 per GPU
-  # RLAN: batch=48, grad_accum=4 = effective 192 on single GPU
-  # hidden_dim=512 uses ~18GB VRAM with batch=48
+  # =============================================================
+  # BATCH SIZE STRATEGY FOR SINGLE RTX 3090 (24GB VRAM)
+  # =============================================================
+  # TRM: global_batch=768 across 8 A100 GPUs
+  # RLAN target: effective_batch=384 (50% of TRM)
+  # 
+  # hidden_dim=512 uses ~400MB/sample with AMP
+  # Max safe batch: 48 samples (~19GB VRAM)
+  # grad_accumulation=8 → effective_batch = 48 × 8 = 384
+  # =============================================================
   batch_size: 48
+  grad_accumulation_steps: 8
+  # effective_batch_size = 48 × 8 = 384
+  
   learning_rate: 1.0e-4  # Match TRM's lr=1e-4
   weight_decay: 0.1      # Match TRM's weight_decay=0.1
   gradient_clip: 1.0
@@ -85,10 +95,6 @@ training:
   # EMA for stable evaluation
   use_ema: true
   ema_decay: 0.999
-  
-  # Gradient accumulation
-  # effective_batch_size = 32 * 4 = 128
-  grad_accumulation_steps: 4
 
 data:
   train_path: "./data/arc-agi/data/training"
@@ -96,8 +102,9 @@ data:
   
   max_grid_size: 30
   
-  # Multi-worker data loading
-  num_workers: 8
+  # Data loading optimization for 48 vCPU server
+  # Use 12 workers (25% of vCPU) for optimal GPU feeding
+  num_workers: 12
   pin_memory: true
   prefetch_factor: 4
   persistent_workers: true

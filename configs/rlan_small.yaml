@@ -28,10 +28,22 @@ model:
   lcr_num_heads: 4
 
 training:
-  max_epochs: 250
-  # Batch size optimized for RTX 3090 24GB VRAM with AMP
-  # For hidden_dim=128 (small model): batch_size=128 fits easily (~12GB)
-  batch_size: 128
+  max_epochs: 500  # More epochs for small model to converge
+  
+  # =============================================================
+  # BATCH SIZE STRATEGY FOR SINGLE RTX 3090 (24GB VRAM)
+  # =============================================================
+  # TRM: global_batch=768 across 8 A100 GPUs
+  # RLAN target: effective_batch=384 (50% of TRM)
+  # 
+  # hidden_dim=128 uses ~100MB/sample with AMP
+  # Max safe batch: 192 samples (~19GB VRAM)
+  # grad_accumulation=2 → effective_batch = 192 × 2 = 384
+  # =============================================================
+  batch_size: 192
+  grad_accumulation_steps: 2
+  # effective_batch_size = 192 × 2 = 384
+  
   learning_rate: 1.0e-4
   weight_decay: 0.1  # Match TRM for regularization
   gradient_clip: 1.0
@@ -58,7 +70,6 @@ training:
   scheduler: "cosine"  # cosine, onecycle, constant
   warmup_epochs: 10
   min_lr: 1.0e-6
-  grad_accumulation_steps: 1  # Increase to 2-4 for effective larger batch
 
 data:
   # PRODUCTION data paths - ARC-AGI directory structure
@@ -71,11 +82,12 @@ data:
   
   max_grid_size: 30
   
-  # Data loading optimization
-  # Windows: num_workers=0 is fastest (multiprocessing overhead)
-  # Linux: Use 4-8 workers
-  num_workers: 0
+  # Data loading optimization for 48 vCPU server
+  # Use 12 workers (25% of vCPU) for optimal GPU feeding
+  num_workers: 12
   pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
   
   # Caching strategy (CRITICAL for competitive training)
   # cache_samples=true: Pre-cache all samples in memory (GPU becomes bottleneck)
