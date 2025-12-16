@@ -376,10 +376,12 @@ class SCIARCTrainer:
             for i, families in enumerate(batch_transform_families):
                 unique_count = len(set(families))
                 print(f"  Batch {i+1}: {unique_count} unique families out of {len(families)} samples")
-                if unique_count < len(families) // 2:
-                    print(f"    [!] Low diversity - check augmentation settings")
+                # We expect ~8 unique families (the 8 dihedral transforms)
+                # Low diversity would be 1-2 families dominating
+                if unique_count < 4:
+                    print(f"    [!] Low diversity ({unique_count} families) - check augmentation settings")
                 else:
-                    print(f"    [+] Good diversity for SCL")
+                    print(f"    [+] Good diversity for SCL ({unique_count} transform families)")
         
         # Average losses (already Python floats)
         for key in epoch_losses:
@@ -408,26 +410,15 @@ class SCIARCTrainer:
         # This is the CRITICAL fix: use the deep_supervision component that has
         # Focal Loss, Class Weights, and Label Smoothing built-in
         if hasattr(self.loss_fn, 'deep_supervision'):
-            # Build list with final prediction for deep supervision loss
-            # deep_supervision expects list of [B, H, W, C] predictions
-            all_predictions = []
-            
-            # Add intermediate predictions if available
-            if 'intermediate_logits' in outputs and outputs['intermediate_logits']:
-                all_predictions.extend(outputs['intermediate_logits'])
-            
-            # Add final prediction
-            all_predictions.append(logits)
-            
-            # Compute combined task + deep loss using Focal Loss / Class Weights
-            combined_loss = self.loss_fn.deep_supervision(all_predictions, targets)
-            
-            # Split into task (final) and deep (intermediate) for logging
-            # For logging, compute what final prediction contributed
+            # Compute task loss (final prediction only) using Focal Loss
             task_loss = self.loss_fn.deep_supervision([logits], targets)
-            deep_loss = combined_loss - task_loss if len(all_predictions) > 1 else torch.tensor(0.0, device=self.device)
-            
             losses['task'] = task_loss
+            
+            # Compute deep supervision loss from intermediate predictions
+            deep_loss = torch.tensor(0.0, device=self.device)
+            if 'intermediate_logits' in outputs and outputs['intermediate_logits']:
+                # Intermediate predictions loss (also with Focal Loss)
+                deep_loss = self.loss_fn.deep_supervision(outputs['intermediate_logits'], targets)
             losses['deep'] = deep_loss
             
             # === DIAGNOSTIC: Log Focal Loss effect on first few batches ===
