@@ -73,6 +73,20 @@ class TTTConfig:
     # Optimizer type ('adamw' or 'sgd')
     optimizer: str = 'adamw'
     
+    # Label smoothing for TTT loss (same as training default)
+    label_smoothing: float = 0.1
+    
+    # Deep supervision weight for TTT
+    deep_supervision_weight: float = 0.5
+    
+    # === NOTE ON FOCAL LOSS ===
+    # We intentionally do NOT use Focal Loss during TTT because:
+    # 1. Focal Loss was calibrated for the global dataset (~85% background)
+    # 2. Individual tasks may have very different class distributions
+    # 3. With only 1-5 demo pairs, local distribution is highly variable
+    # 4. Over-weighting based on global stats could destabilize TTT
+    # Standard CE with label smoothing is safer for small-sample fine-tuning.
+    
     # Device
     device: str = 'cuda'
     
@@ -225,19 +239,31 @@ class TTTAdapter:
         targets: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute TTT loss (task loss only, no SCL).
+        Compute TTT loss (task loss only, no SCL, no Focal Loss).
         
-        CRITICAL: We do NOT compute SCL during TTT because:
-        1. SCL requires multiple tasks with different transforms
-        2. A single task has only one transform type
-        3. Updating on one transform would bias the contrastive space
+        CRITICAL DESIGN DECISIONS:
+        
+        1. NO SCL during TTT because:
+           - SCL requires multiple tasks with different transforms
+           - A single task has only one transform type
+           - Updating on one transform would bias the contrastive space
+        
+        2. NO FOCAL LOSS during TTT because:
+           - Focal Loss was calibrated for global dataset (~85% background)
+           - Individual tasks have highly variable class distributions
+           - With only 1-5 demos, local stats are unreliable
+           - Standard CE is more stable for small-sample fine-tuning
+        
+        3. We DO use:
+           - Label smoothing (configurable, prevents overconfidence)
+           - Deep supervision (helps model learn at all refinement steps)
         
         Args:
             outputs: Model outputs dict
             targets: Target grids [B, H, W]
         
         Returns:
-            Task loss (cross entropy)
+            Task loss (cross entropy with label smoothing)
         """
         logits = outputs['logits']  # [B, H, W, C]
         
@@ -245,11 +271,11 @@ class TTTAdapter:
         logits_flat = logits.view(B * H * W, C)
         targets_flat = targets.view(B * H * W)
         
-        # Use label smoothing for regularization
+        # Use label smoothing from config (prevents overconfident predictions)
         loss = F.cross_entropy(
             logits_flat, 
             targets_flat,
-            label_smoothing=0.1  # Mild regularization
+            label_smoothing=self.config.label_smoothing
         )
         
         # Add deep supervision if available
@@ -260,10 +286,10 @@ class TTTAdapter:
                 deep_loss += F.cross_entropy(
                     inter_flat, 
                     targets_flat,
-                    label_smoothing=0.1
+                    label_smoothing=self.config.label_smoothing
                 )
             deep_loss /= len(outputs['intermediate_logits'])
-            loss = loss + 0.5 * deep_loss
+            loss = loss + self.config.deep_supervision_weight * deep_loss
         
         return loss
     
@@ -287,6 +313,19 @@ class TTTAdapter:
         """
         if not self.config.enabled:
             return self.model
+        
+        # Log TTT configuration on first call
+        if not hasattr(self, '_ttt_logged'):
+            if self.config.verbose:
+                print(f"\n[TTT] Test-Time Training Configuration:")
+                print(f"  Steps: {self.config.num_steps}")
+                print(f"  Learning rate: {self.config.learning_rate}")
+                print(f"  Label smoothing: {self.config.label_smoothing}")
+                print(f"  Deep supervision weight: {self.config.deep_supervision_weight}")
+                print(f"  Focal Loss: DISABLED (intentional - see TTTConfig docs)")
+                print(f"  Class Weights: DISABLED (intentional - task-specific distribution)")
+                print(f"  Modules to fine-tune: {self.config.finetune_modules}")
+            self._ttt_logged = True
         
         # Move to device
         input_grids = input_grids.to(self.device)
