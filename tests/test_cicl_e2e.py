@@ -311,7 +311,8 @@ def test_cicl_gradient_flow():
         variance_weight=0.1
     )
     
-    result = cicl(z_struct, z_color)
+    # Use keyword arg for z_struct_content_aug (2nd positional is now z_struct_demos)
+    result = cicl(z_struct, z_struct_content_aug=z_color)
     loss = result['total']
     
     # Backward pass

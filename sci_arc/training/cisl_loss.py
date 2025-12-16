@@ -62,19 +62,23 @@ class WithinTaskConsistencyLoss(nn.Module):
     def forward(
         self,
         structure_embeddings: torch.Tensor,  # [K, D] or [B, K, D]
-        mask: Optional[torch.Tensor] = None   # [K] or [B, K] valid demo mask
+        mask: Optional[torch.Tensor] = None   # [K] or [B, K] valid slot mask (rarely needed)
     ) -> torch.Tensor:
         """
         Compute within-task consistency loss.
         
+        Measures variance across the K structural slots. For a well-trained model,
+        all K slots should converge to similar representations for the same task,
+        as they all represent aspects of the same transformation.
+        
         Args:
-            structure_embeddings: Structure embeddings for each demo
-                If [K, D]: Single task with K demos
-                If [B, K, D]: Batch of B tasks, each with up to K demos
-            mask: Optional mask for valid demos (for padded batches)
+            structure_embeddings: Structure slot embeddings
+                If [K, D]: Single task with K slots
+                If [B, K, D]: Batch of B tasks, each with K slots
+            mask: Optional mask for valid slots (rarely needed - all slots are valid)
         
         Returns:
-            Scalar consistency loss
+            Scalar consistency loss = mean variance from centroid
         """
         if structure_embeddings.dim() == 2:
             # Single task: [K, D]
@@ -330,25 +334,33 @@ class CISLLoss(nn.Module):
     
     def forward(
         self,
-        z_struct: torch.Tensor,                    # [B, K, D] or [B, D]
+        z_struct: torch.Tensor,                    # [B, K, D] - aggregated
+        z_struct_demos: Optional[torch.Tensor] = None,  # [B, P, K, D] - per-demo (for consistency)
         z_struct_content_aug: Optional[torch.Tensor] = None,  # [B, K, D] or [B, D]
-        demo_mask: Optional[torch.Tensor] = None   # [B, K] for consistency
     ) -> Dict[str, torch.Tensor]:
         """
         Compute all CISL losses with detailed statistics for logging.
         
         Args:
-            z_struct: Structure embeddings from original task
+            z_struct: Aggregated structure embeddings [B, K, D]
+                      K = number of structural slots (learned query outputs)
+            z_struct_demos: Per-demo structure embeddings [B, P, K, D]
+                           P = number of demo pairs
+                           Used for consistency loss (variance across demos)
             z_struct_content_aug: Structure embeddings from content-permuted task
-            demo_mask: Mask for valid demos (for batched consistency)
+                                  Should be identical to z_struct if model is content-invariant
         
         Returns:
             Dict with:
                 - 'total': Combined CISL loss (scalar)
-                - 'consistency': Within-task consistency loss
-                - 'content_inv': Content invariance loss  
-                - 'variance': Batch variance loss
+                - 'consistency': Within-task consistency loss (variance across demos)
+                - 'content_inv': Content invariance loss (z_struct vs z_struct_content_aug)
+                - 'variance': Batch variance loss (anti-collapse regularization)
                 - 'stats': Dict with embedding statistics (z_mean, z_std, z_norm, cos_sim)
+        
+        Note: The consistency loss measures variance ACROSS DEMO PAIRS (P dimension).
+              Each demo in a task should produce similar structure embeddings since
+              they all represent the same transformation rule.
         """
         device = z_struct.device
         losses = {}
@@ -361,10 +373,25 @@ class CISLLoss(nn.Module):
         stats['z_std'] = z_flat.std().item()
         stats['z_norm'] = z_flat.norm(dim=-1).mean().item()
         
-        # 1. Within-Task Consistency
-        if z_struct.dim() == 3 and z_struct.size(1) > 1:
-            # Multiple demos per task - compute consistency
-            L_consist = self.consistency(z_struct, demo_mask)
+        # 1. Within-Task Consistency (across demo pairs)
+        # All P demos should produce similar structure embeddings since they represent
+        # the same transformation - measure variance across the P dimension
+        if z_struct_demos is not None and z_struct_demos.dim() == 4:
+            # z_struct_demos: [B, P, K, D] - P demo pairs, K structural slots
+            B, P, K, D = z_struct_demos.shape
+            
+            if P > 1:
+                # Aggregate across slots first, then measure consistency across demos
+                # Each demo's structure = mean of its K slots: [B, P, D]
+                z_per_demo = z_struct_demos.mean(dim=2)  # [B, P, D]
+                
+                # Now measure consistency across the P demos
+                L_consist = self.consistency(z_per_demo, mask=None)  # Uses [B, K, D] path with K=P
+            else:
+                L_consist = torch.tensor(0.0, device=device)
+        elif z_struct.dim() == 3 and z_struct.size(1) > 1:
+            # Fallback: measure consistency across K slots (old behavior)
+            L_consist = self.consistency(z_struct, mask=None)
         else:
             L_consist = torch.tensor(0.0, device=device)
         losses['consistency'] = L_consist
@@ -436,12 +463,12 @@ def apply_content_permutation(grid: torch.Tensor, perm: Optional[Dict[int, int]]
     """
     if perm is None:
         # Generate random permutation for values 1-9 (keep 0=background fixed)
-        values = list(range(1, 10))
-        shuffled = values.copy()
-        random.shuffle(shuffled)
+        # Use torch.randperm for reproducibility with torch.manual_seed
+        device = grid.device if hasattr(grid, 'device') else 'cpu'
+        shuffled_indices = torch.randperm(9, device=device) + 1  # Values 1-9 shuffled
         perm = {0: 0}  # Background stays fixed
-        for old, new in zip(values, shuffled):
-            perm[old] = new
+        for old_val in range(1, 10):
+            perm[old_val] = shuffled_indices[old_val - 1].item()
     
     # Apply permutation
     result = grid.clone()
@@ -480,14 +507,13 @@ def apply_content_permutation_batch(
     device = input_grids.device
     
     # Generate one permutation per batch item
+    # Use torch.randperm for reproducibility with torch.manual_seed
     perms = []
     for _ in range(B):
-        values = list(range(1, 10))
-        shuffled = values.copy()
-        random.shuffle(shuffled)
-        perm = {0: 0}
-        for old, new in zip(values, shuffled):
-            perm[old] = new
+        shuffled_indices = torch.randperm(9, device=device) + 1  # Values 1-9 shuffled
+        perm = {0: 0}  # Background stays fixed
+        for old_val in range(1, 10):
+            perm[old_val] = shuffled_indices[old_val - 1].item()
         perms.append(perm)
     
     # Apply permutations

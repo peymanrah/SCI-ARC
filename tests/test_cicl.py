@@ -204,7 +204,8 @@ def test_gradient_flow():
     z = torch.randn(B, K, D, requires_grad=True)
     z_color = torch.randn(B, K, D, requires_grad=True)
     
-    result = loss_fn(z, z_color)
+    # Use keyword arg for z_struct_content_aug (2nd positional is now z_struct_demos)
+    result = loss_fn(z, z_struct_content_aug=z_color)
     loss = result['total']
     loss.backward()
     

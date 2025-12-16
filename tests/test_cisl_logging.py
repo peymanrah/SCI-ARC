@@ -95,7 +95,8 @@ class TestCISLLogging:
         z_struct = torch.randn(4, 3, 64)
         z_aug = z_struct + 0.01 * torch.randn_like(z_struct)  # Very similar
         
-        result = loss_fn(z_struct, z_aug)
+        # Use keyword arg for z_struct_content_aug (2nd positional is now z_struct_demos)
+        result = loss_fn(z_struct, z_struct_content_aug=z_aug)
         
         cos_sim = result['stats']['orig_aug_cos_sim']
         assert cos_sim > 0.99, f"Expected high cosine sim, got {cos_sim}"

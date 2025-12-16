@@ -541,7 +541,8 @@ class SCIARCTrainer:
                        'variance': torch.tensor(0.0, device=self.device)}
         
         if 'z_struct' in outputs:
-            z_struct = outputs['z_struct']  # [B, K, D]
+            z_struct = outputs['z_struct']  # [B, K, D] - aggregated
+            z_struct_demos = outputs.get('z_struct_demos')  # [B, P, K, D] - per-demo (for consistency)
             
             if self.config.use_cicl and self.cisl_loss is not None:
                 # === CISL: Content-Invariant Structure Learning ===
@@ -550,14 +551,36 @@ class SCIARCTrainer:
                 if not hasattr(self, '_cisl_debug_count'):
                     self._cisl_debug_count = 0
                 
-                # Get content-augmented structure if available
-                z_struct_content_aug = outputs.get('z_struct_color_aug', None)
+                # === CONTENT INVARIANCE: Compute z_struct for color-permuted inputs ===
+                # This is the key CISL idea: S(task) = S(permute_colors(task))
+                # We apply random color permutation and verify structure is unchanged
+                z_struct_content_aug = None
+                if self.config.cicl_color_inv_weight > 0:
+                    from .cisl_loss import apply_content_permutation_batch
+                    
+                    # Apply color permutation to all grids
+                    input_grids_perm, output_grids_perm, test_input_perm, test_output_perm = \
+                        apply_content_permutation_batch(
+                            batch['input_grids'],
+                            batch['output_grids'],
+                            batch['test_inputs'],
+                            batch['test_outputs']
+                        )
+                    
+                    # Use efficient structure-only encoding (skips refinement)
+                    # This saves ~50% compute vs full forward_training
+                    with torch.no_grad():
+                        z_struct_content_aug = self.model.encode_structure_only(
+                            input_grids=input_grids_perm,
+                            output_grids=output_grids_perm,
+                        ).detach()
                 
                 # Compute CISL losses (includes stats tracking)
+                # Pass z_struct_demos [B, P, K, D] for proper consistency across demos
                 cisl_result = self.cisl_loss(
-                    z_struct=z_struct,
+                    z_struct=z_struct,                      # [B, K, D] - for variance/content_inv
+                    z_struct_demos=z_struct_demos,          # [B, P, K, D] - for consistency
                     z_struct_content_aug=z_struct_content_aug,
-                    demo_mask=batch.get('grid_masks', None)
                 )
                 
                 cisl_losses = {

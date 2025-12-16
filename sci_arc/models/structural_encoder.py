@@ -146,14 +146,22 @@ class AbstractionLayer2D(nn.Module):
         Returns:
             abstracted: [B, N, D] with content suppressed
         """
-        # Compute structuralness scores for each feature
+        # Compute structuralness scores for each feature dimension
+        # scores[i] ∈ [0, 1]: how "structural" (vs "content") feature i is
         scores = self.structural_detector(x)  # [B, N, D]
         
-        # Apply soft mask: 
-        # - Structural features (high score) are preserved
-        # - Content features (low score) are suppressed but not zeroed
-        # The residual_gate ensures information flows through even when scores are low
-        abstracted = x * scores + x * self.residual_gate * (1 - scores)
+        # Soft gating with residual bypass:
+        # output = x * (scores + residual_gate * (1 - scores))
+        #        = x * (scores + residual_gate - residual_gate * scores)
+        #        = x * (residual_gate + scores * (1 - residual_gate))
+        #
+        # When residual_gate=0.5:
+        #   - score=1.0 (structural): output = x * 1.0 (full pass)
+        #   - score=0.0 (content):    output = x * 0.5 (50% suppression)
+        #
+        # This ensures gradient flow while still suppressing content features.
+        effective_gate = scores + self.residual_gate * (1.0 - scores)
+        abstracted = x * effective_gate
         
         # NO NORMALIZATION HERE - it was causing representation collapse!
         # LayerNorm and per-sample std normalization both collapse representations
@@ -283,7 +291,8 @@ class StructuralEncoder2D(nn.Module):
         
         # === OUTPUT ===
         self.output_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.output_norm = nn.LayerNorm(hidden_dim)
+        # NOTE: LayerNorm removed - it was causing representation collapse
+        # by normalizing away differences between samples
     
     def forward(
         self,

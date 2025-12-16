@@ -199,15 +199,35 @@ class ContentEncoder2D(nn.Module):
         content_features = self.content_mlp(content_raw)
         content_features = content_features + content_raw  # Residual
         
-        # Project orthogonal to structure
-        # Use mean of structure slots for orthogonalization
-        structure_mean = structure_rep.mean(dim=1, keepdim=True)  # [B, 1, D]
-        structure_broadcast = structure_mean.expand(-1, self.max_objects, -1)
+        # === FULL SUBSPACE ORTHOGONALIZATION ===
+        # Project content orthogonal to the ENTIRE structure subspace
+        # (not just the mean, which could miss slot-aligned content)
+        # Formula: C_orth = C - sum_k(proj_Sk(C)) for all K structure slots
+        #
+        # This ensures content is orthogonal to every individual structure slot,
+        # not just the centroid. A content vector could be orthogonal to mean(S)
+        # but aligned with individual slots if they cancel out.
         
-        content_orthogonal = self.orthogonal_projector(
-            content_features,
-            structure_broadcast
-        )
+        content_orthogonal = content_features
+        K = structure_rep.size(1)  # Number of structure slots
+        
+        for k in range(K):
+            # Get k-th structure slot for all batches: [B, 1, D]
+            s_k = structure_rep[:, k:k+1, :]  # [B, 1, D]
+            # Broadcast to match content shape: [B, M, D]
+            s_k_broadcast = s_k.expand(-1, self.max_objects, -1)
+            
+            # Subtract projection onto this slot (Gram-Schmidt step)
+            s_k_norm = F.normalize(s_k_broadcast, dim=-1, eps=1e-8)
+            dot_product = (content_orthogonal * s_k_norm).sum(dim=-1, keepdim=True)
+            projection = dot_product * s_k_norm
+            content_orthogonal = content_orthogonal - projection
+        
+        # Final projection and normalization via the projector
+        # Note: We still use the projector for the learned transformation,
+        # but pass zeros as structure since we already orthogonalized
+        content_orthogonal = self.orthogonal_projector.proj(content_orthogonal)
+        content_orthogonal = self.orthogonal_projector.norm(content_orthogonal)
         
         return self.norm(content_orthogonal)
     

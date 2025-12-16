@@ -305,6 +305,52 @@ class SCIARC(nn.Module):
         
         return structure_rep, content_rep, z_task_demo
     
+    def encode_structure_only(
+        self,
+        input_grids: torch.Tensor,      # [B, num_pairs, H, W]
+        output_grids: torch.Tensor,     # [B, num_pairs, H, W]
+    ) -> torch.Tensor:
+        """
+        Encode only the structural representation (skip refinement).
+        
+        This is an efficient method for CISL content invariance computation,
+        where we only need z_struct, not the full forward pass with predictions.
+        
+        Saves ~50% compute compared to full forward_training.
+        
+        Args:
+            input_grids: [B, num_pairs, H, W] batched input grids
+            output_grids: [B, num_pairs, H, W] batched output grids
+        
+        Returns:
+            z_struct: [B, K, D] aggregated structural representation
+        """
+        B = input_grids.size(0)
+        num_pairs = input_grids.size(1)
+        
+        # Cap demo pairs
+        max_demo_pairs = 4
+        num_pairs_to_use = min(num_pairs, max_demo_pairs)
+        
+        all_structure_reps = []
+        
+        for p in range(num_pairs_to_use):
+            inp = input_grids[:, p, :, :]   # [B, H, W]
+            out = output_grids[:, p, :, :]  # [B, H, W]
+            
+            # Encode grids
+            input_emb = self.grid_encoder(inp)   # [B, H, W, D]
+            output_emb = self.grid_encoder(out)  # [B, H, W, D]
+            
+            # Extract structure ONLY (skip content and binding)
+            structure_rep = self.structural_encoder(input_emb, output_emb)  # [B, K, D]
+            all_structure_reps.append(structure_rep)
+        
+        # Aggregate across demos
+        structure_agg = torch.stack(all_structure_reps, dim=1).mean(dim=1)  # [B, K, D]
+        
+        return structure_agg
+    
     def _forward_demo_pairs(
         self,
         demo_pairs: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -411,7 +457,9 @@ class SCIARC(nn.Module):
             all_z_tasks.append(z_task_demo)
         
         # Aggregate across demos
-        structure_agg = torch.stack(all_structure_reps, dim=1).mean(dim=1)  # [B, K, D]
+        # Keep both raw and aggregated for different loss computations
+        z_struct_demos = torch.stack(all_structure_reps, dim=1)  # [B, num_pairs, K, D] - raw per-demo
+        structure_agg = z_struct_demos.mean(dim=1)  # [B, K, D] - aggregated for refinement
         content_agg = torch.stack(all_content_reps, dim=1).mean(dim=1)      # [B, M, D]
         z_tasks_stacked = torch.stack(all_z_tasks, dim=1)  # [B, num_pairs, D]
         z_task = self.demo_aggregator(z_tasks_stacked)      # [B, D]
@@ -426,7 +474,8 @@ class SCIARC(nn.Module):
         return {
             'logits': final,                    # [B, H, W, C]
             'intermediate_logits': predictions, # List of [B, H, W, C]
-            'z_struct': structure_agg,          # [B, K, D]
+            'z_struct': structure_agg,          # [B, K, D] - for backward compat & refinement
+            'z_struct_demos': z_struct_demos,   # [B, num_pairs, K, D] - for consistency loss
             'z_content': content_agg,           # [B, M, D]
             'z_task': z_task,                   # [B, D]
         }

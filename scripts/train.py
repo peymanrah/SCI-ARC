@@ -58,7 +58,7 @@ def find_latest_checkpoint(checkpoint_dir: str) -> str:
 
 def load_config(config_path: str) -> dict:
     """Load YAML configuration file."""
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     return config
 

@@ -103,11 +103,10 @@ def test_cicl_loss_in_compute_losses():
     z_struct = torch.randn(B, K, D)
     z_struct_content_aug = torch.randn(B, K, D)  # Content-augmented version
     
-    # Compute CISL losses
+    # Compute CISL losses (note: demo_mask removed in latest version)
     cisl_result = cisl_loss(
         z_struct=z_struct,
         z_struct_content_aug=z_struct_content_aug,
-        demo_mask=None
     )
     
     # Verify all expected keys exist
@@ -239,14 +238,15 @@ def test_cicl_learning_signal():
         "Consistent embeddings should have lower loss"
     
     # Scenario 3: Content invariance - same input/output
+    # Use keyword arg for z_struct_content_aug (2nd positional is now z_struct_demos)
     z_same = torch.randn(B, K, D)
-    result3 = cisl_loss(z_same, z_same.clone())
+    result3 = cisl_loss(z_same, z_struct_content_aug=z_same.clone())
     print(f"  Same orig/content → L_content_inv = {result3['content_inv'].item():.6f} (should be ~0)")
     
     # Scenario 4: Content invariance - different input/output
     z_orig = torch.randn(B, K, D)
     z_diff = torch.randn(B, K, D)
-    result4 = cisl_loss(z_orig, z_diff)
+    result4 = cisl_loss(z_orig, z_struct_content_aug=z_diff)
     print(f"  Diff orig/content → L_content_inv = {result4['content_inv'].item():.4f} (should be high)")
     
     assert result3['content_inv'] < result4['content_inv'], \
