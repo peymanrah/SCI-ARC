@@ -24,7 +24,7 @@ model:
   max_grid_size: 30
   
   # Task-specific (NOT capacity-dependent) - same as other configs
-  max_clues: 5       # ARC has ~3-5 spatial anchors per puzzle
+  max_clues: 6       # Ceiling slightly above ARC max (~5) for generalization
   num_predicates: 8  # Covers most spatial relationships
   num_solver_steps: 6
   
