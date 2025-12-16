@@ -1,0 +1,76 @@
+{
+  "total_tasks": 400,
+  "correct_tasks": 1,
+  "incorrect_tasks": 399,
+  "by_transformation": {
+    "scaling_up": {
+      "total": 103,
+      "correct": 1
+    },
+    "scaling_down": {
+      "total": 114,
+      "correct": 0
+    },
+    "color_change": {
+      "total": 51,
+      "correct": 0
+    },
+    "fill": {
+      "total": 24,
+      "correct": 0
+    },
+    "complex": {
+      "total": 69,
+      "correct": 0
+    },
+    "color_swap": {
+      "total": 39,
+      "correct": 0
+    }
+  },
+  "by_size_match": {
+    "matched": 400,
+    "mismatched": 0
+  },
+  "by_pixel_accuracy_range": {
+    "<50%": 196,
+    "50-80%": 157,
+    "80-90%": 41,
+    "95-100%": 3,
+    "90-95%": 3
+  },
+  "background_collapse": 400,
+  "common_errors": [],
+  "transformation_accuracies": {
+    "scaling_up": {
+      "accuracy": 0.009708737864077669,
+      "correct": 1,
+      "total": 103
+    },
+    "scaling_down": {
+      "accuracy": 0.0,
+      "correct": 0,
+      "total": 114
+    },
+    "color_change": {
+      "accuracy": 0.0,
+      "correct": 0,
+      "total": 51
+    },
+    "fill": {
+      "accuracy": 0.0,
+      "correct": 0,
+      "total": 24
+    },
+    "complex": {
+      "accuracy": 0.0,
+      "correct": 0,
+      "total": 69
+    },
+    "color_swap": {
+      "accuracy": 0.0,
+      "correct": 0,
+      "total": 39
+    }
+  }
+}
