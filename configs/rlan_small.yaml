@@ -66,15 +66,31 @@ training:
   lambda_curriculum: 0.1
   lambda_deep_supervision: 0.5
   
-  # Curriculum phases
-  pretrain_epochs: 50
-  finetune_start_epoch: 201
+  # =============================================================
+  # 3-STAGE CURRICULUM LEARNING (easy → medium → hard → all)
+  # =============================================================
+  # For small model with 500 epochs, compress stages:
+  #   Stage 1 (easy): epochs 0-49
+  #   Stage 2 (medium): epochs 50-149
+  #   Stage 3 (hard): epochs 150-299
+  #   Stage 4 (all): epochs 300+
+  # =============================================================
+  use_curriculum: true
+  curriculum_stages:
+    - 50    # Stage 1 (epochs 0-49): easy tasks only
+    - 150   # Stage 2 (epochs 50-149): + medium tasks
+    - 300   # Stage 3 (epochs 150-299): + hard tasks
+            # Stage 4 (epochs 300+): all data mixed
   
   # Optimizer and scheduler
   optimizer: "adamw"
-  scheduler: "cosine"  # cosine, onecycle, constant
+  scheduler: "onecycle"  # onecycle > cosine for ARC
   warmup_epochs: 10
   min_lr: 1.0e-6
+  
+  # EMA for stable evaluation
+  use_ema: true
+  ema_decay: 0.999
 
 data:
   # PRODUCTION data paths - ARC-AGI directory structure

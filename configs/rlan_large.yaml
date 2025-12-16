@@ -73,9 +73,21 @@ training:
   lambda_curriculum: 0.01
   lambda_deep_supervision: 0.3
   
-  # Curriculum phases
-  pretrain_epochs: 100
-  finetune_start_epoch: 800
+  # =============================================================
+  # 3-STAGE CURRICULUM LEARNING (easy → medium → hard → all)
+  # =============================================================
+  # Difficulty based on grid size and number of examples:
+  #   Stage 1 (easy): small grids (≤10×10), 3+ training examples
+  #   Stage 2 (medium): medium grids (≤20×20), 2+ examples
+  #   Stage 3 (hard): large grids, any examples
+  #   Stage 4: all data mixed (full training)
+  # =============================================================
+  use_curriculum: true
+  curriculum_stages:
+    - 100   # Stage 1 (epochs 0-99): easy tasks only
+    - 300   # Stage 2 (epochs 100-299): + medium tasks
+    - 600   # Stage 3 (epochs 300-599): + hard tasks
+            # Stage 4 (epochs 600+): all data mixed
   
   # Optimizer & Scheduler
   optimizer: "adamw"
