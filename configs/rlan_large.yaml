@@ -1,0 +1,136 @@
+# RLAN Large Configuration
+# =========================
+# Full capacity RLAN with hidden_dim=512 (~51M params)
+# 
+# This is NOT a fair comparison with TRM (~7M params)
+# Use rlan_fair.yaml for parameter-matched comparison
+#
+# Purpose: Explore RLAN's capacity scaling
+# - Does more capacity improve accuracy?
+# - How does 51M RLAN compare to 7M TRM?
+#
+# WARNING: Requires more VRAM - adjusted batch size accordingly
+# Optimized for RTX 3090 (24GB VRAM), single GPU training
+
+model:
+  type: "rlan"
+  hidden_dim: 512   # Full capacity (~51M params)
+  num_colors: 10
+  num_classes: 11   # 10 colors + background
+  max_grid_size: 30
+  max_clues: 5
+  num_predicates: 8
+  num_solver_steps: 6  # Comparable to TRM's L_cycles=6
+  use_act: true  # Enable Adaptive Computation Time
+  dropout: 0.1
+  
+  # Attention heads - more heads for larger hidden_dim
+  dsc_num_heads: 8
+  lcr_num_heads: 8
+  
+  # MSRE parameters
+  msre_encoding_dim: 64
+  msre_num_freq: 8
+  
+  # LCR parameters
+  lcr_num_freq: 8
+
+training:
+  max_epochs: 1000
+  
+  # =============================================================
+  # BATCH SIZE STRATEGY FOR SINGLE RTX 3090 (24GB VRAM)
+  # =============================================================
+  # hidden_dim=512: ~500MB/sample with AMP + grads
+  # Batch: 36 samples (~18GB VRAM, 6GB headroom for 51M model)
+  # grad_accumulation=8 → effective_batch = 36 × 8 = 288
+  # 
+  # Slightly more headroom needed for larger model (EMA = 51M shadow)
+  # =============================================================
+  batch_size: 36
+  grad_accumulation_steps: 8
+  # effective_batch_size = 36 × 8 = 288
+  
+  learning_rate: 1.0e-4
+  weight_decay: 0.1
+  gradient_clip: 1.0
+  
+  # Temperature schedule
+  temperature_start: 5.0
+  temperature_end: 0.1
+  
+  # Loss weights - focal loss dominates
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  lambda_entropy: 0.01
+  lambda_sparsity: 0.005
+  lambda_predicate: 0.001
+  lambda_curriculum: 0.01
+  lambda_deep_supervision: 0.3
+  
+  # Curriculum phases
+  pretrain_epochs: 100
+  finetune_start_epoch: 800
+  
+  # Optimizer & Scheduler
+  optimizer: "adamw"
+  scheduler: "onecycle"
+  warmup_epochs: 20
+  min_lr: 1.0e-6
+  
+  # EMA for stable evaluation
+  use_ema: true
+  ema_decay: 0.999
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  
+  # Data loading optimization
+  num_workers: 12
+  pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
+  
+  # Infinite diversity mode
+  cache_samples: false
+  
+  # Full augmentation pipeline
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+
+logging:
+  log_every: 1
+  save_every: 25
+  eval_every: 5
+  keep_last_n: 5
+  checkpoint_dir: "checkpoints/rlan_large"
+  log_to_file: true
+  
+  use_wandb: false
+  wandb_project: "rlan-arc"
+  wandb_run_name: null
+
+# Hardware settings
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false
+
+device:
+  use_cuda: true
+  mixed_precision: true   # AMP required for 51M model
+  dtype: "bfloat16"
+  compile: false
