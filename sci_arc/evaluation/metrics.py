@@ -1,154 +1,198 @@
 """
-Evaluation metrics for ARC tasks.
+Comprehensive Evaluation Metrics for ARC.
 
-Implements:
-1. Pixel-level accuracy
-2. Task-level accuracy (exact match)
-3. Partial match metrics
-4. IoU for object-level evaluation
+Provides all the metrics used in CISL/SCI-ARC evaluation:
+- Pixel accuracy
+- Task accuracy (exact match)
+- Size accuracy (output size correct)
+- Color accuracy (colors used match)
+- Non-background accuracy (excluding color 0)
+- IoU per color
+- Mean IoU
+- Partial match score
+- Levenshtein distance
 """
 
-import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple, Any
 from collections import defaultdict
+import numpy as np
 
 
 def pixel_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
     """
-    Compute pixel-wise accuracy.
+    Compute pixel-wise accuracy between prediction and target.
     
     Args:
-        pred: Predicted grid [H, W]
-        target: Ground truth grid [H, W]
-    
+        pred: Predicted grid, shape (H, W)
+        target: Target grid, shape (H, W)
+        
     Returns:
         Accuracy in [0, 1]
     """
     if pred.shape != target.shape:
-        # Handle size mismatch
+        # Size mismatch - compare minimum overlap
+        min_h = min(pred.shape[0], target.shape[0])
+        min_w = min(pred.shape[1], target.shape[1])
+        pred = pred[:min_h, :min_w]
+        target = target[:min_h, :min_w]
+        
+    if pred.size == 0:
+        return 1.0 if target.size == 0 else 0.0
+        
+    return (pred == target).mean()
+
+
+def task_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
+    """
+    Compute task-level accuracy (exact match).
+    
+    Args:
+        pred: Predicted grid
+        target: Target grid
+        
+    Returns:
+        1.0 if exact match, 0.0 otherwise
+    """
+    if pred.shape != target.shape:
+        return 0.0
+    return 1.0 if np.array_equal(pred, target) else 0.0
+
+
+def size_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
+    """
+    Check if prediction has correct output size.
+    
+    Args:
+        pred: Predicted grid
+        target: Target grid
+        
+    Returns:
+        1.0 if sizes match, 0.0 otherwise
+    """
+    return 1.0 if pred.shape == target.shape else 0.0
+
+
+def color_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
+    """
+    Compute how well the prediction uses the same colors as target.
+    
+    Returns:
+        Jaccard similarity of color sets
+    """
+    pred_colors = set(pred.flatten())
+    target_colors = set(target.flatten())
+    
+    if len(pred_colors) == 0 and len(target_colors) == 0:
+        return 1.0
+    
+    intersection = pred_colors & target_colors
+    union = pred_colors | target_colors
+    
+    if len(union) == 0:
+        return 1.0
+        
+    return len(intersection) / len(union)
+
+
+def non_background_accuracy(
+    pred: np.ndarray,
+    target: np.ndarray,
+    background_color: int = 0
+) -> float:
+    """
+    Compute accuracy only for non-background pixels.
+    
+    This is critical for ARC since background dominates many grids.
+    
+    Args:
+        pred: Predicted grid
+        target: Target grid
+        background_color: Color to exclude (default: 0)
+        
+    Returns:
+        Accuracy for non-background pixels, or 1.0 if no non-background pixels
+    """
+    if pred.shape != target.shape:
         min_h = min(pred.shape[0], target.shape[0])
         min_w = min(pred.shape[1], target.shape[1])
         pred = pred[:min_h, :min_w]
         target = target[:min_h, :min_w]
     
-    return (pred == target).mean()
+    mask = target != background_color
+    
+    if mask.sum() == 0:
+        # No non-background pixels in target
+        # Check if prediction also has no non-background pixels
+        pred_mask = pred != background_color
+        return 1.0 if pred_mask.sum() == 0 else 0.0
+        
+    return (pred[mask] == target[mask]).mean()
 
 
-def task_accuracy(pred: np.ndarray, target: np.ndarray) -> bool:
+def iou_per_color(
+    pred: np.ndarray,
+    target: np.ndarray,
+    num_colors: int = 10
+) -> Dict[int, float]:
     """
-    Check if prediction exactly matches target.
+    Compute Intersection over Union for each color.
     
     Args:
-        pred: Predicted grid [H, W]
-        target: Ground truth grid [H, W]
-    
-    Returns:
-        True if exact match
-    """
-    if pred.shape != target.shape:
-        return False
-    return np.array_equal(pred, target)
-
-
-def size_accuracy(pred: np.ndarray, target: np.ndarray) -> bool:
-    """Check if predicted size matches target."""
-    return pred.shape == target.shape
-
-
-def color_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
-    """
-    Compute color set accuracy.
-    
-    Checks if the same colors appear in both grids.
-    """
-    pred_colors = set(pred.flatten())
-    target_colors = set(target.flatten())
-    
-    if len(target_colors) == 0:
-        return 1.0 if len(pred_colors) == 0 else 0.0
-    
-    intersection = pred_colors & target_colors
-    union = pred_colors | target_colors
-    
-    return len(intersection) / len(union)
-
-
-def partial_match_score(pred: np.ndarray, target: np.ndarray) -> Dict[str, float]:
-    """
-    Compute multiple partial match metrics.
-    
-    Returns:
-        Dict with:
-        - pixel_accuracy: fraction of correct pixels
-        - size_match: 1 if same size, 0 otherwise
-        - color_accuracy: IoU of color sets
-        - non_background_accuracy: accuracy excluding background (0)
-    """
-    metrics = {}
-    
-    # Size match
-    metrics['size_match'] = 1.0 if pred.shape == target.shape else 0.0
-    
-    # Pixel accuracy (with resizing if needed)
-    metrics['pixel_accuracy'] = pixel_accuracy(pred, target)
-    
-    # Color accuracy
-    metrics['color_accuracy'] = color_accuracy(pred, target)
-    
-    # Non-background accuracy
-    if pred.shape == target.shape:
-        non_bg_mask = target != 0
-        if non_bg_mask.any():
-            metrics['non_background_accuracy'] = (pred[non_bg_mask] == target[non_bg_mask]).mean()
-        else:
-            metrics['non_background_accuracy'] = 1.0 if not (pred != 0).any() else 0.0
-    else:
-        metrics['non_background_accuracy'] = 0.0
-    
-    return metrics
-
-
-def iou_per_color(pred: np.ndarray, target: np.ndarray) -> Dict[int, float]:
-    """
-    Compute IoU for each color.
-    
+        pred: Predicted grid
+        target: Target grid
+        num_colors: Maximum number of colors
+        
     Returns:
         Dict mapping color -> IoU score
     """
     if pred.shape != target.shape:
-        return {}
+        min_h = min(pred.shape[0], target.shape[0])
+        min_w = min(pred.shape[1], target.shape[1])
+        pred = pred[:min_h, :min_w]
+        target = target[:min_h, :min_w]
     
-    all_colors = set(pred.flatten()) | set(target.flatten())
     iou_scores = {}
     
-    for color in all_colors:
+    # Get all colors present in either grid
+    all_colors = set(pred.flatten()) | set(target.flatten())
+    
+    for color in range(num_colors):
+        if color not in all_colors:
+            continue
+            
         pred_mask = (pred == color)
         target_mask = (target == color)
         
         intersection = (pred_mask & target_mask).sum()
         union = (pred_mask | target_mask).sum()
         
-        if union > 0:
-            iou_scores[color] = intersection / union
-        else:
-            iou_scores[color] = 1.0
+        if union == 0:
+            continue  # Color not present in either
+            
+        iou_scores[color] = intersection / union
     
     return iou_scores
 
 
-def mean_iou(pred: np.ndarray, target: np.ndarray, exclude_background: bool = True) -> float:
+def mean_iou(
+    pred: np.ndarray,
+    target: np.ndarray,
+    exclude_background: bool = True,
+    num_colors: int = 10
+) -> float:
     """
-    Compute mean IoU across all colors.
+    Compute mean Intersection over Union across all colors.
     
     Args:
         pred: Predicted grid
         target: Target grid
-        exclude_background: If True, exclude color 0 from mean
-    
+        exclude_background: Whether to exclude color 0
+        num_colors: Maximum number of colors
+        
     Returns:
         Mean IoU score
     """
-    iou_scores = iou_per_color(pred, target)
+    iou_scores = iou_per_color(pred, target, num_colors)
     
     if exclude_background and 0 in iou_scores:
         del iou_scores[0]
@@ -204,6 +248,31 @@ def normalized_edit_distance(pred: np.ndarray, target: np.ndarray) -> float:
     return 1.0 - (dist / max_len)
 
 
+def partial_match_score(pred: np.ndarray, target: np.ndarray) -> Dict[str, float]:
+    """
+    Compute a comprehensive partial match score.
+    
+    Returns multiple metrics to understand partial correctness:
+    - pixel_accuracy: Overall pixel accuracy
+    - non_background_accuracy: Accuracy on non-background pixels
+    - size_match: Whether sizes match
+    - color_jaccard: Jaccard similarity of color sets
+    - mean_iou: Mean IoU across colors
+    - normalized_edit: Normalized edit distance
+    
+    Returns:
+        Dict with all partial match metrics
+    """
+    return {
+        'pixel_accuracy': pixel_accuracy(pred, target),
+        'non_background_accuracy': non_background_accuracy(pred, target),
+        'size_match': size_accuracy(pred, target),
+        'color_jaccard': color_accuracy(pred, target),
+        'mean_iou': mean_iou(pred, target),
+        'normalized_edit': normalized_edit_distance(pred, target),
+    }
+
+
 class ARCMetrics:
     """
     Accumulator for ARC evaluation metrics.
@@ -212,6 +281,7 @@ class ARCMetrics:
     - Overall accuracy
     - Per-task metrics
     - Difficulty stratification
+    - All partial match scores
     """
     
     def __init__(self):
@@ -226,6 +296,12 @@ class ARCMetrics:
         
         self.size_matches = 0
         self.partial_scores = []
+        
+        # Aggregate metrics
+        self.sum_pixel_accuracy = 0.0
+        self.sum_non_background_accuracy = 0.0
+        self.sum_color_jaccard = 0.0
+        self.sum_mean_iou = 0.0
         
         self.per_task_results = {}
         self.by_difficulty = defaultdict(lambda: {'total': 0, 'correct': 0})
@@ -248,132 +324,98 @@ class ARCMetrics:
         """
         self.total_tasks += 1
         
-        # Task accuracy
-        is_correct = task_accuracy(pred, target)
+        # Compute all metrics
+        is_correct = np.array_equal(pred, target) if pred.shape == target.shape else False
+        
         if is_correct:
             self.correct_tasks += 1
         
-        # Size match
-        if size_accuracy(pred, target):
-            self.size_matches += 1
-            
-            # Pixel accuracy (only if size matches)
+        # Pixel accuracy
+        pix_acc = pixel_accuracy(pred, target)
+        self.sum_pixel_accuracy += pix_acc
+        
+        # Pixel counts
+        if pred.shape == target.shape:
+            correct_pix = (pred == target).sum()
+            self.correct_pixels += correct_pix
             self.total_pixels += target.size
-            self.correct_pixels += (pred == target).sum()
+        else:
+            self.total_pixels += target.size
+        
+        # Size match
+        if pred.shape == target.shape:
+            self.size_matches += 1
         
         # Partial match metrics
         partial = partial_match_score(pred, target)
         self.partial_scores.append(partial)
         
-        # Per-task results
+        self.sum_non_background_accuracy += partial['non_background_accuracy']
+        self.sum_color_jaccard += partial['color_jaccard']
+        self.sum_mean_iou += partial['mean_iou']
+        
+        # Store per-task results
         self.per_task_results[task_id] = {
-            'correct': is_correct,
-            'pixel_accuracy': partial['pixel_accuracy'],
-            'size_match': partial['size_match'],
+            'is_correct': is_correct,
+            'pixel_accuracy': pix_acc,
+            'size_match': pred.shape == target.shape,
             'pred_shape': pred.shape,
             'target_shape': target.shape,
+            **partial,
         }
         
-        # By difficulty
+        # Track by difficulty
         if difficulty:
             self.by_difficulty[difficulty]['total'] += 1
             if is_correct:
                 self.by_difficulty[difficulty]['correct'] += 1
     
-    def compute(self) -> Dict[str, float]:
-        """
-        Compute final metrics.
+    def get_summary(self) -> Dict[str, Any]:
+        """Get summary of all metrics."""
+        n = max(self.total_tasks, 1)
         
-        Returns:
-            Dict with all metrics
-        """
-        metrics = {}
-        
-        # Task accuracy
-        metrics['task_accuracy'] = (
-            self.correct_tasks / self.total_tasks if self.total_tasks > 0 else 0.0
-        )
-        
-        # Pixel accuracy
-        metrics['pixel_accuracy'] = (
-            self.correct_pixels / self.total_pixels if self.total_pixels > 0 else 0.0
-        )
-        
-        # Size accuracy
-        metrics['size_accuracy'] = (
-            self.size_matches / self.total_tasks if self.total_tasks > 0 else 0.0
-        )
-        
-        # Average partial scores
-        if self.partial_scores:
-            for key in self.partial_scores[0].keys():
-                values = [p[key] for p in self.partial_scores]
-                metrics[f'avg_{key}'] = sum(values) / len(values)
-        
-        # By difficulty
-        for diff, stats in self.by_difficulty.items():
-            if stats['total'] > 0:
-                metrics[f'accuracy_{diff}'] = stats['correct'] / stats['total']
-        
-        metrics['total_tasks'] = self.total_tasks
-        metrics['correct_tasks'] = self.correct_tasks
-        
-        return metrics
+        return {
+            'total_tasks': self.total_tasks,
+            'correct_tasks': self.correct_tasks,
+            'task_accuracy': self.correct_tasks / n,
+            'pixel_accuracy': self.sum_pixel_accuracy / n,
+            'size_accuracy': self.size_matches / n,
+            'non_background_accuracy': self.sum_non_background_accuracy / n,
+            'color_accuracy': self.sum_color_jaccard / n,
+            'mean_iou': self.sum_mean_iou / n,
+            'total_pixels': self.total_pixels,
+            'correct_pixels': self.correct_pixels,
+            'overall_pixel_accuracy': self.correct_pixels / max(self.total_pixels, 1),
+        }
     
-    def summary(self) -> str:
-        """Generate summary string."""
-        metrics = self.compute()
+    def get_detailed_results(self) -> Dict[str, Any]:
+        """Get all detailed per-task results."""
+        summary = self.get_summary()
+        summary['per_task'] = self.per_task_results
+        summary['by_difficulty'] = dict(self.by_difficulty)
+        return summary
+    
+    def print_summary(self):
+        """Print formatted summary."""
+        summary = self.get_summary()
         
-        lines = [
-            "=" * 50,
-            "ARC Evaluation Results",
-            "=" * 50,
-            f"Task Accuracy: {metrics['task_accuracy']:.2%} ({self.correct_tasks}/{self.total_tasks})",
-            f"Pixel Accuracy: {metrics['pixel_accuracy']:.2%}",
-            f"Size Accuracy: {metrics['size_accuracy']:.2%}",
-        ]
+        print("=" * 60)
+        print("EVALUATION RESULTS")
+        print("=" * 60)
+        print(f"Total Tasks: {summary['total_tasks']}")
+        print(f"Correct Tasks: {summary['correct_tasks']}")
+        print("-" * 40)
+        print(f"Task Accuracy:           {summary['task_accuracy']:.4f} ({summary['task_accuracy']*100:.2f}%)")
+        print(f"Pixel Accuracy:          {summary['pixel_accuracy']:.4f} ({summary['pixel_accuracy']*100:.2f}%)")
+        print(f"Size Accuracy:           {summary['size_accuracy']:.4f} ({summary['size_accuracy']*100:.2f}%)")
+        print(f"Non-Background Accuracy: {summary['non_background_accuracy']:.4f} ({summary['non_background_accuracy']*100:.2f}%)")
+        print(f"Color Accuracy:          {summary['color_accuracy']:.4f} ({summary['color_accuracy']*100:.2f}%)")
+        print(f"Mean IoU:                {summary['mean_iou']:.4f} ({summary['mean_iou']*100:.2f}%)")
+        print("=" * 60)
         
-        if 'avg_non_background_accuracy' in metrics:
-            lines.append(f"Non-BG Accuracy: {metrics['avg_non_background_accuracy']:.2%}")
-        
-        # Difficulty breakdown
+        # Print by difficulty if available
         if self.by_difficulty:
-            lines.append("\nBy Difficulty:")
-            for diff in sorted(self.by_difficulty.keys()):
-                stats = self.by_difficulty[diff]
-                acc = stats['correct'] / stats['total'] if stats['total'] > 0 else 0
-                lines.append(f"  {diff}: {acc:.2%} ({stats['correct']}/{stats['total']})")
-        
-        lines.append("=" * 50)
-        
-        return "\n".join(lines)
-
-
-def compute_arc_metrics(
-    predictions: Dict[str, np.ndarray],
-    targets: Dict[str, np.ndarray],
-    difficulty_map: Optional[Dict[str, str]] = None,
-) -> Dict[str, float]:
-    """
-    Compute metrics for a batch of predictions.
-    
-    Args:
-        predictions: Dict mapping task_id -> predicted grid
-        targets: Dict mapping task_id -> target grid
-        difficulty_map: Optional dict mapping task_id -> difficulty
-    
-    Returns:
-        Dict of metrics
-    """
-    metrics = ARCMetrics()
-    
-    for task_id, pred in predictions.items():
-        if task_id not in targets:
-            continue
-        
-        target = targets[task_id]
-        difficulty = difficulty_map.get(task_id) if difficulty_map else None
-        
-        metrics.update(task_id, pred, target, difficulty)
-    
-    return metrics.compute()
+            print("\nBy Difficulty:")
+            for diff, stats in sorted(self.by_difficulty.items()):
+                acc = stats['correct'] / max(stats['total'], 1)
+                print(f"  {diff}: {stats['correct']}/{stats['total']} ({acc*100:.1f}%)")

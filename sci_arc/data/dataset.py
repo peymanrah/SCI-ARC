@@ -36,6 +36,173 @@ from .transform_families import (
 
 
 # ============================================================================
+# ARCDataset: Simple JSON-based loader for RLAN training
+# ============================================================================
+
+class ARCDataset(Dataset):
+    """
+    Simple ARC Dataset that loads from JSON files or directories.
+    
+    This is a lightweight dataset class for RLAN training that supports:
+    - Single combined JSON file (e.g., arc-agi_training_combined.json)
+    - Directory with individual JSON task files (e.g., ./data/arc-agi/data/training/)
+    
+    Unlike SCIARCDataset which is designed for complex curriculum and SCL training,
+    this class provides a simple interface for RLAN's supervised learning.
+    """
+    
+    def __init__(
+        self,
+        data_path: str,
+        max_size: int = 30,
+        augment: bool = True,
+    ):
+        """
+        Initialize ARCDataset.
+        
+        Args:
+            data_path: Path to JSON file or directory containing task JSONs
+            max_size: Maximum grid size (grids are padded to this size)
+            augment: Whether to apply data augmentation (rotation, flip)
+        """
+        self.data_path = Path(data_path)
+        self.max_size = max_size
+        self.augment = augment
+        
+        # Load tasks
+        self.tasks = self._load_tasks()
+        print(f"Loaded {len(self.tasks)} tasks from {data_path}")
+    
+    def _load_tasks(self) -> List[Dict]:
+        """Load tasks from JSON file or directory."""
+        tasks = []
+        
+        if self.data_path.is_file() and self.data_path.suffix == '.json':
+            # Single JSON file (combined format)
+            with open(self.data_path, 'r') as f:
+                data = json.load(f)
+            
+            # Handle different JSON formats
+            if isinstance(data, dict):
+                # Format: {task_id: {train: [...], test: [...]}}
+                for task_id, task_data in data.items():
+                    tasks.append({
+                        'task_id': task_id,
+                        'train': task_data.get('train', []),
+                        'test': task_data.get('test', [])
+                    })
+            elif isinstance(data, list):
+                # Format: [{task_id: ..., train: [...], test: [...]}]
+                for task_data in data:
+                    tasks.append(task_data)
+        else:
+            # Directory with individual JSON files
+            json_files = list(self.data_path.glob('*.json'))
+            for json_file in json_files:
+                try:
+                    with open(json_file, 'r') as f:
+                        task_data = json.load(f)
+                    tasks.append({
+                        'task_id': json_file.stem,
+                        'train': task_data.get('train', []),
+                        'test': task_data.get('test', [])
+                    })
+                except Exception as e:
+                    print(f"Warning: Failed to load {json_file}: {e}")
+        
+        return tasks
+    
+    def __len__(self) -> int:
+        return len(self.tasks)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Get a single sample."""
+        task = self.tasks[idx]
+        
+        # Parse train pairs
+        train_inputs = []
+        train_outputs = []
+        for pair in task['train']:
+            inp = np.array(pair['input'], dtype=np.int64)
+            out = np.array(pair['output'], dtype=np.int64)
+            train_inputs.append(inp)
+            train_outputs.append(out)
+        
+        # Parse test pairs (use first test case)
+        test_pair = task['test'][0] if task['test'] else task['train'][0]
+        test_input = np.array(test_pair['input'], dtype=np.int64)
+        test_output = np.array(test_pair.get('output', test_pair['input']), dtype=np.int64)
+        
+        # Apply augmentation
+        if self.augment:
+            train_inputs, train_outputs, test_input, test_output = self._augment(
+                train_inputs, train_outputs, test_input, test_output
+            )
+        
+        # Pad grids
+        train_inputs_padded = [self._pad_grid(g) for g in train_inputs]
+        train_outputs_padded = [self._pad_grid(g) for g in train_outputs]
+        test_input_padded = self._pad_grid(test_input)
+        test_output_padded = self._pad_grid(test_output)
+        
+        return {
+            'task_id': task.get('task_id', str(idx)),
+            'input_grids': [torch.from_numpy(g) for g in train_inputs_padded],
+            'output_grids': [torch.from_numpy(g) for g in train_outputs_padded],
+            'test_input': torch.from_numpy(test_input_padded),
+            'test_output': torch.from_numpy(test_output_padded),
+            'num_train_pairs': len(train_inputs),
+            'transform_family': 0,  # Not used in RLAN
+        }
+    
+    def _pad_grid(self, grid: np.ndarray) -> np.ndarray:
+        """Pad grid to max_size x max_size."""
+        h, w = grid.shape
+        if h >= self.max_size and w >= self.max_size:
+            return grid[:self.max_size, :self.max_size]
+        
+        padded = np.zeros((self.max_size, self.max_size), dtype=grid.dtype)
+        padded[:min(h, self.max_size), :min(w, self.max_size)] = grid[:min(h, self.max_size), :min(w, self.max_size)]
+        return padded
+    
+    def _augment(
+        self,
+        train_inputs: List[np.ndarray],
+        train_outputs: List[np.ndarray],
+        test_input: np.ndarray,
+        test_output: np.ndarray
+    ) -> Tuple:
+        """Apply random augmentation (rotation, flip)."""
+        # Random dihedral transform (0-7)
+        dihedral_id = random.randint(0, 7)
+        
+        def transform(g):
+            if dihedral_id == 0:
+                return g.copy()
+            elif dihedral_id == 1:
+                return np.rot90(g, k=1).copy()
+            elif dihedral_id == 2:
+                return np.rot90(g, k=2).copy()
+            elif dihedral_id == 3:
+                return np.rot90(g, k=3).copy()
+            elif dihedral_id == 4:
+                return np.fliplr(g).copy()
+            elif dihedral_id == 5:
+                return np.flipud(g).copy()
+            elif dihedral_id == 6:
+                return g.T.copy()
+            else:  # 7
+                return np.fliplr(np.rot90(g, k=1)).copy()
+        
+        aug_inputs = [transform(g) for g in train_inputs]
+        aug_outputs = [transform(g) for g in train_outputs]
+        aug_test_in = transform(test_input)
+        aug_test_out = transform(test_output)
+        
+        return aug_inputs, aug_outputs, aug_test_in, aug_test_out
+
+
+# ============================================================================
 # DIHEDRAL TRANSFORMS (Matching TRM exactly from dataset/common.py)
 # ============================================================================
 

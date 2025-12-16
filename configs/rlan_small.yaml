@@ -1,0 +1,123 @@
+# RLAN Small Configuration - Parameter Efficient (2M params)
+# Demonstrates RLAN's efficiency: 2M params vs TRM's 7M
+#
+# PRODUCTION ENVIRONMENT: RTX 3090 (24GB VRAM), 48 vCPU, 128GB RAM
+# Data Path: ./data/arc-agi/data/training/ and ./data/arc-agi/data/evaluation/
+
+model:
+  type: "rlan"
+  hidden_dim: 128
+  num_colors: 10
+  num_classes: 11  # 10 colors + background
+  max_grid_size: 30
+  max_clues: 5
+  num_predicates: 8
+  num_solver_steps: 6
+  dropout: 0.1
+  
+  # DSC parameters
+  dsc_num_heads: 4
+  
+  # MSRE parameters
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  
+  # LCR parameters
+  lcr_num_freq: 8
+  lcr_num_heads: 4
+
+training:
+  max_epochs: 250
+  # Batch size optimized for RTX 3090 24GB VRAM with AMP
+  # For hidden_dim=128 (small model): batch_size=128 fits easily (~12GB)
+  batch_size: 128
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  gradient_clip: 1.0
+  
+  # Temperature schedule for Gumbel-softmax
+  temperature_start: 5.0
+  temperature_end: 0.1
+  
+  # Loss weights
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  lambda_entropy: 0.1
+  lambda_sparsity: 0.05
+  lambda_predicate: 0.01
+  lambda_curriculum: 0.1
+  lambda_deep_supervision: 0.5
+  
+  # Curriculum phases
+  pretrain_epochs: 50
+  finetune_start_epoch: 201
+  
+  # Optimizer and scheduler
+  optimizer: "adamw"
+  scheduler: "cosine"  # cosine, onecycle, constant
+  warmup_epochs: 10
+  min_lr: 1.0e-6
+  grad_accumulation_steps: 1  # Increase to 2-4 for effective larger batch
+
+data:
+  # PRODUCTION data paths - ARC-AGI directory structure
+  # Alternative: Use combined JSON files (see comments below)
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  # For combined JSON files, use:
+  # train_path: "data/arc-agi_training_combined.json"
+  # eval_path: "data/arc-agi_evaluation_combined.json"
+  
+  max_grid_size: 30
+  
+  # Data loading optimization
+  # Windows: num_workers=0 is fastest (multiprocessing overhead)
+  # Linux: Use 4-8 workers
+  num_workers: 0
+  pin_memory: true
+  
+  # Caching strategy (CRITICAL for competitive training)
+  # cache_samples=true: Pre-cache all samples in memory (GPU becomes bottleneck)
+  #   - Use for testing/debugging to eliminate data loading variance
+  #   - Limited diversity (only cache_augmentations versions per task)
+  # cache_samples=false: Infinite augmented samples (maximum diversity)
+  #   - Use for competitive training to maximize generalization
+  #   - Each epoch sees different augmentations
+  cache_samples: false  # Set to true for testing, false for competitive
+  cache_augmentations: 8  # Number of pre-generated augmentations when caching
+  
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    color_permutation: false  # NOT used in RLAN - spatial reasoning only
+
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+
+logging:
+  log_every: 10  # Log every N steps
+  save_every: 10  # Save checkpoint every N epochs
+  eval_every: 1  # Evaluate every N epochs
+  keep_last_n: 5  # Keep last N checkpoints
+  checkpoint_dir: "checkpoints/rlan_small"
+  log_to_file: true  # Save all output to log file
+  
+  # Weights & Biases (optional)
+  use_wandb: false
+  wandb_project: "rlan-arc"
+  wandb_run_name: null  # Auto-generated if null
+
+# Hardware settings (RTX 3090 24GB VRAM)
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false  # Set true for reproducibility (slower)
+
+device:
+  use_cuda: true
+  mixed_precision: true  # REQUIRED for efficient RTX 3090 training
+  compile: false  # torch.compile (PyTorch 2.0+)

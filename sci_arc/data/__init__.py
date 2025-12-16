@@ -2,13 +2,15 @@
 SCI-ARC Data Pipeline.
 
 Provides:
-- SCIARCDataset: PyTorch Dataset for ARC tasks
+- ARCDataset: Simple Dataset for RLAN training (JSON file/directory)
+- SCIARCDataset: Full-featured Dataset for SCI-ARC with curriculum and SCL
 - Collation functions for batching
 - Transformation family labels for SCL
 - Dihedral transforms (matching TRM exactly)
 """
 
 from .dataset import (
+    ARCDataset,
     SCIARCDataset,
     ARCTask,
     SCIARCSample,
@@ -34,6 +36,7 @@ from .transform_families import (
 
 __all__ = [
     # Dataset
+    'ARCDataset',
     'SCIARCDataset',
     'ARCTask',
     'SCIARCSample',

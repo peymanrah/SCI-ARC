@@ -37,18 +37,24 @@ except ImportError:
 
 class TeeLogger:
     """
-    Logger that writes to both stdout and a file.
+    Logger that writes to both stdout and a file (encoding-safe for Windows).
     Captures all print() output for debugging and reproducibility.
     """
     def __init__(self, log_path: Path):
         self.terminal = sys.stdout
         self.log_path = log_path
-        self.log_file = open(log_path, 'w', encoding='utf-8', buffering=1)  # Line buffered
+        # Use UTF-8 with error handling for Windows compatibility
+        self.log_file = open(log_path, 'w', encoding='utf-8', errors='replace', buffering=1)
         
     def write(self, message):
-        self.terminal.write(message)
+        # Handle potential encoding issues on Windows terminal
+        try:
+            self.terminal.write(message)
+        except UnicodeEncodeError:
+            # Fallback to ASCII-safe version for Windows cmd
+            self.terminal.write(message.encode('ascii', errors='replace').decode('ascii'))
         self.log_file.write(message)
-        self.log_file.flush()  # Ensure immediate write
+        self.log_file.flush()
         
     def flush(self):
         self.terminal.flush()
