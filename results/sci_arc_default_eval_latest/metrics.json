@@ -1,0 +1,11 @@
+{
+  "task_accuracy": 0.0025,
+  "pixel_accuracy": 0.8729611111111111,
+  "size_accuracy": 1.0,
+  "avg_size_match": 1.0,
+  "avg_pixel_accuracy": 0.8729611111111116,
+  "avg_color_accuracy": 0.2833561507936508,
+  "avg_non_background_accuracy": 0.0028833333333333332,
+  "total_tasks": 400,
+  "correct_tasks": 1
+}

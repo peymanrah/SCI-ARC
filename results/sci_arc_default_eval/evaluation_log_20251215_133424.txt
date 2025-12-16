@@ -1,0 +1,35 @@
+============================================================
+SCI-ARC Evaluation
+============================================================
+Timestamp: 2025-12-15T13:34:24.240392
+Log file: results\sci_arc_default_eval\evaluation_log_20251215_133424.txt
+Checkpoint: checkpoints/sci_arc_default/best_model.pt
+Data: ./data/arc-agi/data/evaluation/evaluation
+Output directory: ./results/sci_arc_default_eval
+Detailed output: True
+============================================================
+
+Using device: cuda
+CUDA device: NVIDIA GeForce RTX 3090
+Loaded model from checkpoints/sci_arc_default/best_model.pt
+  Epoch: 61
+  Best val accuracy: 0.0025
+
+Loading data from: ./data/arc-agi/data/evaluation/evaluation
+Loaded 400 tasks from evaluation
+Evaluating on 400 tasks
+
+Running evaluation...
+
+==================================================
+ARC Evaluation Results
+==================================================
+Task Accuracy: 0.25% (1/400)
+Pixel Accuracy: 87.30%
+Size Accuracy: 100.00%
+Non-BG Accuracy: 0.28%
+==================================================
+
+Saved metrics to results\sci_arc_default_eval\metrics.json
+
+Saving detailed predictions...

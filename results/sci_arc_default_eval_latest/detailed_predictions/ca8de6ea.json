@@ -1,0 +1,131 @@
+{
+  "task_id": "ca8de6ea",
+  "attempt": 0,
+  "is_correct": false,
+  "input_grid": [
+    [
+      7,
+      0,
+      0,
+      0,
+      5
+    ],
+    [
+      0,
+      6,
+      0,
+      4,
+      0
+    ],
+    [
+      0,
+      0,
+      2,
+      0,
+      0
+    ],
+    [
+      0,
+      4,
+      0,
+      6,
+      0
+    ],
+    [
+      5,
+      0,
+      0,
+      0,
+      7
+    ]
+  ],
+  "target_grid": [
+    [
+      7,
+      6,
+      5
+    ],
+    [
+      4,
+      2,
+      4
+    ],
+    [
+      5,
+      6,
+      7
+    ]
+  ],
+  "prediction_grid": [
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ]
+  ],
+  "input_shape": [
+    5,
+    5
+  ],
+  "target_shape": [
+    3,
+    3
+  ],
+  "prediction_shape": [
+    3,
+    3
+  ],
+  "size_match": true,
+  "pixels_correct": 0,
+  "pixels_total": 9,
+  "pixel_accuracy": 0.0,
+  "diff_positions": [
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      1
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      1,
+      0
+    ],
+    [
+      1,
+      1
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      2,
+      0
+    ],
+    [
+      2,
+      1
+    ],
+    [
+      2,
+      2
+    ]
+  ],
+  "num_diff_positions": 9
+}

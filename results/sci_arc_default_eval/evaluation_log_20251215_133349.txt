@@ -1,0 +1,13 @@
+============================================================
+SCI-ARC Evaluation
+============================================================
+Timestamp: 2025-12-15T13:33:49.226157
+Log file: results\sci_arc_default_eval\evaluation_log_20251215_133349.txt
+Checkpoint: checkpoints/sci_arc_default/best_model.pt
+Data: ./data/arc-agi/data/evaluation/evaluation
+Output directory: ./results/sci_arc_default_eval
+Detailed output: True
+============================================================
+
+Using device: cuda
+CUDA device: NVIDIA GeForce RTX 3090
