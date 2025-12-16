@@ -1,15 +1,19 @@
-# RLAN Large Configuration
-# =========================
-# Full capacity RLAN with hidden_dim=512 (~51M params)
+# RLAN Large Configuration (~51M params)
+# =======================================
+# Full capacity RLAN for capacity scaling experiments
 # 
-# This is NOT a fair comparison with TRM (~7M params)
+# WARNING: NOT a fair comparison with TRM (~7M params)
 # Use rlan_fair.yaml for parameter-matched comparison
 #
-# Purpose: Explore RLAN's capacity scaling
-# - Does more capacity improve accuracy?
-# - How does 51M RLAN compare to 7M TRM?
+# Purpose: Explore if more capacity helps ARC
+# - Does 51M RLAN outperform 7M RLAN?
+# - Is there a capacity ceiling for ARC?
 #
-# WARNING: Requires more VRAM - adjusted batch size accordingly
+# Module Scaling Rules:
+#   num_heads = hidden_dim / 64 = 512 / 64 = 8
+#   max_clues, num_predicates = task-specific (fixed)
+#   msre/lcr params = positional encoding (fixed)
+#
 # Optimized for RTX 3090 (24GB VRAM), single GPU training
 
 model:
@@ -18,21 +22,22 @@ model:
   num_colors: 10
   num_classes: 11   # 10 colors + background
   max_grid_size: 30
-  max_clues: 5
-  num_predicates: 8
-  num_solver_steps: 6  # Comparable to TRM's L_cycles=6
+  
+  # Task-specific (NOT capacity-dependent) - same as other configs
+  max_clues: 5       # ARC has ~3-5 spatial anchors per puzzle
+  num_predicates: 8  # Covers most spatial relationships
+  num_solver_steps: 6
+  
   use_act: true  # Enable Adaptive Computation Time
   dropout: 0.1
   
-  # Attention heads - more heads for larger hidden_dim
+  # Attention heads: hidden_dim / 64 = 512 / 64 = 8
   dsc_num_heads: 8
   lcr_num_heads: 8
   
-  # MSRE parameters
+  # Positional encoding (fixed, task-independent)
   msre_encoding_dim: 64
   msre_num_freq: 8
-  
-  # LCR parameters
   lcr_num_freq: 8
 
 training:

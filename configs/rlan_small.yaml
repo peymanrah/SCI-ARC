@@ -1,8 +1,12 @@
-# RLAN Small Configuration - Parameter Efficient (2M params)
-# Demonstrates RLAN's efficiency: 2M params vs TRM's 7M
+# RLAN Small Configuration - Fast Iteration (~2M params)
+# For debugging, hyperparameter search, quick experiments
 #
-# PRODUCTION ENVIRONMENT: RTX 3090 (24GB VRAM), 48 vCPU, 128GB RAM
-# Data Path: ./data/arc-agi/data/training/ and ./data/arc-agi/data/evaluation/
+# Module Scaling Rules:
+#   num_heads = hidden_dim / 64 (standard transformer scaling)
+#   max_clues, num_predicates = task-specific (fixed)
+#   msre/lcr params = positional encoding (fixed)
+#
+# PRODUCTION: RTX 3090 (24GB VRAM), 48 vCPU, 128GB RAM
 
 model:
   type: "rlan"
@@ -10,22 +14,23 @@ model:
   num_colors: 10
   num_classes: 11  # 10 colors + background
   max_grid_size: 30
-  max_clues: 5
-  num_predicates: 8
+  
+  # Task-specific (NOT capacity-dependent)
+  max_clues: 5       # ARC has ~3-5 spatial anchors per puzzle
+  num_predicates: 8  # Covers most spatial relationships
   num_solver_steps: 6
-  use_act: false
+  
+  use_act: false  # ACT less useful for small model
   dropout: 0.1
   
-  # DSC parameters
-  dsc_num_heads: 4
+  # Attention heads: hidden_dim / 64 = 128 / 64 = 2
+  dsc_num_heads: 2
+  lcr_num_heads: 2
   
-  # MSRE parameters
-  msre_encoding_dim: 32
-  msre_num_freq: 8
-  
-  # LCR parameters
-  lcr_num_freq: 8
-  lcr_num_heads: 4
+  # Positional encoding (fixed, task-independent)
+  msre_encoding_dim: 32  # Sufficient for relative positions
+  msre_num_freq: 8       # 2^0 to 2^7 covers 30x30 grids
+  lcr_num_freq: 8        # Covers counts 0-30
 
 training:
   max_epochs: 500  # More epochs for small model to converge

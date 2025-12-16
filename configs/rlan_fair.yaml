@@ -1,50 +1,49 @@
-# RLAN Fair Comparison Configuration
-# ==================================
+# RLAN Fair Comparison Configuration (~7.8M params)
+# ==================================================
 # Matches TRM's ~7M parameter count for fair comparison
 # 
-# TRM Config: hidden_size=512, but TRM is a simpler transformer
-# RLAN has more modules (DSC, MSRE, LCR, SPH, ContextEncoder)
-# so hidden_dim=256 yields ~7.8M params ≈ TRM's ~7M
+# TRM: hidden_size=512, but simpler transformer (only 2 shared layers)
+# RLAN: hidden_dim=256, but more modules (DSC, MSRE, LCR, SPH, ContextEncoder)
+# Result: Both ~7-8M params = FAIR comparison
 #
-# TRM Reference:
-#   - Parameters: ~7M
-#   - global_batch_size: 768 (8+ A100 GPUs)
-#   - epochs: 100,000
+# Module Scaling Rules:
+#   num_heads = hidden_dim / 64 (standard transformer scaling)
+#   max_clues, num_predicates = task-specific (fixed across all configs)
+#   msre/lcr params = positional encoding (fixed)
 #
 # RLAN Advantages over TRM (same parameter count):
 #   1. Preserves 2D spatial structure (TRM flattens to 1D)
-#   2. ContextEncoder learns task rules (TRM memorizes via puzzle_emb)
-#   3. DSC discovers spatial anchors (TRM has no spatial inductive bias)
-#   4. MSRE computes relative coordinates (TRM treats positions as tokens)
+#   2. ContextEncoder learns task rules (TRM uses puzzle_emb)
+#   3. DSC discovers spatial anchors (TRM has none)
+#   4. MSRE computes relative coordinates (TRM uses RoPE only)
 #   5. LCR provides soft counting (TRM cannot count)
-#   6. SPH extracts symbolic predicates (TRM has no symbolic layer)
-#   7. Runs on single RTX 3090 (TRM needs GPU cluster)
-#   8. 1K epochs with infinite augmentation (TRM needs 100K epochs)
+#   6. SPH extracts symbolic predicates (TRM has none)
 #
 # Optimized for RTX 3090 (24GB VRAM), single GPU training
 
 model:
   type: "rlan"
-  hidden_dim: 256   # ~7.8M params to match TRM's ~7M (NOT 512!)
+  hidden_dim: 256   # ~7.8M params to match TRM's ~7M
   num_colors: 10
   num_classes: 11   # 10 colors + background
   max_grid_size: 30
-  max_clues: 5      # Spatial anchors (TRM has none)
-  num_predicates: 8 # Symbolic predicates (TRM has none)
+  
+  # Task-specific (NOT capacity-dependent) - same across all configs
+  max_clues: 5       # ARC has ~3-5 spatial anchors per puzzle
+  num_predicates: 8  # Covers most spatial relationships
   num_solver_steps: 6  # Comparable to TRM's L_cycles=6
+  
   use_act: true  # Enable Adaptive Computation Time
   dropout: 0.1
   
-  # Attention heads
-  dsc_num_heads: 8
-  lcr_num_heads: 8
+  # Attention heads: hidden_dim / 64 = 256 / 64 = 4
+  dsc_num_heads: 4
+  lcr_num_heads: 4
   
-  # MSRE parameters
-  msre_encoding_dim: 64
-  msre_num_freq: 8
-  
-  # LCR parameters
-  lcr_num_freq: 8
+  # Positional encoding (fixed, task-independent)
+  msre_encoding_dim: 64  # Slightly larger for fair comparison
+  msre_num_freq: 8       # 2^0 to 2^7 covers 30x30 grids
+  lcr_num_freq: 8        # Covers counts 0-30
 
 training:
   # TRM trains for 100K epochs on 8+ GPUs

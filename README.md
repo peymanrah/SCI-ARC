@@ -49,11 +49,11 @@ mkdir -p data/arc-agi/data
 # Run tests
 pytest tests/ -v
 
-# Train RLAN
-python scripts/train_rlan.py --config configs/rlan_base.yaml
+# Train RLAN (fair TRM comparison)
+python scripts/train_rlan.py --config configs/rlan_fair.yaml
 
 # Evaluate
-python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_fair/best.pt
 ```
 
 ## 🤖 AI Agent Training/Evaluation Instructions
@@ -64,35 +64,39 @@ python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt
 # Train RLAN-Small (2M params) - Fast iteration
 python scripts/train_rlan.py --config configs/rlan_small.yaml
 
-# Train RLAN-Base (7.8M params) - TRM-equivalent for comparison
-python scripts/train_rlan.py --config configs/rlan_base.yaml
+# Train RLAN-Fair (7.8M params) - TRM-equivalent for fair comparison
+python scripts/train_rlan.py --config configs/rlan_fair.yaml
+
+# Train RLAN-Large (51M params) - Capacity exploration
+python scripts/train_rlan.py --config configs/rlan_large.yaml
 
 # Resume training from latest checkpoint
-python scripts/train_rlan.py --config configs/rlan_base.yaml --resume auto
+python scripts/train_rlan.py --config configs/rlan_fair.yaml --resume auto
 
 # Resume from specific checkpoint
-python scripts/train_rlan.py --config configs/rlan_base.yaml --resume checkpoints/rlan_base/epoch_50.pt
+python scripts/train_rlan.py --config configs/rlan_fair.yaml --resume checkpoints/rlan_fair/epoch_50.pt
 
 # Start fresh (ignore existing checkpoints)
-python scripts/train_rlan.py --config configs/rlan_base.yaml --no-resume
+python scripts/train_rlan.py --config configs/rlan_fair.yaml --no-resume
 ```
 
 ### Evaluation Commands
 
 ```powershell
 # Evaluate best checkpoint
-python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_fair/best.pt
 
 # Evaluate with specific data path
-python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt --data_dir ./data/arc-agi/data/evaluation
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_fair/best.pt --data_dir ./data/arc-agi/data/evaluation
 ```
 
 ### Configuration Options
 
 | Config | Parameters | VRAM Usage | Use Case |
 |--------|------------|------------|----------|
-| `rlan_small.yaml` | ~2M | ~12GB | Fast iteration, testing |
-| `rlan_base.yaml` | ~7.8M | ~18GB | TRM comparison, competitive |
+| `rlan_small.yaml` | ~2M | ~12GB | Fast iteration, debugging |
+| `rlan_fair.yaml` | ~7.8M | ~20GB | **Fair TRM comparison** |
+| `rlan_large.yaml` | ~51M | ~20GB | Capacity exploration |
 
 ### Key YAML Parameters
 
@@ -190,36 +194,39 @@ pip install -e .
 ## Training
 
 ```bash
-# Train with default RLAN configuration (base model, 7.8M params)
-python scripts/train_rlan.py --config configs/rlan_base.yaml
+# Train with fair TRM comparison config (7.8M params)
+python scripts/train_rlan.py --config configs/rlan_fair.yaml
 
 # Train small model (2M params) for fast iteration
 python scripts/train_rlan.py --config configs/rlan_small.yaml
 
+# Train large model (51M params) for capacity exploration
+python scripts/train_rlan.py --config configs/rlan_large.yaml
+
 # Resume training from latest checkpoint
-python scripts/train_rlan.py --config configs/rlan_base.yaml --resume auto
+python scripts/train_rlan.py --config configs/rlan_fair.yaml --resume auto
 
 # Resume training from specific checkpoint
-python scripts/train_rlan.py --config configs/rlan_base.yaml --resume checkpoints/rlan_base/epoch_100.pt
+python scripts/train_rlan.py --config configs/rlan_fair.yaml --resume checkpoints/rlan_fair/epoch_100.pt
 ```
 
 ## Evaluation
 
 ```bash
 # Evaluate trained model
-python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_fair/best.pt
 
 # Evaluate with test-time augmentation (8 dihedral transforms)
-python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt --use-tta
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_fair/best.pt --use-tta
 
 # Save detailed predictions (JSON per task)
-python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt --detailed-output
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_fair/best.pt --detailed-output
 
 # Generate visualizations (PNG images)
-python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt --visualize
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_fair/best.pt --visualize
 
 # Full evaluation with all features
-python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt \
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_fair/best.pt \
     --detailed-output --visualize --analyze-attention --output ./evaluation_results
 
 # Run comprehensive tests
@@ -279,17 +286,19 @@ data:
   cache_samples: false   # Infinite diversity for competitive training
 ```
 
-### `configs/rlan_base.yaml` (7.8M params - TRM-equivalent)
+### `configs/rlan_fair.yaml` (7.8M params - TRM-equivalent)
 ```yaml
 model:
-  hidden_dim: 256        # Larger hidden dimension
-  max_clues: 5
-  num_predicates: 8
+  hidden_dim: 256        # ~7.8M params = TRM's ~7M
+  max_clues: 5           # Task-specific (fixed)
+  num_predicates: 8      # Task-specific (fixed)
   num_solver_steps: 6
+  dsc_num_heads: 4       # hidden_dim / 64 = 256 / 64 = 4
+  lcr_num_heads: 4
 
 training:
-  batch_size: 64         # Safe for RTX 3090 with AMP
-  learning_rate: 1e-4
+  batch_size: 80         # ~20GB VRAM with 4GB headroom
+  grad_accumulation_steps: 4  # effective_batch = 320
 
 data:
   cache_samples: false   # Infinite diversity for competitive training
@@ -321,10 +330,11 @@ The ARCDataset class supports:
 ### RTX 3090 Optimization
 
 The configs are optimized for RTX 3090 (24GB VRAM):
-- `rlan_small.yaml`: batch_size=128 (~12GB VRAM)
-- `rlan_base.yaml`: batch_size=64 (~18GB VRAM)
+- `rlan_small.yaml`: batch=160, grad_accum=2 (~12GB VRAM)
+- `rlan_fair.yaml`: batch=80, grad_accum=4 (~20GB VRAM)
+- `rlan_large.yaml`: batch=36, grad_accum=8 (~20GB VRAM)
 - Mixed precision (AMP) enabled by default
-- num_workers=0 for Windows (avoids multiprocessing overhead)
+- num_workers=12 for optimal data loading
 
 ## Testing
 
@@ -366,8 +376,9 @@ SCI-ARC/
 │       ├── dataset.py             # ARCDataset + SCIARCDataset
 │       └── transform_families.py  # Transformation labels
 ├── configs/
-│   ├── rlan_small.yaml            # 2M params configuration
-│   └── rlan_base.yaml             # 7.8M params configuration
+│   ├── rlan_small.yaml            # 2M params - fast iteration
+│   ├── rlan_fair.yaml             # 7.8M params - TRM comparison
+│   └── rlan_large.yaml            # 51M params - capacity exploration
 ├── scripts/
 │   ├── train_rlan.py              # Production-ready training script
 │   ├── evaluate_rlan.py           # Comprehensive evaluation script
