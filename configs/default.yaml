@@ -57,12 +57,16 @@ training:
   eval_batch_size: 192
   
   # Loss weights
-  scl_weight: 1.0               # Structural Contrastive Loss (increased from 0.1)
+  # NOTE: SCL at 1.0 dominates training (97% of loss). Reduce to 0.1 to let task loss drive learning.
+  # Task loss ~0.17 with Focal Loss, SCL ~5.5 → total was 97% SCL!
+  scl_weight: 0.1               # Structural Contrastive Loss (auxiliary, not primary)
   ortho_weight: 0.01            # Orthogonality constraint
-  deep_supervision_weight: 0.5  # Intermediate supervision
+  deep_supervision_weight: 0.3  # Intermediate supervision (reduced)
   
   # Anti-background-collapse (CRITICAL for ARC's ~85% background grids)
-  focal_gamma: 2.0              # Focal Loss gamma (down-weights easy/background pixels)
+  # NOTE: gamma=2.0 + class_weights reduced loss from 2.98 to 0.17 (too aggressive!)
+  # Reduce gamma to 1.0 for gentler down-weighting, keep class_weights for content focus
+  focal_gamma: 1.0              # Focal Loss gamma (1.0 = gentler, 2.0 = aggressive)
   use_class_weights: true       # Background weight=0.1, others=1.0 (10x penalty for content errors)
   label_smoothing: 0.1          # Prevents overconfident predictions
   

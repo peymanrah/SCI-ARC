@@ -866,6 +866,7 @@ class SCIARCTrainer:
         
         # SCL health check
         scl_loss = train_losses['scl']
+        log_batch_size = math.log(self.config.batch_size)
         print(f"\n  === SCL HEALTH CHECK ===")
         if scl_loss < 0.1:
             print(f"  [+] SCL loss very low ({scl_loss:.4f}) - Excellent clustering!")
@@ -873,10 +874,19 @@ class SCIARCTrainer:
             print(f"  [+] SCL loss moderate ({scl_loss:.4f}) - Good progress")
         elif scl_loss < 3.0:
             print(f"  [!] SCL loss high ({scl_loss:.4f}) - Still learning")
-        elif abs(scl_loss - math.log(self.config.batch_size)) < 0.5:
-            print(f"  [-] SCL loss ~ log(batch_size)={math.log(self.config.batch_size):.2f}")
-            print(f"    WARNING: Possible representation collapse!")
-            print(f"    Check: Are z_struct embeddings diverse?")
+        elif scl_loss > log_batch_size - 0.5:
+            # Near random chance - expected in early epochs
+            epoch = self.current_epoch + 1
+            if epoch <= 5:
+                print(f"  [~] SCL loss ~ random ({scl_loss:.2f} vs log(B)={log_batch_size:.2f})")
+                print(f"    Expected at epoch {epoch} - contrastive learning takes time")
+            elif epoch <= 20:
+                print(f"  [!] SCL loss still high ({scl_loss:.2f}) at epoch {epoch}")
+                print(f"    Monitor: Should decrease to <4.0 by epoch 20")
+            else:
+                print(f"  [-] SCL loss ~ log(batch_size)={log_batch_size:.2f}")
+                print(f"    WARNING: Possible representation collapse at epoch {epoch}!")
+                print(f"    Check: Are z_struct embeddings diverse?")
         else:
             print(f"  [?] SCL loss: {scl_loss:.4f}")
         
