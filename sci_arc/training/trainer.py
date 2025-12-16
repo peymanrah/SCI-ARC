@@ -74,10 +74,18 @@ class TrainingConfig:
     batch_size: int = 16
     eval_batch_size: int = 16
     
-    # Loss weights
+    # Loss weights (legacy SCL)
     scl_weight: float = 0.1
     ortho_weight: float = 0.01
     deep_supervision_weight: float = 0.5
+    
+    # CISL: Content-Invariant Structure Learning (replaces SCL for few-shot)
+    # Note: Config params use 'cicl_' prefix for backward compatibility
+    use_cicl: bool = False                   # Enable CISL instead of SCL (set True in config)
+    cicl_consist_weight: float = 0.5         # Within-task consistency weight (λ₁)
+    cicl_color_inv_weight: float = 0.5       # Content invariance weight (λ₂)
+    cicl_variance_weight: float = 0.1        # Batch variance weight (λ₃, anti-collapse)
+    cicl_target_std: float = 0.5             # Target std (γ) for variance regularization
     
     # Scheduler
     scheduler_type: str = 'cosine'  # 'cosine', 'onecycle', 'constant'
@@ -119,6 +127,7 @@ class SCIARCTrainer:
     - Deep supervision
     - Mixed precision
     - Logging and checkpointing
+    - CISL: Content-Invariant Structure Learning
     """
     
     def __init__(
@@ -142,6 +151,24 @@ class SCIARCTrainer:
         # Move loss function to device (important for projection head in SCL)
         if hasattr(self.loss_fn, 'to'):
             self.loss_fn = self.loss_fn.to(self.device)
+        
+        # Initialize CISL loss if enabled (Content-Invariant Structure Learning)
+        # Note: CICLLoss is an alias for CISLLoss for backward compatibility
+        self.cisl_loss = None
+        if config.use_cicl:
+            from .cisl_loss import CISLLoss
+            self.cisl_loss = CISLLoss(
+                consist_weight=config.cicl_consist_weight,
+                content_inv_weight=config.cicl_color_inv_weight,  # Renamed from color_inv
+                variance_weight=config.cicl_variance_weight,
+                target_std=config.cicl_target_std,
+                debug=True  # Enable per-batch statistics
+            ).to(self.device)
+            print(f"[CISL] Enabled Content-Invariant Structure Learning:")
+            print(f"  - Consistency weight (λ₁): {config.cicl_consist_weight}")
+            print(f"  - Content invariance weight (λ₂): {config.cicl_color_inv_weight}")
+            print(f"  - Variance weight (λ₃): {config.cicl_variance_weight}")
+            print(f"  - Target std (γ): {config.cicl_target_std}")
         
         # Setup optimizer
         self.optimizer = self._create_optimizer()
@@ -258,6 +285,11 @@ class SCIARCTrainer:
         """Train for one epoch."""
         self.model.train()
         
+        # Reset CISL debug counter and epoch stats at start of each epoch
+        self._cisl_debug_count = 0
+        if self.cisl_loss is not None:
+            self.cisl_loss.reset_epoch_stats()
+        
         # Accumulate losses as Python floats to avoid GPU memory buildup
         # Note: .item() does cause a sync, but it's necessary to prevent
         # GPU tensor accumulation which causes memory fragmentation and
@@ -370,6 +402,32 @@ class SCIARCTrainer:
         print(f"Epoch {self.current_epoch + 1} completed in {epoch_time:.1f}s "
               f"({epoch_time/num_batches:.2f}s/batch) | ETA: {eta_str}")
         
+        # === CISL Epoch Summary ===
+        if self.config.use_cicl and self.cisl_loss is not None:
+            cisl_epoch_stats = self.cisl_loss.get_epoch_stats()
+            print(f"\n[CISL EPOCH SUMMARY] Epoch {self.current_epoch + 1}:")
+            print(f"  L_consist (avg): {cisl_epoch_stats['cisl/consist_avg']:.6f}")
+            print(f"  L_content_inv (avg): {cisl_epoch_stats['cisl/content_inv_avg']:.6f}")
+            print(f"  L_variance (avg): {cisl_epoch_stats['cisl/variance_avg']:.6f}")
+            print(f"  CISL total (avg): {cisl_epoch_stats['cisl/total_avg']:.6f}")
+            print(f"  Embedding mean (avg): {cisl_epoch_stats['cisl/z_mean_avg']:.6f}")
+            print(f"  Embedding std (avg): {cisl_epoch_stats['cisl/z_std_avg']:.6f}")
+            print(f"  Embedding norm (avg): {cisl_epoch_stats['cisl/z_norm_avg']:.4f}")
+            print(f"  Batches processed: {cisl_epoch_stats['cisl/batches_processed']}")
+            
+            # Log to wandb
+            if self.wandb_run:
+                wandb.log({
+                    'epoch/cisl_consist_avg': cisl_epoch_stats['cisl/consist_avg'],
+                    'epoch/cisl_content_inv_avg': cisl_epoch_stats['cisl/content_inv_avg'],
+                    'epoch/cisl_variance_avg': cisl_epoch_stats['cisl/variance_avg'],
+                    'epoch/cisl_total_avg': cisl_epoch_stats['cisl/total_avg'],
+                    'epoch/cisl_z_mean_avg': cisl_epoch_stats['cisl/z_mean_avg'],
+                    'epoch/cisl_z_std_avg': cisl_epoch_stats['cisl/z_std_avg'],
+                    'epoch/cisl_z_norm_avg': cisl_epoch_stats['cisl/z_norm_avg'],
+                    'epoch': self.current_epoch + 1,
+                })
+        
         # === DIAGNOSTIC: Log batch diversity (first epoch only for infinite data debugging) ===
         if self.current_epoch == 0 and batch_transform_families:
             print(f"\n[INFINITE DATA CHECK] First 3 batches transform_families:")
@@ -476,60 +534,118 @@ class SCIARCTrainer:
             losses['deep'] = deep_loss
         
         # SCL loss - use the loss_fn's scl component if available
+        # OR use CISL (Content-Invariant Structure Learning) if enabled
         scl_loss = torch.tensor(0.0, device=self.device)
-        if 'z_struct' in outputs and 'transform_families' in batch:
+        cisl_losses = {'consistency': torch.tensor(0.0, device=self.device),
+                       'content_inv': torch.tensor(0.0, device=self.device),
+                       'variance': torch.tensor(0.0, device=self.device)}
+        
+        if 'z_struct' in outputs:
             z_struct = outputs['z_struct']  # [B, K, D]
-            transform_families = batch['transform_families'].to(self.device)  # [B]
             
-            # Debug: Log transform_family distribution (first few batches only)
-            if not hasattr(self, '_scl_debug_count'):
-                self._scl_debug_count = 0
-            if self._scl_debug_count < 3:
-                unique, counts = torch.unique(transform_families, return_counts=True)
-                print(f"\n[SCL DEBUG] Transform families in batch:")
-                print(f"  Unique values: {unique.tolist()}")
-                print(f"  Counts: {counts.tolist()}")
-                print(f"  z_struct shape: {z_struct.shape}")
-                print(f"  z_struct mean: {z_struct.mean().item():.6f}, std: {z_struct.std().item():.6f}")
+            if self.config.use_cicl and self.cisl_loss is not None:
+                # === CISL: Content-Invariant Structure Learning ===
+                # This replaces SCL with a more stable, few-shot-appropriate approach
                 
-                # Check if z_struct varies across samples (using FLATTENING, not pooling)
-                B = z_struct.size(0)
-                z_flat = z_struct.reshape(B, -1)  # [B, K*D] - FLATTEN, not pool!
-                z_norm = torch.nn.functional.normalize(z_flat, dim=-1)
+                if not hasattr(self, '_cisl_debug_count'):
+                    self._cisl_debug_count = 0
                 
-                # Check similarity of first few samples (BEFORE projection, BEFORE batchnorm)
-                sim_01 = (z_norm[0] * z_norm[1]).sum().item()
-                sim_02 = (z_norm[0] * z_norm[2]).sum().item()
-                sim_12 = (z_norm[1] * z_norm[2]).sum().item()
-                print(f"  Pre-BatchNorm similarities: (0,1)={sim_01:.4f}, (0,2)={sim_02:.4f}, (1,2)={sim_12:.4f}")
+                # Get content-augmented structure if available
+                z_struct_content_aug = outputs.get('z_struct_color_aug', None)
                 
-                # Check AFTER BatchNorm (if available)
-                if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'batch_norm'):
-                    with torch.no_grad():
-                        z_bn = self.loss_fn.scl.batch_norm(z_flat)  # Apply batch norm
-                        z_bn_norm = torch.nn.functional.normalize(z_bn, dim=-1)
-                        sim_01_bn = (z_bn_norm[0] * z_bn_norm[1]).sum().item()
-                        sim_02_bn = (z_bn_norm[0] * z_bn_norm[2]).sum().item()
-                        sim_12_bn = (z_bn_norm[1] * z_bn_norm[2]).sum().item()
-                        print(f"  Post-BatchNorm similarities: (0,1)={sim_01_bn:.4f}, (0,2)={sim_02_bn:.4f}, (1,2)={sim_12_bn:.4f}")
+                # Compute CISL losses (includes stats tracking)
+                cisl_result = self.cisl_loss(
+                    z_struct=z_struct,
+                    z_struct_content_aug=z_struct_content_aug,
+                    demo_mask=batch.get('grid_masks', None)
+                )
                 
-                # Check AFTER projection (if available)
-                if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'projector'):
-                    with torch.no_grad():
-                        z_bn = self.loss_fn.scl.batch_norm(z_flat)  # Apply batch norm first
-                        z_proj = self.loss_fn.scl.projector(z_bn)  # Then project
-                        z_proj_norm = torch.nn.functional.normalize(z_proj, dim=-1)
-                        sim_01_p = (z_proj_norm[0] * z_proj_norm[1]).sum().item()
-                        sim_02_p = (z_proj_norm[0] * z_proj_norm[2]).sum().item()
-                        sim_12_p = (z_proj_norm[1] * z_proj_norm[2]).sum().item()
-                        print(f"  Post-projection similarities: (0,1)={sim_01_p:.4f}, (0,2)={sim_02_p:.4f}, (1,2)={sim_12_p:.4f}")
+                cisl_losses = {
+                    'consistency': cisl_result['consistency'],
+                    'content_inv': cisl_result['content_inv'],
+                    'variance': cisl_result['variance']
+                }
                 
-                self._scl_debug_count += 1
-            
-            # Use the SCL component from the loss function
-            if hasattr(self.loss_fn, 'scl'):
-                scl_loss = self.loss_fn.scl(z_struct, transform_families)
+                # Use CISL total as the "scl_loss" for backward compatibility
+                scl_loss = cisl_result['total']
+                
+                # Get embedding statistics
+                cisl_stats = cisl_result.get('stats', {})
+                
+                # Per-batch debug logging (first 5 batches per epoch)
+                if self._cisl_debug_count < 5:
+                    print(f"\n[CISL DEBUG] Content-Invariant Structure Learning - Batch {self._cisl_debug_count + 1}:")
+                    print(f"  z_struct shape: {z_struct.shape}")
+                    print(f"  Embedding stats: mean={cisl_stats.get('z_mean', 0):.6f}, std={cisl_stats.get('z_std', 0):.6f}, norm={cisl_stats.get('z_norm', 0):.4f}")
+                    print(f"  L_consist: {cisl_result['consistency'].item():.6f} (weight: {self.config.cicl_consist_weight})")
+                    print(f"  L_content_inv: {cisl_result['content_inv'].item():.6f} (weight: {self.config.cicl_color_inv_weight})")
+                    print(f"  L_variance: {cisl_result['variance'].item():.6f} (weight: {self.config.cicl_variance_weight})")
+                    print(f"  CISL total (weighted): {cisl_result['total'].item():.6f}")
+                    if z_struct_content_aug is not None:
+                        print(f"  Content-augmented z_struct: {z_struct_content_aug.shape}")
+                        print(f"  Orig-Aug cosine similarity: {cisl_stats.get('orig_aug_cos_sim', 0):.4f}")
+                    else:
+                        print(f"  [!] No content-augmented z_struct - L_content_inv = 0")
+                    self._cisl_debug_count += 1
+                    
+            elif 'transform_families' in batch:
+                # === Legacy SCL ===
+                transform_families = batch['transform_families'].to(self.device)  # [B]
+                
+                # Debug: Log transform_family distribution (first few batches only)
+                if not hasattr(self, '_scl_debug_count'):
+                    self._scl_debug_count = 0
+                if self._scl_debug_count < 3:
+                    unique, counts = torch.unique(transform_families, return_counts=True)
+                    print(f"\n[SCL DEBUG] Transform families in batch:")
+                    print(f"  Unique values: {unique.tolist()}")
+                    print(f"  Counts: {counts.tolist()}")
+                    print(f"  z_struct shape: {z_struct.shape}")
+                    print(f"  z_struct mean: {z_struct.mean().item():.6f}, std: {z_struct.std().item():.6f}")
+                    
+                    # Check if z_struct varies across samples (using FLATTENING, not pooling)
+                    B = z_struct.size(0)
+                    z_flat = z_struct.reshape(B, -1)  # [B, K*D] - FLATTEN, not pool!
+                    z_norm = torch.nn.functional.normalize(z_flat, dim=-1)
+                    
+                    # Check similarity of first few samples (BEFORE projection, BEFORE batchnorm)
+                    sim_01 = (z_norm[0] * z_norm[1]).sum().item()
+                    sim_02 = (z_norm[0] * z_norm[2]).sum().item()
+                    sim_12 = (z_norm[1] * z_norm[2]).sum().item()
+                    print(f"  Pre-BatchNorm similarities: (0,1)={sim_01:.4f}, (0,2)={sim_02:.4f}, (1,2)={sim_12:.4f}")
+                    
+                    # Check AFTER BatchNorm (if available)
+                    if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'batch_norm'):
+                        with torch.no_grad():
+                            z_bn = self.loss_fn.scl.batch_norm(z_flat)  # Apply batch norm
+                            z_bn_norm = torch.nn.functional.normalize(z_bn, dim=-1)
+                            sim_01_bn = (z_bn_norm[0] * z_bn_norm[1]).sum().item()
+                            sim_02_bn = (z_bn_norm[0] * z_bn_norm[2]).sum().item()
+                            sim_12_bn = (z_bn_norm[1] * z_bn_norm[2]).sum().item()
+                            print(f"  Post-BatchNorm similarities: (0,1)={sim_01_bn:.4f}, (0,2)={sim_02_bn:.4f}, (1,2)={sim_12_bn:.4f}")
+                    
+                    # Check AFTER projection (if available)
+                    if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'projector'):
+                        with torch.no_grad():
+                            z_bn = self.loss_fn.scl.batch_norm(z_flat)  # Apply batch norm first
+                            z_proj = self.loss_fn.scl.projector(z_bn)  # Then project
+                            z_proj_norm = torch.nn.functional.normalize(z_proj, dim=-1)
+                            sim_01_p = (z_proj_norm[0] * z_proj_norm[1]).sum().item()
+                            sim_02_p = (z_proj_norm[0] * z_proj_norm[2]).sum().item()
+                            sim_12_p = (z_proj_norm[1] * z_proj_norm[2]).sum().item()
+                            print(f"  Post-projection similarities: (0,1)={sim_01_p:.4f}, (0,2)={sim_02_p:.4f}, (1,2)={sim_12_p:.4f}")
+                    
+                    self._scl_debug_count += 1
+                
+                # Use the SCL component from the loss function
+                if hasattr(self.loss_fn, 'scl'):
+                    scl_loss = self.loss_fn.scl(z_struct, transform_families)
+        
         losses['scl'] = scl_loss
+        # Add CISL sub-losses for logging (use cisl_ prefix for consistency)
+        losses['cisl_consist'] = cisl_losses['consistency']
+        losses['cisl_content_inv'] = cisl_losses['content_inv']
+        losses['cisl_variance'] = cisl_losses['variance']
         
         # Orthogonality loss - use the loss_fn's orthogonality component
         ortho_loss = torch.tensor(0.0, device=self.device)
@@ -591,7 +707,7 @@ class SCIARCTrainer:
         print(log_str)
         
         if self.wandb_run:
-            wandb.log({
+            log_dict = {
                 'train/loss_total': losses['total'].item(),
                 'train/loss_task': losses['task'].item(),
                 'train/loss_scl': losses['scl'].item(),
@@ -600,7 +716,14 @@ class SCIARCTrainer:
                 'train/lr': lr,
                 'train/epoch': self.current_epoch,
                 'train/step': self.global_step,
-            })
+            }
+            # Add CISL losses if enabled (per-batch logging)
+            if self.config.use_cicl:
+                log_dict['train/cisl_consist'] = losses.get('cisl_consist', torch.tensor(0.0)).item()
+                log_dict['train/cisl_content_inv'] = losses.get('cisl_content_inv', torch.tensor(0.0)).item()
+                log_dict['train/cisl_variance'] = losses.get('cisl_variance', torch.tensor(0.0)).item()
+                log_dict['train/cisl_total'] = losses['scl'].item()  # CISL total goes into scl slot
+            wandb.log(log_dict)
     
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:

@@ -45,6 +45,14 @@ training:
   ortho_weight: 0.01
   deep_supervision_weight: 0.5
   
+  # CISL: Content-Invariant Structure Learning (replaces SCL for few-shot)
+  # Note: Config params use 'cicl_' prefix for backward compatibility
+  use_cicl: true                # Enable CISL instead of legacy SCL
+  cicl_consist_weight: 0.5      # Within-task consistency weight (λ₁)
+  cicl_color_inv_weight: 0.5    # Content invariance weight (λ₂)
+  cicl_variance_weight: 0.1     # Batch variance weight (λ₃, anti-collapse)
+  cicl_target_std: 0.5          # Target std (γ) for variance regularization
+  
   # Anti-background-collapse (CRITICAL for ARC's ~85% background grids)
   focal_gamma: 2.0              # Focal Loss gamma (down-weights easy/background pixels)
   use_class_weights: true       # Background weight=0.1, others=1.0

@@ -131,7 +131,8 @@ class SCIARCDataset(Dataset):
         curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
         cache_samples: bool = False,  # Enable in-memory caching
         cache_augmentations: int = 8,  # Number of augmented versions to pre-generate per task
-        use_augment_family: bool = True,  # Use augmentation type as transform_family for SCL
+        use_augment_family: bool = True,  # DEPRECATED: use scl_family_mode instead
+        scl_family_mode: str = "task",  # "task" (augmentation invariance), "augment" (dihedral), "inferred"
     ):
         """
         Initialize the dataset.
@@ -148,9 +149,16 @@ class SCIARCDataset(Dataset):
             curriculum_stage: Curriculum learning stage
             cache_samples: If True, cache processed samples in memory
             cache_augmentations: Number of pre-generated augmentations per task (only used when cache_samples=True and augment=True)
-            use_augment_family: If True, use augmentation type (dihedral_id 0-7) as transform_family.
-                This is CRITICAL for SCL to work properly - samples with same augmentation
-                type become positive pairs. Default True for proper SCL learning.
+            use_augment_family: DEPRECATED - use scl_family_mode instead
+            scl_family_mode: How to assign transform_family for SCL:
+                - "task": Use task_id hash (augmentation invariance - RECOMMENDED)
+                  All augmented versions of the same task become positive pairs.
+                  This teaches the model that rotated/flipped versions are the same task.
+                - "augment": Use dihedral augmentation type (0-7)
+                  Samples with same augmentation become positive pairs.
+                  This teaches "rotation detection" not "task understanding".
+                - "inferred": Use infer_transform_from_grids result
+                  Only works if tasks have detectable simple transforms.
         """
         self.data_dir = Path(data_dir)
         self.split = split
@@ -161,7 +169,14 @@ class SCIARCDataset(Dataset):
         self.curriculum_stage = curriculum_stage
         self.cache_samples = cache_samples
         self.cache_augmentations = cache_augmentations
-        self.use_augment_family = use_augment_family
+        
+        # Handle scl_family_mode with backward compatibility
+        # DEPRECATED: use_augment_family is ignored if scl_family_mode is explicitly set
+        self.scl_family_mode = scl_family_mode
+        # Legacy support: if using old parameter explicitly
+        if not use_augment_family and scl_family_mode == "task":
+            # Old code that set use_augment_family=False wanted inferred behavior
+            self.scl_family_mode = "inferred"
         
         # Cache storage
         self._cache: Dict[int, Any] = {}
@@ -378,7 +393,7 @@ class SCIARCDataset(Dataset):
         input_grids = [pair[0] for pair in task.train_pairs]
         output_grids = [pair[1] for pair in task.train_pairs]
         
-        # Default to task's transform family
+        # Default to task's inferred transform family
         transform_family = task.transform_family
         
         # Apply augmentation if requested
@@ -386,10 +401,25 @@ class SCIARCDataset(Dataset):
             input_grids, output_grids, test_input, test_output, augment_info = self._augment(
                 input_grids, output_grids, test_input, test_output
             )
-            # Use augmentation type as transform_family for SCL
-            # This ensures samples with same augmentation (e.g., all rotate_90) are positive pairs
-            if self.use_augment_family:
+            
+            # Determine transform_family based on scl_family_mode
+            if self.scl_family_mode == "augment":
+                # Use dihedral augmentation type (0-7)
+                # Positive pairs: different tasks with same augmentation
                 transform_family = augment_info['dihedral_id']
+            elif self.scl_family_mode == "task":
+                # Use task_id hash for augmentation invariance (RECOMMENDED)
+                # Positive pairs: same task with different augmentations
+                # This teaches the model that rotated/flipped versions are the same task
+                # Hash to a reasonable number of families to ensure batch diversity
+                transform_family = hash(task.task_id) % 400  # 400 tasks = 400 families
+            elif self.scl_family_mode == "inferred":
+                # Use the task's inferred transform family (from infer_transform_from_grids)
+                # Only useful if tasks have detectable simple transforms
+                transform_family = task.transform_family
+            else:
+                # Default to task mode
+                transform_family = hash(task.task_id) % 400
         
         # Custom transform
         if self.transform_fn:

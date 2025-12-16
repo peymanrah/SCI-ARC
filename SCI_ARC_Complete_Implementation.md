@@ -2718,3 +2718,113 @@ prediction = ensemble.predict(
 # For ablation (sampling only)
 candidates = sampler.sample(test_input, num_samples=32)
 ```
+
+---
+
+## 🆕 CISL: Content-Invariant Structure Learning (January 2025)
+
+> **Note:** Originally named CICL (Color-Invariant Consistency Learning), renamed to CISL
+> to reflect the general-purpose nature of content-invariant structure learning.
+> CICL names are preserved as backward-compatible aliases.
+
+### Why CISL Replaces SCL
+
+The original Structural Contrastive Loss (SCL) suffers from fundamental issues in the ARC domain:
+
+| Problem | SCL Issue | CISL Solution |
+|---------|-----------|---------------|
+| **Too few samples** | InfoNCE needs many negatives; ARC has 2-4 demos per task | Uses within-task consistency instead |
+| **Collapse to zero** | Model learns constant embedding to minimize loss | Variance loss prevents collapse |
+| **No explicit invariance** | Structure-content separation is implicit | Content permutation explicitly tests invariance |
+
+### CISL Four-Component Loss
+
+```
+L_total = L_recon + λ₁·L_consist + λ₂·L_content_inv + λ₃·L_var
+```
+
+| Component | Formula | Purpose |
+|-----------|---------|---------|
+| **L_recon** | `CrossEntropy(pred, target)` | Reconstruction (existing task loss) |
+| **L_consist** | `(1/K)·Σ\|z_i - mean(z)\|²` | All demos → same structure embedding |
+| **L_content_inv** | `\|z_orig - z_content_permuted\|²` | Content change doesn't change structure |
+| **L_var** | `ReLU(γ - std(Z_batch))` | Prevent constant-zero collapse |
+
+### Content Permutation: The Key Insight
+
+For ARC, structure = transformation rule. If you swap red↔blue everywhere:
+- The **structure** (rule) is unchanged
+- The **content** (colors) changed
+
+CISL explicitly teaches this: `f(grid) == f(permute_content(grid))`
+
+```python
+# Color permutation (content permutation for ARC) preserves structure
+original:  [[1, 1, 2],    # Rule: "mirror horizontally"
+            [2, 2, 1]]    
+
+permuted:  [[3, 3, 5],    # Same rule applied, different colors
+            [5, 5, 3]]    
+
+# CISL forces: z_struct(original) == z_struct(permuted)
+```
+
+### Configuration
+
+```yaml
+# configs/default.yaml
+# Note: Config params use cicl_ prefix for backward compatibility
+training:
+  use_cicl: true                 # Enable CISL (uses cicl name for compat)
+  cicl_consist_weight: 0.5       # Within-task consistency weight
+  cicl_color_inv_weight: 0.5     # Content invariance weight (color inv for ARC)
+  cicl_variance_weight: 0.1      # Anti-collapse regularization
+  cicl_target_std: 0.5           # Target embedding std
+```
+
+### Usage
+
+```python
+from sci_arc.training import CISLLoss  # Preferred name
+from sci_arc.training import CICLLoss  # Backward-compatible alias
+
+# Create loss (content_inv_weight replaces color_inv_weight)
+cisl_loss = CISLLoss(
+    consist_weight=0.5,
+    content_inv_weight=0.5,
+    variance_weight=0.1,
+    target_std=0.5
+)
+
+# Compute (in trainer)
+result = cisl_loss(
+    z_struct=z_struct,                    # [B, K, D] structure embeddings
+    z_struct_content_aug=z_content_aug,   # [B, K, D] content-permuted version
+)
+
+# Result dict contains:
+# 'total': Combined CISL loss
+# 'consistency': Within-task consistency
+# 'content_inv': Content invariance (was 'color_inv')
+# 'variance': Anti-collapse term
+```
+
+### Backward Compatibility
+
+CISL is opt-in. Set `use_cicl: false` in config to use legacy SCL:
+
+```python
+config = TrainingConfig(use_cicl=False)  # Legacy SCL
+config = TrainingConfig(use_cicl=True)   # New CISL (uses cicl param name)
+
+# Both class names work:
+from sci_arc.training import CISLLoss  # New preferred name
+from sci_arc.training import CICLLoss  # Old name (alias for CISLLoss)
+```
+
+### Logging
+
+When CISL is enabled, training logs these additional metrics to wandb:
+- `train/cisl_consist` - Within-task consistency loss
+- `train/cisl_content_inv` - Content invariance loss (was cisl_color_inv)
+- `train/cisl_variance` - Batch variance loss

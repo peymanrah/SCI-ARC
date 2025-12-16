@@ -278,6 +278,52 @@ The contrastive loss is computed on the projected representations:
 
 where $j$ is a task with the same transformation family as $i$, and $\tau$ is the temperature. The projection head is critical: without it, the structural encoder tends to collapse all representations to the same point, resulting in a constant SCL loss of $\log(B)$ where $B$ is the batch size.
 
+\subsubsection{Content-Invariant Structure Learning (CISL)}
+
+While standard SCL faces challenges in the ARC domain---primarily the scarcity of samples per transformation family (only 2-4 demos per task)---we introduce \textbf{Content-Invariant Structure Learning (CISL)} as a more stable alternative. CISL leverages a fundamental property of abstract reasoning: \textit{content (e.g., colors) is not structure (e.g., transformations)}.
+
+\textbf{Theorem (Content Permutation Invariance):} For any ARC transformation $T$ and bijective content permutation $\pi: \{1,...,9\} \rightarrow \{1,...,9\}$ (fixing $\pi(0)=0$), we have:
+\begin{equation}
+    T(\pi(G)) = \pi(T(G))
+\end{equation}
+
+That is, content permutation commutes with ARC transformations. This implies that the \textit{structural} representation should be invariant to content changes:
+\begin{equation}
+    S(\text{task}) = S(\pi(\text{task}))
+\end{equation}
+
+CISL enforces this through a four-component loss:
+
+\textbf{1. Within-Task Consistency Loss:} All demonstrations in a task share the same transformation rule, so their structural embeddings should be identical:
+\begin{equation}
+    \mathcal{L}_{consist} = \frac{1}{K} \sum_{i=1}^{K} \|z_S^{(i)} - \bar{z}_S\|^2, \quad \bar{z}_S = \frac{1}{K}\sum_{j=1}^K z_S^{(j)}
+\end{equation}
+
+\textbf{2. Content Invariance Loss:} Structure embeddings should be unchanged under content permutation:
+\begin{equation}
+    \mathcal{L}_{content} = \|\bar{z}_S^{orig} - \bar{z}_S^{perm}\|^2
+\end{equation}
+where $z_S^{perm}$ is computed from the content-permuted task.
+
+\textbf{3. Batch Variance Loss (Anti-Collapse):} To prevent degenerate solutions where the encoder outputs constant zeros:
+\begin{equation}
+    \mathcal{L}_{var} = \max(0, \gamma - \text{std}(Z_{batch}))
+\end{equation}
+where $\gamma$ is the target standard deviation (we use $\gamma=0.5$). Inspired by VICReg \cite{vicreg2021}, this ensures representational diversity.
+
+\textbf{CISL vs SCL:} The key advantages of CISL are:
+\begin{itemize}
+    \item \textbf{No negative mining required:} SCL requires other tasks as negatives; CISL uses the task's own demos
+    \item \textbf{Explicit invariance:} Content permutation directly tests structure-content separation
+    \item \textbf{Collapse prevention:} Variance term guarantees non-trivial solutions
+    \item \textbf{Few-shot compatible:} Works with 2-4 demos per task (standard ARC)
+\end{itemize}
+
+The full CISL objective is:
+\begin{equation}
+    \mathcal{L}_{CISL} = \lambda_1 \mathcal{L}_{consist} + \lambda_2 \mathcal{L}_{content} + \lambda_3 \mathcal{L}_{var}
+\end{equation}
+
 \subsubsection{Orthogonality Loss}
 
 We enforce the SCI constraint $S(x) \perp C(x)$:

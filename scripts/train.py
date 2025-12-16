@@ -160,6 +160,12 @@ def build_training_config(config: dict) -> TrainingConfig:
         scl_weight=train_cfg['scl_weight'],
         ortho_weight=train_cfg['ortho_weight'],
         deep_supervision_weight=train_cfg['deep_supervision_weight'],
+        # CISL: Content-Invariant Structure Learning (params use cicl_ prefix for backward compat)
+        use_cicl=train_cfg.get('use_cicl', False),  # Default False for backward compat
+        cicl_consist_weight=train_cfg.get('cicl_consist_weight', 0.5),
+        cicl_color_inv_weight=train_cfg.get('cicl_color_inv_weight', 0.5),
+        cicl_variance_weight=train_cfg.get('cicl_variance_weight', 0.1),
+        cicl_target_std=train_cfg.get('cicl_target_std', 0.5),
         scheduler_type=train_cfg.get('scheduler_type', 'cosine'),
         min_lr=train_cfg.get('min_lr', 1e-6),
         use_amp=train_cfg.get('use_amp', True),

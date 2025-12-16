@@ -63,6 +63,23 @@ training:
   ortho_weight: 0.01            # Orthogonality constraint
   deep_supervision_weight: 0.3  # Intermediate supervision (reduced)
   
+  # ==========================================================================
+  # CISL: Content-Invariant Structure Learning (replaces SCL for few-shot learning)
+  # ==========================================================================
+  # CISL uses 4 losses instead of standard contrastive learning:
+  # 1. L_consist: All demos in a task should have same structure embedding
+  # 2. L_content_inv: Content-permuted task should have same structure embedding  
+  # 3. L_var: Batch variance regularization (prevents collapse to zeros)
+  # 4. L_recon: Standard reconstruction loss (already exists as task_loss)
+  #
+  # Note: Config params use 'cicl_' prefix for backward compatibility
+  # Set use_cicl=true to enable CISL (recommended for ARC), false for legacy SCL
+  use_cicl: true                # Enable CISL instead of SCL
+  cicl_consist_weight: 0.5      # Within-task consistency weight (λ₁)
+  cicl_color_inv_weight: 0.5    # Content invariance weight (λ₂, key SCI principle!)
+  cicl_variance_weight: 0.1     # Batch variance weight (λ₃, anti-collapse)
+  cicl_target_std: 0.5          # Target std (γ) for variance regularization
+  
   # Anti-background-collapse (CRITICAL for ARC's ~85% background grids)
   # NOTE: gamma=2.0 + class_weights reduced loss from 2.98 to 0.17 (too aggressive!)
   # Reduce gamma to 1.0 for gentler down-weighting, keep class_weights for content focus
@@ -112,9 +129,14 @@ data:
   augment_color: true           # Color permutation
   
   # SCL Transform Family Assignment
-  # CRITICAL for SCL learning: Use augmentation type (dihedral 0-7) as transform_family
-  # This ensures samples with same augmentation are positive pairs in contrastive learning
-  use_augment_family: true      # Use augmentation type as transform_family for SCL
+  # CRITICAL for SCL learning - determines what becomes "positive pairs"
+  # Options:
+  #   "task"     - RECOMMENDED: Same task (different augmentations) = positive pairs
+  #                This teaches augmentation invariance (core generalization property)
+  #   "augment"  - Same augmentation (different tasks) = positive pairs  
+  #                This teaches "rotation detection" not "task understanding"
+  #   "inferred" - Use detected transform type (only works for simple transforms)
+  scl_family_mode: "task"       # Use task-based grouping for augmentation invariance
 
 # =============================================================================
 # EVALUATION
