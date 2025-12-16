@@ -377,9 +377,9 @@ class SCIARCTrainer:
                 unique_count = len(set(families))
                 print(f"  Batch {i+1}: {unique_count} unique families out of {len(families)} samples")
                 if unique_count < len(families) // 2:
-                    print(f"    ⚠ Low diversity - check augmentation settings")
+                    print(f"    [!] Low diversity - check augmentation settings")
                 else:
-                    print(f"    ✓ Good diversity for SCL")
+                    print(f"    [+] Good diversity for SCL")
         
         # Average losses (already Python floats)
         for key in epoch_losses:
@@ -462,9 +462,9 @@ class SCIARCTrainer:
                     print(f"  Standard CE (for comparison): {standard_ce.item():.4f}")
                     
                     if focal_gamma > 0 and task_loss.item() < standard_ce.item():
-                        print(f"  ✓ Focal Loss is DOWN-WEIGHTING easy samples (loss reduced by {standard_ce.item() - task_loss.item():.4f})")
+                        print(f"  [+] Focal Loss is DOWN-WEIGHTING easy samples (loss reduced by {standard_ce.item() - task_loss.item():.4f})")
                     elif focal_gamma > 0:
-                        print(f"  ✓ Focal Loss active (may increase loss on hard samples)")
+                        print(f"  [+] Focal Loss active (may increase loss on hard samples)")
                 
                 self._focal_debug_count += 1
         else:
@@ -741,8 +741,8 @@ class SCIARCTrainer:
         print(f"{'='*60}")
         
         if not hasattr(self.loss_fn, 'deep_supervision'):
-            print("  ⚠ WARNING: loss_fn has no deep_supervision component!")
-            print("  ⚠ Focal Loss, Class Weights, Label Smoothing will NOT be used!")
+            print("  [!] WARNING: loss_fn has no deep_supervision component!")
+            print("  [!] Focal Loss, Class Weights, Label Smoothing will NOT be used!")
             print(f"  Loss function type: {type(self.loss_fn).__name__}")
             return
         
@@ -751,34 +751,34 @@ class SCIARCTrainer:
         # Focal Loss
         focal_gamma = getattr(ds, 'focal_gamma', 0.0)
         if focal_gamma > 0:
-            print(f"  ✓ FOCAL LOSS: gamma={focal_gamma:.1f} (DOWN-WEIGHTS EASY/BACKGROUND PIXELS)")
+            print(f"  [+] FOCAL LOSS: gamma={focal_gamma:.1f} (DOWN-WEIGHTS EASY/BACKGROUND PIXELS)")
             print(f"    Formula: FL(pt) = -(1-pt)^{focal_gamma:.1f} * log(pt)")
             print(f"    Effect: Easy samples (background) get ~{(1-0.85)**focal_gamma:.3f}x weight")
             print(f"            Hard samples (content) get ~{(1-0.15)**focal_gamma:.3f}x weight")
         else:
-            print(f"  ✗ Focal Loss: DISABLED (gamma=0)")
-            print(f"    ⚠ Model may collapse to predicting mostly background!")
+            print(f"  [-] Focal Loss: DISABLED (gamma=0)")
+            print(f"    [!] Model may collapse to predicting mostly background!")
         
         # Class Weights
         class_weights = getattr(ds, 'class_weights', None)
         if class_weights is not None:
-            print(f"\n  ✓ CLASS WEIGHTS: ACTIVE")
+            print(f"\n  [+] CLASS WEIGHTS: ACTIVE")
             bg_weight = class_weights[0].item() if class_weights.numel() > 0 else 1.0
             other_weight = class_weights[1].item() if class_weights.numel() > 1 else 1.0
             print(f"    Background (0): {bg_weight:.2f}")
             print(f"    Other colors:   {other_weight:.2f}")
             print(f"    Effect: Non-background errors penalized {other_weight/bg_weight:.0f}x more")
         else:
-            print(f"\n  ✗ Class Weights: DISABLED")
-            print(f"    ⚠ All colors weighted equally (background dominates)")
+            print(f"\n  [-] Class Weights: DISABLED")
+            print(f"    [!] All colors weighted equally (background dominates)")
         
         # Label Smoothing
         label_smoothing = getattr(ds, 'label_smoothing', 0.0)
         if label_smoothing > 0:
-            print(f"\n  ✓ LABEL SMOOTHING: {label_smoothing:.2f}")
+            print(f"\n  [+] LABEL SMOOTHING: {label_smoothing:.2f}")
             print(f"    Effect: Prevents overconfident predictions")
         else:
-            print(f"\n  ✗ Label Smoothing: DISABLED")
+            print(f"\n  [-] Label Smoothing: DISABLED")
         
         # Deep Supervision
         num_steps = getattr(ds, 'num_steps', 1)
@@ -791,19 +791,19 @@ class SCIARCTrainer:
         print(f"\n  === ANTI-BACKGROUND-COLLAPSE STATUS ===")
         active_defenses = []
         if focal_gamma > 0:
-            active_defenses.append(f"Focal(γ={focal_gamma})")
+            active_defenses.append(f"Focal(gamma={focal_gamma})")
         if class_weights is not None:
             active_defenses.append("ClassWeights")
         if label_smoothing > 0:
             active_defenses.append(f"LabelSmooth({label_smoothing})")
         
         if active_defenses:
-            print(f"  ✓ Active: {', '.join(active_defenses)}")
+            print(f"  [+] Active: {', '.join(active_defenses)}")
             print(f"  Model should focus on content pixels, not just background.")
         else:
-            print(f"  ⚠ NO DEFENSES ACTIVE!")
-            print(f"  ⚠ Model will likely collapse to predicting all background!")
-            print(f"  ⚠ Enable focal_gamma, use_class_weights in config!")
+            print(f"  [!] NO DEFENSES ACTIVE!")
+            print(f"  [!] Model will likely collapse to predicting all background!")
+            print(f"  [!] Enable focal_gamma, use_class_weights in config!")
         
         print(f"{'='*60}")
     
@@ -877,17 +877,17 @@ class SCIARCTrainer:
         scl_loss = train_losses['scl']
         print(f"\n  === SCL HEALTH CHECK ===")
         if scl_loss < 0.1:
-            print(f"  ✓ SCL loss very low ({scl_loss:.4f}) - Excellent clustering!")
+            print(f"  [+] SCL loss very low ({scl_loss:.4f}) - Excellent clustering!")
         elif scl_loss < 1.0:
-            print(f"  ✓ SCL loss moderate ({scl_loss:.4f}) - Good progress")
+            print(f"  [+] SCL loss moderate ({scl_loss:.4f}) - Good progress")
         elif scl_loss < 3.0:
-            print(f"  ⚠ SCL loss high ({scl_loss:.4f}) - Still learning")
+            print(f"  [!] SCL loss high ({scl_loss:.4f}) - Still learning")
         elif abs(scl_loss - math.log(self.config.batch_size)) < 0.5:
-            print(f"  ✗ SCL loss ≈ log(batch_size)={math.log(self.config.batch_size):.2f}")
+            print(f"  [-] SCL loss ~ log(batch_size)={math.log(self.config.batch_size):.2f}")
             print(f"    WARNING: Possible representation collapse!")
             print(f"    Check: Are z_struct embeddings diverse?")
         else:
-            print(f"  ? SCL loss: {scl_loss:.4f}")
+            print(f"  [?] SCL loss: {scl_loss:.4f}")
         
         # Temperature tracking (if learnable)
         if hasattr(self.loss_fn, 'scl') and hasattr(self.loss_fn.scl, 'temperature'):
