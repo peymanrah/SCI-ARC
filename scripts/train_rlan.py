@@ -617,22 +617,19 @@ def train_epoch(
                             total_grad_norm_before += p.grad.norm().item() ** 2
                     total_grad_norm_before = total_grad_norm_before ** 0.5
                     
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-                    
-                    # Track if clipping was applied
+                    # Capture per-module gradient norms BEFORE clipping (first batch only)
                     if batch_idx < grad_accumulation_steps:
+                        grad_norms = compute_module_grad_norms(model)
+                        epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
+                        epoch_diagnostics['stop_predictor_grad_norm_sum'] += grad_norms.get('stop_predictor', 0.0)
+                        epoch_diagnostics['encoder_grad_norm_sum'] += grad_norms.get('encoder', 0.0)
+                        epoch_diagnostics['solver_grad_norm_sum'] += grad_norms.get('solver', 0.0)
+                        epoch_diagnostics['context_encoder_grad_norm_sum'] += grad_norms.get('context_encoder', 0.0)
+                        epoch_diagnostics['msre_grad_norm_sum'] += grad_norms.get('msre', 0.0)
                         epoch_diagnostics['grad_norm_before_clip'] = total_grad_norm_before
                         epoch_diagnostics['grad_was_clipped'] = total_grad_norm_before > gradient_clip
-                
-                # Capture gradient norms before they're cleared (first accumulation step only)
-                if batch_idx < grad_accumulation_steps:
-                    grad_norms = compute_module_grad_norms(model)
-                    epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
-                    epoch_diagnostics['stop_predictor_grad_norm_sum'] += grad_norms.get('stop_predictor', 0.0)
-                    epoch_diagnostics['encoder_grad_norm_sum'] += grad_norms.get('encoder', 0.0)
-                    epoch_diagnostics['solver_grad_norm_sum'] += grad_norms.get('solver', 0.0)
-                    epoch_diagnostics['context_encoder_grad_norm_sum'] += grad_norms.get('context_encoder', 0.0)
-                    epoch_diagnostics['msre_grad_norm_sum'] += grad_norms.get('msre', 0.0)
+                    
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
                 
                 scaler.step(optimizer)
                 scaler.update()
@@ -674,15 +671,7 @@ def train_epoch(
                         total_grad_norm_before += p.grad.norm().item() ** 2
                 total_grad_norm_before = total_grad_norm_before ** 0.5
                 
-                if gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-                    
-                    # Track if clipping was applied
-                    if batch_idx < grad_accumulation_steps:
-                        epoch_diagnostics['grad_norm_before_clip'] = total_grad_norm_before
-                        epoch_diagnostics['grad_was_clipped'] = total_grad_norm_before > gradient_clip
-                
-                # Capture gradient norms before they're cleared (first accumulation step only)
+                # Capture per-module gradient norms BEFORE clipping (first batch only)
                 if batch_idx < grad_accumulation_steps:
                     grad_norms = compute_module_grad_norms(model)
                     epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
@@ -691,6 +680,11 @@ def train_epoch(
                     epoch_diagnostics['solver_grad_norm_sum'] += grad_norms.get('solver', 0.0)
                     epoch_diagnostics['context_encoder_grad_norm_sum'] += grad_norms.get('context_encoder', 0.0)
                     epoch_diagnostics['msre_grad_norm_sum'] += grad_norms.get('msre', 0.0)
+                    epoch_diagnostics['grad_norm_before_clip'] = total_grad_norm_before
+                    epoch_diagnostics['grad_was_clipped'] = gradient_clip > 0 and total_grad_norm_before > gradient_clip
+                
+                if gradient_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
                 
                 optimizer.step()
                 optimizer.zero_grad()
