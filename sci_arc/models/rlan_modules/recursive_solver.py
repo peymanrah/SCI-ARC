@@ -228,6 +228,7 @@ class RecursiveSolver(nn.Module):
         use_act: bool = False,  # Enable Adaptive Computation Time
         use_lcr: bool = True,   # Enable count injection (ablation flag)
         use_sph: bool = True,   # Enable predicate gating (ablation flag)
+        use_feedback: bool = False,  # Use prediction feedback (disabled by default - causes gradient issues)
     ):
         """
         Args:
@@ -240,6 +241,9 @@ class RecursiveSolver(nn.Module):
             use_act: Whether to use Adaptive Computation Time
             use_lcr: Whether to use count injection (skip if False)
             use_sph: Whether to use predicate gating (skip if False)
+            use_feedback: Whether to use prediction feedback in refinement loop.
+                          Disabled by default because argmax is non-differentiable,
+                          causing later steps to receive gradient-disconnected inputs.
         """
         super().__init__()
         
@@ -249,6 +253,7 @@ class RecursiveSolver(nn.Module):
         self.use_act = use_act
         self.use_lcr = use_lcr
         self.use_sph = use_sph
+        self.use_feedback = use_feedback
         
         # Clue feature aggregation
         self.clue_aggregator = nn.Sequential(
@@ -490,7 +495,10 @@ class RecursiveSolver(nn.Module):
             all_logits.append(logits)
             
             # Optional: Use prediction to update input embedding (feedback)
-            if t < self.num_steps - 1:
+            # NOTE: Disabled by default because argmax is non-differentiable.
+            # This breaks the gradient chain, causing later steps to receive
+            # increasingly corrupted inputs during training without learning signal.
+            if self.use_feedback and t < self.num_steps - 1:
                 pred = logits.argmax(dim=1)  # (B, H, W)
                 input_embed = self.input_embed(pred.clamp(0, 10)).permute(0, 3, 1, 2)
         

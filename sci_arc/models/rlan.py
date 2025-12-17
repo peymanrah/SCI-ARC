@@ -79,6 +79,7 @@ class RLANConfig:
     # Solver parameters
     num_solver_steps: int = 6
     use_act: bool = False  # Adaptive Computation Time
+    use_solver_feedback: bool = False  # Use prediction feedback in solver (disabled - argmax breaks gradients)
     
     # Training parameters
     dropout: float = 0.1
@@ -273,6 +274,7 @@ class RLAN(nn.Module):
             use_act=self.use_act,  # Enable Adaptive Computation Time
             use_lcr=self.use_lcr,  # Skip count injection if LCR disabled
             use_sph=self.use_sph,  # Skip predicate gating if SPH disabled
+            use_feedback=config.use_solver_feedback,  # Disabled by default (argmax breaks gradients)
         )
         
         # Print module configuration
