@@ -702,6 +702,22 @@ def train_epoch(
         
         # Collect diagnostics (first batch of each epoch only to avoid overhead)
         if batch_idx == 0:
+            # NEW: Color embedding diversity check - are colors differentiated?
+            with torch.no_grad():
+                if hasattr(model, 'grid_encoder') and hasattr(model.grid_encoder, 'color_embed'):
+                    color_embed = model.grid_encoder.color_embed.weight  # (10, hidden_dim//2)
+                    # Cosine similarity between color embeddings
+                    color_embed_norm = F.normalize(color_embed, dim=-1)
+                    color_sim = color_embed_norm @ color_embed_norm.T  # (10, 10)
+                    # Off-diagonal similarity (should be LOW for differentiated colors)
+                    mask = ~torch.eye(10, dtype=torch.bool, device=color_sim.device)
+                    off_diag_sim = color_sim[mask].mean().item()
+                    epoch_diagnostics['color_embed_similarity'] = off_diag_sim
+                    
+                    # BG vs FG similarity
+                    bg_fg_sim = color_sim[0, 1:].mean().item()
+                    epoch_diagnostics['bg_fg_embed_similarity'] = bg_fg_sim
+            
             # Track all_logits count for deep supervision verification
             all_logits = outputs.get('all_logits')
             if all_logits is not None:
@@ -863,6 +879,20 @@ def train_epoch(
                         class_total.append(0)
                 epoch_diagnostics['per_class_correct'] = class_correct
                 epoch_diagnostics['per_class_total'] = class_total
+                
+                # NEW: Color confusion matrix for diagnosing color prediction issues
+                # Check: when model predicts FG, which color does it tend to predict?
+                fg_mask = test_outputs != 0  # All foreground targets
+                if fg_mask.sum() > 0:
+                    # What colors is the model predicting for FG targets?
+                    fg_preds = preds[fg_mask]
+                    fg_pred_dist = [(fg_preds == c).sum().item() for c in range(10)]
+                    epoch_diagnostics['fg_pred_color_dist'] = fg_pred_dist
+                    
+                    # Mode color prediction (which color does model prefer?)
+                    mode_color = max(range(10), key=lambda c: fg_pred_dist[c])
+                    epoch_diagnostics['fg_pred_mode_color'] = mode_color
+                    epoch_diagnostics['fg_pred_mode_pct'] = fg_pred_dist[mode_color] / fg_mask.sum().item() * 100
             
             # Centroid spread (how diverse are clue locations)
             if 'centroids' in outputs:
@@ -1791,6 +1821,20 @@ Config Overrides:
             if logits_max is not None and (logits_max > 50 or logits_min < -50):
                 print(f"  [WARNING] Extreme logit values: [{logits_min:.1f}, {logits_max:.1f}]")
             
+            # NEW: Color embedding diversity check
+            color_embed_sim = diagnostics.get('color_embed_similarity', None)
+            if color_embed_sim is not None:
+                bg_fg_sim = diagnostics.get('bg_fg_embed_similarity', color_embed_sim)
+                print(f"  --- Color Embedding Diversity ---")
+                print(f"  Color Embed Similarity (off-diag): {color_embed_sim:.3f}", end="")
+                if color_embed_sim > 0.8:
+                    print(" [!] COLORS NOT DIFFERENTIATED!")
+                elif color_embed_sim > 0.5:
+                    print(" [WARN] Moderate similarity")
+                else:
+                    print(" (good diversity)")
+                print(f"  BG-FG Embed Similarity: {bg_fg_sim:.3f}")
+            
             # Gradient clipping diagnostics
             grad_norm_before = diagnostics.get('grad_norm_before_clip', None)
             grad_was_clipped = diagnostics.get('grad_was_clipped', False)
@@ -1844,6 +1888,16 @@ Config Overrides:
                         else:
                             class_accs.append("-")
                     print(f"  Per-Class Acc %: [{', '.join(class_accs)}]")
+                
+                # NEW: Color preference diagnostic - is model defaulting to one FG color?
+                fg_pred_mode = diagnostics.get('fg_pred_mode_color', None)
+                fg_pred_mode_pct = diagnostics.get('fg_pred_mode_pct', 0)
+                if fg_pred_mode is not None:
+                    if fg_pred_mode_pct > 50:
+                        print(f"  [!] COLOR MODE COLLAPSE: {fg_pred_mode_pct:.0f}% of FG preds are color {fg_pred_mode}")
+                        print(f"      Model is defaulting to single FG color instead of learning per-class!")
+                    elif fg_pred_mode_pct > 30:
+                        print(f"  [WARN] FG color preference: {fg_pred_mode_pct:.0f}% are color {fg_pred_mode}")
             
             # ================================================================
             # UPDATE LEARNING TRAJECTORY - Track key metrics epoch-by-epoch
