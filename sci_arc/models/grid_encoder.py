@@ -1,23 +1,31 @@
-"""
-Grid Encoder for SCI-ARC
+"""Grid Encoder for SCI-ARC
 
 Encodes ARC grids (2D integer arrays with 10 colors) into continuous embeddings
 suitable for processing by the structural and content encoders.
 
 Key Features:
 - Color embedding (10 colors → hidden_dim/2)
-- 2D sinusoidal positional encoding (unique position → hidden_dim/2)
+- Positional encoding options:
+  - Sinusoidal 2D (default, absolute positions)
+  - RoPE 2D (TRM-style, relative positions via Q/K rotation)
 - Combined and projected to hidden_dim
 
 This is analogous to token embedding in text models, adapted for 2D grids.
 """
 
 import math
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Import learned position embedding from positional_encoding module
+try:
+    from .rlan_modules.positional_encoding import LearnedPositionEmbedding2D
+    LEARNED_POS_AVAILABLE = True
+except ImportError:
+    LEARNED_POS_AVAILABLE = False
 
 
 class SinusoidalPositionalEncoding2D(nn.Module):
@@ -121,7 +129,8 @@ class GridEncoder(nn.Module):
         num_colors: int = 10,
         max_size: int = 30,
         dropout: float = 0.1,
-        use_embed_scale: bool = True  # TRM-style scaling
+        use_embed_scale: bool = True,  # TRM-style scaling
+        use_learned_pos: bool = False,  # Use learned instead of sinusoidal
     ):
         """
         Args:
@@ -130,6 +139,7 @@ class GridEncoder(nn.Module):
             max_size: Maximum grid dimension (ARC max is 30)
             dropout: Dropout probability
             use_embed_scale: Whether to use TRM-style embedding scaling
+            use_learned_pos: Use learned positional embeddings instead of sinusoidal
         """
         super().__init__()
         
@@ -137,6 +147,7 @@ class GridEncoder(nn.Module):
         self.num_colors = num_colors
         self.max_size = max_size
         self.use_embed_scale = use_embed_scale
+        self.use_learned_pos = use_learned_pos and LEARNED_POS_AVAILABLE
         
         # TRM-style embedding scaling
         self.embed_scale = math.sqrt(hidden_dim) if use_embed_scale else 1.0
@@ -146,8 +157,15 @@ class GridEncoder(nn.Module):
         # Use hidden_dim // 2 to leave room for positional encoding
         self.color_embed = nn.Embedding(num_colors, hidden_dim // 2)
         
-        # 2D sinusoidal positional encoding
-        self.pos_embed = SinusoidalPositionalEncoding2D(hidden_dim // 2, max_size)
+        # Positional encoding: sinusoidal (default) or learned
+        if self.use_learned_pos:
+            # Learned position embeddings (TRM uses this with RoPE)
+            self.pos_embed = LearnedPositionEmbedding2D(hidden_dim // 2, max_size, max_size)
+            self.pos_type = 'learned'
+        else:
+            # 2D sinusoidal positional encoding (original RLAN)
+            self.pos_embed = SinusoidalPositionalEncoding2D(hidden_dim // 2, max_size)
+            self.pos_type = 'sinusoidal'
         
         # Combine color and position
         self.proj = nn.Linear(hidden_dim, hidden_dim)

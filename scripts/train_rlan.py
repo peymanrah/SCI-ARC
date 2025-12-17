@@ -292,6 +292,7 @@ def create_model(config: dict) -> RLAN:
         use_msre=model_config.get('use_msre', True),
         use_lcr=model_config.get('use_lcr', True),
         use_sph=model_config.get('use_sph', True),
+        use_learned_pos=model_config.get('use_learned_pos', False),
     )
     
     model = RLAN(config=rlan_config)
@@ -561,9 +562,12 @@ def train_epoch(
         # Log progress
         if batch_idx % log_every == 0:
             current_lr = optimizer.param_groups[0]['lr']
+            loss_mode = losses.get('loss_mode', 'task')
+            task_loss_val = losses.get('task_loss', losses.get('focal_loss', torch.tensor(0.0)))
+            task_loss_val = task_loss_val.item() if hasattr(task_loss_val, 'item') else task_loss_val
             print(f"  Batch {batch_idx}/{len(dataloader)}: "
                   f"loss={losses['total_loss'].item():.4f}, "
-                  f"focal={losses['focal_loss'].item():.4f}, "
+                  f"{loss_mode}={task_loss_val:.4f}, "
                   f"temp={temperature:.3f}, lr={current_lr:.2e}")
     
     # Average losses
@@ -864,6 +868,47 @@ Config Overrides:
         print(f"  {name}: {count:,}")
     
     # ================================================================
+    # MODULE ABLATION STATUS
+    # ================================================================
+    model_cfg = config['model']
+    print(f"\n{'='*60}")
+    print("MODULE ABLATION STATUS")
+    print(f"{'='*60}")
+    
+    # Core modules
+    ctx_enc = model_cfg.get('use_context_encoder', True)
+    use_dsc = model_cfg.get('use_dsc', True)
+    use_msre = model_cfg.get('use_msre', True)
+    use_lcr = model_cfg.get('use_lcr', True)
+    use_sph = model_cfg.get('use_sph', True)
+    use_act = model_cfg.get('use_act', False)
+    use_learned = model_cfg.get('use_learned_pos', False)
+    
+    print(f"  ContextEncoder: {'ENABLED' if ctx_enc else 'DISABLED'} (task signal from demos)")
+    print(f"  DSC:            {'ENABLED' if use_dsc else 'DISABLED'} (dynamic spatial clues - CORE)")
+    print(f"  MSRE:           {'ENABLED' if use_msre else 'DISABLED'} (multi-scale relative encoding - CORE)")
+    print(f"  LCR:            {'ENABLED' if use_lcr else 'DISABLED'} (latent counting registers)")
+    print(f"  SPH:            {'ENABLED' if use_sph else 'DISABLED'} (symbolic predicate heads)")
+    print(f"  ACT:            {'ENABLED' if use_act else 'DISABLED'} (adaptive computation time)")
+    print(f"  Pos Encoding:   {'LEARNED' if use_learned else 'SINUSOIDAL'}")
+    
+    # Identify ablation mode
+    if use_dsc and use_msre and not use_lcr and not use_sph:
+        print(f"\n  >>> CORE ABLATION MODE: Testing DSC + MSRE novelty <<<")
+    elif all([ctx_enc, use_dsc, use_msre, use_lcr, use_sph]):
+        print(f"\n  >>> FULL MODEL MODE: All modules enabled <<<")
+    else:
+        disabled = []
+        if not ctx_enc: disabled.append('ContextEncoder')
+        if not use_dsc: disabled.append('DSC')
+        if not use_msre: disabled.append('MSRE')
+        if not use_lcr: disabled.append('LCR')
+        if not use_sph: disabled.append('SPH')
+        print(f"\n  >>> CUSTOM ABLATION: Disabled=[{', '.join(disabled)}] <<<")
+    
+    print(f"{'='*60}")
+
+    # ================================================================
     # RLAN TRAINING REGIME CONFIGURATION
     # ================================================================
     train_cfg = config['training']
@@ -879,14 +924,35 @@ Config Overrides:
     print(f"  Scheduler: {train_cfg.get('scheduler', 'cosine')}")
     print(f"  Warmup Epochs: {train_cfg.get('warmup_epochs', 10)}")
     print(f"  Max Epochs: {train_cfg['max_epochs']}")
-    print(f"\nLoss Weights (RLAN modules):")
-    print(f"  focal_gamma={train_cfg['focal_gamma']}, focal_alpha={train_cfg['focal_alpha']}")
-    print(f"  lambda_entropy={train_cfg['lambda_entropy']} (DSC attention sharpness)")
-    print(f"  lambda_sparsity={train_cfg['lambda_sparsity']} (DSC clue efficiency)")
-    print(f"  lambda_predicate={train_cfg['lambda_predicate']} (predicate diversity)")
-    print(f"  lambda_curriculum={train_cfg['lambda_curriculum']} (complexity penalty)")
-    print(f"  lambda_deep_supervision={train_cfg['lambda_deep_supervision']} (intermediate losses)")
-    print(f"  use_stablemax={train_cfg.get('use_stablemax', True)} (TRM numerical stability)")
+    
+    # Loss configuration
+    loss_mode = train_cfg.get('loss_mode', 'focal_stablemax')
+    print(f"\nLoss Configuration:")
+    print(f"  Loss Mode: {loss_mode.upper()}")
+    if 'focal' in loss_mode:
+        print(f"    gamma={train_cfg['focal_gamma']}, alpha={train_cfg['focal_alpha']}")
+    
+    # Only show active auxiliary losses
+    print(f"\nAuxiliary Loss Weights (only non-zero shown):")
+    active_aux = []
+    if train_cfg.get('lambda_entropy', 0) > 0:
+        print(f"  lambda_entropy={train_cfg['lambda_entropy']} (DSC attention sharpness)")
+        active_aux.append('entropy')
+    if train_cfg.get('lambda_sparsity', 0) > 0:
+        print(f"  lambda_sparsity={train_cfg['lambda_sparsity']} (clue efficiency)")
+        active_aux.append('sparsity')
+    if train_cfg.get('lambda_predicate', 0) > 0:
+        print(f"  lambda_predicate={train_cfg['lambda_predicate']} (predicate diversity)")
+        active_aux.append('predicate')
+    if train_cfg.get('lambda_curriculum', 0) > 0:
+        print(f"  lambda_curriculum={train_cfg['lambda_curriculum']} (complexity penalty)")
+        active_aux.append('curriculum')
+    if train_cfg.get('lambda_deep_supervision', 0) > 0:
+        print(f"  lambda_deep_supervision={train_cfg['lambda_deep_supervision']} (intermediate step losses)")
+        active_aux.append('deep_supervision')
+    if not active_aux:
+        print(f"  (none - pure task loss only)")
+    
     print(f"\nTemperature Schedule (Gumbel-Softmax):")
     print(f"  Start: {train_cfg['temperature_start']}, End: {train_cfg['temperature_end']}")
     print(f"{'='*60}")
@@ -1085,13 +1151,27 @@ Config Overrides:
             stage_names = {0: "100%", 1: "70%", 2: "90%", 3: "100%"}
             stage_str = f", Curriculum: {stage_names.get(current_curriculum_stage, '?')} tasks"
         
-        print(f"Epoch {epoch + 1} Summary:")
-        print(f"  Train Loss: {train_losses['total_loss']:.4f}")
-        print(f"  Focal Loss: {train_losses['focal_loss']:.4f}")
-        print(f"  Entropy Loss: {train_losses.get('entropy_loss', 0):.4f}")
-        print(f"  Sparsity Loss: {train_losses.get('sparsity_loss', 0):.4f}")
-        print(f"  Predicate Loss: {train_losses.get('predicate_loss', 0):.4f}")
-        print(f"  Curriculum Loss: {train_losses.get('curriculum_loss', 0):.4f}")
+        # Get loss mode for accurate logging
+        loss_mode = train_losses.get('loss_mode', 'focal')
+        task_loss_val = train_losses.get('task_loss', train_losses.get('focal_loss', 0))
+        deep_sup_loss = train_losses.get('deep_supervision_loss', 0)
+        
+        print(f"\nEpoch {epoch + 1} Summary:")
+        print(f"  Total Loss: {train_losses['total_loss']:.4f}")
+        print(f"  Task Loss ({loss_mode}): {task_loss_val:.4f}")
+        
+        # Only show auxiliary losses if they have non-zero weight in config
+        if train_cfg.get('lambda_entropy', 0) > 0:
+            print(f"  Entropy Loss: {train_losses.get('entropy_loss', 0):.4f} (weight={train_cfg['lambda_entropy']})")
+        if train_cfg.get('lambda_sparsity', 0) > 0:
+            print(f"  Sparsity Loss: {train_losses.get('sparsity_loss', 0):.4f} (weight={train_cfg['lambda_sparsity']})")
+        if train_cfg.get('lambda_predicate', 0) > 0:
+            print(f"  Predicate Loss: {train_losses.get('predicate_loss', 0):.4f} (weight={train_cfg['lambda_predicate']})")
+        if train_cfg.get('lambda_curriculum', 0) > 0:
+            print(f"  Curriculum Loss: {train_losses.get('curriculum_loss', 0):.4f} (weight={train_cfg['lambda_curriculum']})")
+        if train_cfg.get('lambda_deep_supervision', 0) > 0:
+            print(f"  Deep Supervision: {deep_sup_loss:.4f} (weight={train_cfg['lambda_deep_supervision']})")
+        
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
         
         # ================================================================

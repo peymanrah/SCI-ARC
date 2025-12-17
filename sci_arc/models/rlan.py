@@ -99,6 +99,9 @@ class RLANConfig:
     use_msre: bool = True              # Multi-Scale Relative Encoding (109K)
     use_lcr: bool = True               # Latent Counting Registers (403K)
     use_sph: bool = True               # Symbolic Predicate Heads (232K)
+    
+    # Positional encoding option
+    use_learned_pos: bool = False       # Use learned pos embed vs sinusoidal (default)
 
 
 class RLAN(nn.Module):
@@ -181,6 +184,7 @@ class RLAN(nn.Module):
         self.use_msre = config.use_msre if config else True
         self.use_lcr = config.use_lcr if config else True
         self.use_sph = config.use_sph if config else True
+        self.use_learned_pos = config.use_learned_pos if config else False
         
         # Grid Encoder (reuse existing implementation) - ALWAYS REQUIRED
         self.encoder = GridEncoder(
@@ -188,6 +192,7 @@ class RLAN(nn.Module):
             num_colors=num_colors,
             max_size=max_grid_size,
             dropout=dropout,
+            use_learned_pos=self.use_learned_pos,  # Learned vs sinusoidal positional encoding
         )
         
         # Feature projection to channel-first format - ALWAYS REQUIRED
@@ -257,6 +262,7 @@ class RLAN(nn.Module):
             self.sph = None
         
         # Recursive Solver - ALWAYS REQUIRED (core output generation)
+        # Pass ablation flags so solver can skip unused components
         self.solver = RecursiveSolver(
             hidden_dim=hidden_dim,
             num_classes=num_classes,
@@ -264,6 +270,9 @@ class RLAN(nn.Module):
             num_predicates=num_predicates,
             num_colors=num_colors,
             dropout=dropout,
+            use_act=self.use_act,  # Enable Adaptive Computation Time
+            use_lcr=self.use_lcr,  # Skip count injection if LCR disabled
+            use_sph=self.use_sph,  # Skip predicate gating if SPH disabled
         )
         
         # Print module configuration
@@ -275,6 +284,7 @@ class RLAN(nn.Module):
             ('MSRE', self.use_msre),
             ('LCR', self.use_lcr),
             ('SPH', self.use_sph),
+            ('ACT', self.use_act),
         ]:
             (enabled if flag else disabled).append(name)
         
@@ -381,8 +391,9 @@ class RLAN(nn.Module):
         if self.use_lcr and self.lcr is not None:
             count_embedding = self.lcr(input_grid, features)  # (B, num_colors, D)
         else:
-            # Default: zeros
-            count_embedding = torch.zeros(
+            # Default: empty tensor (RecursiveSolver will skip count injection when use_lcr=False)
+            # Creating minimal tensor for API compatibility
+            count_embedding = torch.empty(
                 B, self.num_colors, self.hidden_dim, device=features.device
             )
         
@@ -390,8 +401,9 @@ class RLAN(nn.Module):
         if self.use_sph and self.sph is not None:
             predicates = self.sph(features, temperature=temperature)  # (B, P)
         else:
-            # Default: uniform activations
-            predicates = torch.ones(B, self.num_predicates, device=features.device) * 0.5
+            # Default: empty tensor (RecursiveSolver will skip predicate gating when use_sph=False)
+            # Creating minimal tensor for API compatibility
+            predicates = torch.empty(B, self.num_predicates, device=features.device)
         
         # 7. Recursive Solver - generate output
         if return_all_steps or return_intermediates:

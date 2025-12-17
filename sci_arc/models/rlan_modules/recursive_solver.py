@@ -210,6 +210,11 @@ class RecursiveSolver(nn.Module):
     conditioned on clue features, count embeddings, and predicates.
     
     Now supports Adaptive Computation Time (ACT) for variable steps.
+    
+    ABLATION SUPPORT:
+    - When use_lcr=False, count injection is skipped (not just zero input)
+    - When use_sph=False, predicate gating is skipped
+    - This avoids wasted computation and gradient noise from unused modules
     """
     
     def __init__(
@@ -221,6 +226,8 @@ class RecursiveSolver(nn.Module):
         num_colors: int = 10,
         dropout: float = 0.1,
         use_act: bool = False,  # Enable Adaptive Computation Time
+        use_lcr: bool = True,   # Enable count injection (ablation flag)
+        use_sph: bool = True,   # Enable predicate gating (ablation flag)
     ):
         """
         Args:
@@ -231,6 +238,8 @@ class RecursiveSolver(nn.Module):
             num_colors: Number of input colors (for count embedding)
             dropout: Dropout probability
             use_act: Whether to use Adaptive Computation Time
+            use_lcr: Whether to use count injection (skip if False)
+            use_sph: Whether to use predicate gating (skip if False)
         """
         super().__init__()
         
@@ -238,6 +247,8 @@ class RecursiveSolver(nn.Module):
         self.num_classes = num_classes
         self.num_steps = num_steps
         self.use_act = use_act
+        self.use_lcr = use_lcr
+        self.use_sph = use_sph
         
         # Clue feature aggregation
         self.clue_aggregator = nn.Sequential(
@@ -246,15 +257,21 @@ class RecursiveSolver(nn.Module):
             nn.GroupNorm(8, hidden_dim),
         )
         
-        # Count embedding projection
-        self.count_proj = nn.Sequential(
-            nn.Linear(hidden_dim * num_colors, hidden_dim),
-            nn.GELU(),
-            nn.LayerNorm(hidden_dim),
-        )
+        # Count embedding projection (only if LCR enabled)
+        if use_lcr:
+            self.count_proj = nn.Sequential(
+                nn.Linear(hidden_dim * num_colors, hidden_dim),
+                nn.GELU(),
+                nn.LayerNorm(hidden_dim),
+            )
+        else:
+            self.count_proj = None
         
-        # Predicate gating
-        self.predicate_gate = PredicateGating(hidden_dim, num_predicates)
+        # Predicate gating (only if SPH enabled)
+        if use_sph:
+            self.predicate_gate = PredicateGating(hidden_dim, num_predicates)
+        else:
+            self.predicate_gate = None
         
         # ConvGRU for iterative refinement (with SwiGLU)
         self.gru = ConvGRUCell(hidden_dim * 2, hidden_dim, use_swiglu=True)
@@ -330,6 +347,10 @@ class RecursiveSolver(nn.Module):
         Returns:
             enhanced: Shape (B, D, H, W)
         """
+        # Skip if LCR is disabled (avoids wasted computation)
+        if self.count_proj is None:
+            return features
+            
         B, D, H, W = features.shape
         
         # Flatten count embeddings
@@ -341,6 +362,27 @@ class RecursiveSolver(nn.Module):
         enhanced = features + count_spatial
         
         return enhanced
+    
+    def _apply_predicate_gating(
+        self,
+        features: torch.Tensor,
+        predicates: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply predicate-based gating if SPH is enabled.
+        
+        Args:
+            features: Shape (B, D, H, W)
+            predicates: Shape (B, P)
+            
+        Returns:
+            gated: Shape (B, D, H, W)
+        """
+        # Skip if SPH is disabled (avoids wasted computation)
+        if self.predicate_gate is None:
+            return features
+            
+        return self.predicate_gate(features, predicates)
     
     def forward(
         self,
@@ -356,8 +398,8 @@ class RecursiveSolver(nn.Module):
         
         Args:
             clue_features: Shape (B, K, D, H, W) from DSC + MSRE
-            count_embedding: Shape (B, num_colors, D) from LCR
-            predicates: Shape (B, P) from SPH
+            count_embedding: Shape (B, num_colors, D) from LCR (ignored if use_lcr=False)
+            predicates: Shape (B, P) from SPH (ignored if use_sph=False)
             input_grid: Shape (B, H, W) original input grid
             attention_maps: Optional (B, K, H, W) clue attention maps
             return_all_steps: If True, return predictions at all steps
@@ -374,11 +416,11 @@ class RecursiveSolver(nn.Module):
         # Aggregate clue features
         aggregated = self._aggregate_clues(clue_features, attention_maps)  # (B, D, H, W)
         
-        # Inject count information
+        # Inject count information (skipped if use_lcr=False)
         aggregated = self._inject_counts(aggregated, count_embedding)
         
-        # Apply predicate gating
-        aggregated = self.predicate_gate(aggregated, predicates)
+        # Apply predicate gating (skipped if use_sph=False)
+        aggregated = self._apply_predicate_gating(aggregated, predicates)
         
         # Embed input grid for residual connections
         input_clamped = input_grid.clamp(0, 10).long()

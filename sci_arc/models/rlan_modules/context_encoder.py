@@ -237,18 +237,23 @@ class ContextInjector(nn.Module):
     
     FiLM: Feature-wise Linear Modulation
     y = γ(context) * x + β(context)
+    
+    Scale uses 2*Sigmoid to allow both attenuation AND amplification:
+    - Scale in [0, 2]: values < 1 attenuate, values > 1 amplify
+    - This is more expressive than pure Sigmoid [0, 1]
     """
     
     def __init__(
         self,
         hidden_dim: int,
+        scale_range: float = 2.0,  # Maximum scale factor (default allows [0, 2])
     ):
         super().__init__()
         
-        self.scale_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Sigmoid(),  # Scale between 0-1
-        )
+        self.scale_range = scale_range
+        
+        # Scale projection: output in [0, scale_range] to allow amplification
+        self.scale_proj = nn.Linear(hidden_dim, hidden_dim)
         
         self.shift_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -262,11 +267,17 @@ class ContextInjector(nn.Module):
         """
         Modulate features based on context.
         
+        Scale is in [0, scale_range] (default [0, 2]):
+        - scale < 1: attenuate features
+        - scale = 1: identity (no change)
+        - scale > 1: amplify features
+        
         Returns:
             modulated: (B, D, H, W)
         """
         # Compute modulation parameters
-        scale = self.scale_proj(context)  # (B, D)
+        # Scale uses sigmoid * scale_range for [0, scale_range] output
+        scale = torch.sigmoid(self.scale_proj(context)) * self.scale_range  # (B, D)
         shift = self.shift_proj(context)  # (B, D)
         
         # Reshape for broadcasting: (B, D, 1, 1)

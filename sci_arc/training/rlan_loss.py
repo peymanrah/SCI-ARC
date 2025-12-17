@@ -648,8 +648,8 @@ class RLANLoss(nn.Module):
                 - curriculum_loss: Complexity penalty
                 - deep_supervision_loss: Intermediate step losses (if all_logits provided)
         """
-        # Primary task loss
-        focal_loss = self.focal_loss(logits, targets)
+        # Primary task loss (name reflects actual loss function used)
+        task_loss = self.task_loss(logits, targets)
         
         # Regularization losses
         entropy_loss = self.entropy_reg(attention_maps)
@@ -661,9 +661,9 @@ class RLANLoss(nn.Module):
         if all_logits is not None and len(all_logits) > 1:
             ds_losses = []
             num_steps = len(all_logits)
-            for t, step_logits in enumerate(all_logits[:-1]):  # Exclude final (already in focal_loss)
+            for t, step_logits in enumerate(all_logits[:-1]):  # Exclude final (already in task_loss)
                 weight = 0.5 ** (num_steps - 1 - t)  # Later steps weighted more
-                step_loss = self.focal_loss(step_logits, targets)
+                step_loss = self.task_loss(step_logits, targets)
                 ds_losses.append(weight * step_loss)
             deep_supervision_loss = sum(ds_losses) / len(ds_losses) if ds_losses else torch.tensor(0.0)
         else:
@@ -671,7 +671,7 @@ class RLANLoss(nn.Module):
         
         # Combine losses
         total_loss = (
-            focal_loss
+            task_loss
             + self.lambda_entropy * entropy_loss
             + self.lambda_sparsity * sparsity_loss
             + self.lambda_predicate * predicate_loss
@@ -681,12 +681,14 @@ class RLANLoss(nn.Module):
         
         return {
             "total_loss": total_loss,
-            "focal_loss": focal_loss,
+            "task_loss": task_loss,  # Accurate name (stablemax, focal_stablemax, or focal)
+            "focal_loss": task_loss,  # Backward compatibility alias
             "entropy_loss": entropy_loss,
             "sparsity_loss": sparsity_loss,
             "predicate_loss": predicate_loss,
             "curriculum_loss": curriculum_loss,
             "deep_supervision_loss": deep_supervision_loss,
+            "loss_mode": self.loss_mode,  # Include mode for logging
         }
 
 

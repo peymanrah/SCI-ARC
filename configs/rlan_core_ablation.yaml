@@ -2,22 +2,22 @@
 # ==================================
 # Tests the CORE NOVELTY of RLAN: DSC + MSRE (spatial anchoring + relative coords)
 # 
-# DISABLED MODULES:
-#   - ContextEncoder: 4.2M params → 0 (uses raw features only)
-#   - LCR: 403K params → 0 (no soft counting)
-#   - SPH: 232K params → 0 (no symbolic predicates)
-#
 # ENABLED MODULES:
+#   - ContextEncoder: 4.2M params (REQUIRED - provides task signal)
 #   - DSC: 266K params (CORE - find spatial anchors)
 #   - MSRE: 109K params (CORE - relative coordinate encoding)
 #   - Encoder + Solver: Core pipeline
+#
+# DISABLED MODULES:
+#   - LCR: 403K params → 0 (no soft counting)
+#   - SPH: 232K params → 0 (no symbolic predicates)
 #
 # This tests the hypothesis:
 #   "Can RLAN solve tasks by reasoning in relative coordinates 
 #    anchored to dynamically discovered features?"
 #
 # If this config works better than RLAN-Full, it proves the core novelty
-# and suggests the other modules are hurting rather than helping.
+# and suggests LCR/SPH are not essential.
 
 model:
   type: "rlan"
@@ -43,16 +43,26 @@ model:
   # =============================================================
   # ABLATION: Core Novelty Only (DSC + MSRE)
   # =============================================================
-  use_context_encoder: false  # DISABLED - test if bottleneck is hurting
+  # NOTE: ContextEncoder MUST be enabled - it provides task signal!
+  # Without it, the model has NO information about what transformation
+  # to learn, causing inevitable background collapse.
+  # 
+  # The bottleneck concern (4.2M params -> 256-dim) is real but:
+  # 1. The context vector conditions DSC's clue discovery
+  # 2. Without context, DSC finds random clues
+  # 3. Even a compressed signal is better than none
+  # =============================================================
+  use_context_encoder: true   # ENABLED - REQUIRED for task signal
   use_dsc: true               # ENABLED - CORE NOVELTY
   use_msre: true              # ENABLED - CORE NOVELTY
   use_lcr: false              # DISABLED - auxiliary
   use_sph: false              # DISABLED - auxiliary
+  use_learned_pos: false      # Use sinusoidal (default) vs learned absolute positions
 
 training:
   max_epochs: 500
   
-  batch_size: 85  # Can use more memory without ContextEncoder
+  batch_size: 64  # Reduced since ContextEncoder is now enabled
   grad_accumulation_steps: 4
   
   learning_rate: 1.0e-4
