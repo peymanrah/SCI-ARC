@@ -69,7 +69,12 @@ training:
   weight_decay: 0.1
   gradient_clip: 1.0
   
-  temperature_start: 5.0
+  # Temperature schedule for Gumbel-Softmax (DSC attention sharpness)
+  # Lower start = sharper attention earlier = faster DSC learning
+  # At temp=5.0, attention is 99% uniform (too soft to learn)
+  # At temp=1.0, attention starts becoming meaningful
+  # Changed from 5.0 to 2.0 so DSC learns faster
+  temperature_start: 2.0   # WAS 5.0 - too soft for first 200 epochs!
   temperature_end: 0.1
   
   # TRM-style loss (pure stablemax, no focal)

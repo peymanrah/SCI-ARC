@@ -400,6 +400,43 @@ def warmup_lr(optimizer, step: int, warmup_steps: int, base_lr: float):
             param_group['lr'] = base_lr * lr_scale
 
 
+def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
+    """Compute gradient norms for key modules to verify learning signal."""
+    grad_norms = {}
+    
+    # DSC gradients
+    if hasattr(model, 'dsc') and model.dsc is not None:
+        dsc_grad = 0.0
+        dsc_count = 0
+        for name, param in model.dsc.named_parameters():
+            if param.grad is not None:
+                dsc_grad += param.grad.norm().item() ** 2
+                dsc_count += 1
+        grad_norms['dsc'] = (dsc_grad ** 0.5) if dsc_count > 0 else 0.0
+    
+    # Encoder gradients
+    if hasattr(model, 'encoder') and model.encoder is not None:
+        enc_grad = 0.0
+        enc_count = 0
+        for name, param in model.encoder.named_parameters():
+            if param.grad is not None:
+                enc_grad += param.grad.norm().item() ** 2
+                enc_count += 1
+        grad_norms['encoder'] = (enc_grad ** 0.5) if enc_count > 0 else 0.0
+    
+    # Solver gradients
+    if hasattr(model, 'solver') and model.solver is not None:
+        solver_grad = 0.0
+        solver_count = 0
+        for name, param in model.solver.named_parameters():
+            if param.grad is not None:
+                solver_grad += param.grad.norm().item() ** 2
+                solver_count += 1
+        grad_norms['solver'] = (solver_grad ** 0.5) if solver_count > 0 else 0.0
+    
+    return grad_norms
+
+
 def train_epoch(
     model: RLAN,
     dataloader: DataLoader,
@@ -426,6 +463,7 @@ def train_epoch(
         'sparsity_loss': 0.0,
         'predicate_loss': 0.0,
         'curriculum_loss': 0.0,
+        'deep_supervision_loss': 0.0,  # FIX: Was missing, caused zero reporting
     }
     num_batches = 0
     total_samples = 0  # Track total samples processed
@@ -436,6 +474,15 @@ def train_epoch(
         'color_perm_count': 0,       # Samples with color permutation
         'translational_count': 0,    # Samples with translational offset
         'unique_offsets': 0,         # Running unique offset count (approximate)
+    }
+    
+    # Diagnostic statistics for debugging training dynamics
+    epoch_diagnostics = {
+        'dsc_grad_norm_sum': 0.0,    # Gradient norm flowing to DSC
+        'encoder_grad_norm_sum': 0.0, # Gradient norm to encoder
+        'per_clue_entropy': [],       # Per-clue entropy breakdown (K values)
+        'centroid_spread': 0.0,       # How spread out are clue centroids
+        'all_logits_count': 0,        # Verify deep supervision is receiving steps
     }
     
     temperature = get_temperature(epoch, config)
@@ -510,6 +557,12 @@ def train_epoch(
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
                 
+                # Capture gradient norms before they're cleared (first accumulation step only)
+                if batch_idx < grad_accumulation_steps:
+                    grad_norms = compute_module_grad_norms(model)
+                    epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
+                    epoch_diagnostics['encoder_grad_norm_sum'] += grad_norms.get('encoder', 0.0)
+                
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -545,6 +598,12 @@ def train_epoch(
                 if gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
                 
+                # Capture gradient norms before they're cleared (first accumulation step only)
+                if batch_idx < grad_accumulation_steps:
+                    grad_norms = compute_module_grad_norms(model)
+                    epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
+                    epoch_diagnostics['encoder_grad_norm_sum'] += grad_norms.get('encoder', 0.0)
+                
                 optimizer.step()
                 optimizer.zero_grad()
                 
@@ -558,6 +617,31 @@ def train_epoch(
                 total_losses[key] += losses[key].item()
         num_batches += 1
         global_step += 1
+        
+        # Collect diagnostics (first batch of each epoch only to avoid overhead)
+        if batch_idx == 0:
+            # Track all_logits count for deep supervision verification
+            all_logits = outputs.get('all_logits')
+            if all_logits is not None:
+                epoch_diagnostics['all_logits_count'] = len(all_logits)
+            
+            # Per-clue entropy breakdown
+            if 'attention_maps' in outputs:
+                attn = outputs['attention_maps']  # (B, K, H, W)
+                B, K, H, W = attn.shape
+                attn_flat = attn.view(B, K, -1)
+                attn_clamp = attn_flat.clamp(min=1e-10)
+                per_clue_entropy = -(attn_clamp * attn_clamp.log()).sum(dim=-1).mean(dim=0)  # (K,)
+                epoch_diagnostics['per_clue_entropy'] = per_clue_entropy.tolist()
+            
+            # Centroid spread (how diverse are clue locations)
+            if 'centroids' in outputs:
+                centroids = outputs['centroids']  # (B, K, 2)
+                # Compute mean distance between clue centroids
+                if centroids.shape[1] > 1:
+                    centroid_mean = centroids.mean(dim=1, keepdim=True)  # (B, 1, 2)
+                    spread = ((centroids - centroid_mean) ** 2).sum(dim=-1).sqrt().mean()
+                    epoch_diagnostics['centroid_spread'] = spread.item()
         
         # Log progress
         if batch_idx % log_every == 0:
@@ -580,6 +664,9 @@ def train_epoch(
     
     # Add augmentation diversity stats (CRITICAL for debugging)
     total_losses['aug_stats'] = epoch_aug_stats
+    
+    # Add training diagnostics (CRITICAL for debugging training dynamics)
+    total_losses['diagnostics'] = epoch_diagnostics
     
     return total_losses, global_step
 
@@ -1220,6 +1307,44 @@ Config Overrides:
             aug_enabled_count = dihedral_total  # At least dihedral is applied
             aug_quality = "GOOD" if (color_pct > 90 and trans_pct > 80) else "OK" if aug_enabled_count > 0 else "NONE"
             print(f"  Aug Quality: {aug_quality}")
+        
+        # ================================================================
+        # TRAINING DIAGNOSTICS (CRITICAL for debugging learning dynamics)
+        # ================================================================
+        diagnostics = train_losses.get('diagnostics', {})
+        if diagnostics:
+            # Deep supervision verification
+            all_logits_count = diagnostics.get('all_logits_count', 0)
+            if all_logits_count > 0:
+                print(f"  Solver Steps: {all_logits_count} (deep supervision active)")
+            else:
+                print(f"  Solver Steps: [!] NO INTERMEDIATE LOGITS (deep supervision disabled!)")
+            
+            # Gradient flow diagnostics
+            dsc_grad = diagnostics.get('dsc_grad_norm_sum', 0)
+            enc_grad = diagnostics.get('encoder_grad_norm_sum', 0)
+            if dsc_grad > 0 or enc_grad > 0:
+                print(f"  Grad Norms: DSC={dsc_grad:.4f}, Encoder={enc_grad:.4f}")
+                if dsc_grad < 0.001:
+                    print(f"    [!] DSC gradients near zero - not learning!")
+            
+            # Per-clue entropy breakdown
+            per_clue_entropy = diagnostics.get('per_clue_entropy', [])
+            if per_clue_entropy:
+                entropy_str = ', '.join(f"{e:.2f}" for e in per_clue_entropy)
+                print(f"  Per-Clue Entropy: [{entropy_str}]")
+                # Check if all clues have similar entropy (bad - not differentiating)
+                if len(per_clue_entropy) > 1:
+                    entropy_std = (sum((e - sum(per_clue_entropy)/len(per_clue_entropy))**2 for e in per_clue_entropy) / len(per_clue_entropy)) ** 0.5
+                    if entropy_std < 0.1:
+                        print(f"    [!] Clues have uniform entropy - not differentiating!")
+            
+            # Centroid spread
+            centroid_spread = diagnostics.get('centroid_spread', 0)
+            if centroid_spread > 0:
+                print(f"  Centroid Spread: {centroid_spread:.2f} (higher=more diverse)")
+                if centroid_spread < 1.0:
+                    print(f"    [!] Clues clustered together - should spread out")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:
