@@ -217,11 +217,19 @@ The trace $\text{tr}(\Sigma_t)$ indicates:
 - **Small trace**: Point-like clue (single pixel)
 - **Large trace**: Shape-like clue (L-shape, region)
 
-### 4.4 Stop Token
+### 4.4 Stop Token (Entropy-Aware)
 
-The DSC also outputs a **stop probability**:
+The DSC outputs a **stop probability** that depends on both content AND attention quality:
 
-$$s_t = \sigma(\text{MLP}(H_t))$$
+$$s_t = \sigma\left(\text{MLP}\left([H_t \| H_{norm}(M_t)]\right)\right)$$
+
+Where:
+- $H_t \in \mathbb{R}^D$ is the attended feature vector (content)
+- $H_{norm}(M_t) = \frac{H(M_t)}{\log(HW)} \in [0, 1]$ is the normalized attention entropy (quality)
+
+**Why include entropy?** This creates a crucial coupling between attention quality and stopping:
+- **Sharp attention (low entropy)** → confident clue → stop predictor learns "can stop now"
+- **Diffuse attention (high entropy)** → uncertain clue → stop predictor learns "need more clues"
 
 When $s_t > \theta_{stop}$ (threshold, typically 0.5), the network decides it has found enough clues.
 
@@ -546,7 +554,64 @@ $$\tau(epoch) = \tau_{max} \cdot e^{-\alpha \cdot epoch} + \tau_{min}$$
 
 Starting with $\tau_{max} = 5.0$ (soft attention) and annealing to $\tau_{min} = 0.1$ (hard attention).
 
-#### 9.2.3 Sparsity Loss (Distinct Clues)
+#### 9.2.3 Clue Usage Regularization (Three-Component Penalty)
+
+The clue regularization system is critical for learning efficient, task-adaptive reasoning. We introduce a **three-component penalty** that couples attention quality directly to clue usage:
+
+$$\mathcal{L}_{clue} = \mathcal{L}_{min} + \mathcal{L}_{ponder} + \mathcal{L}_{entropy\_ponder}$$
+
+**Component 1: Minimum Clue Penalty**
+
+Prevents collapse to using zero clues:
+
+$$\mathcal{L}_{min} = \text{ReLU}(N_{min} - \mathbb{E}[N_{clues}])$$
+
+Where $\mathbb{E}[N_{clues}] = \sum_k (1 - \sigma(s_k))$ is the soft expected clue count based on stop probabilities $s_k$.
+
+**Component 2: Base Pondering Cost (ACT-style)**
+
+Small cost per clue used, encouraging efficiency:
+
+$$\mathcal{L}_{ponder} = \lambda_{ponder} \cdot \mathbb{E}[N_{clues}]$$
+
+This creates gradient pressure to stop when the task loss is satisfied—if the model can solve with 2 clues, why pay for 6?
+
+**Component 3: Entropy-Weighted Pondering Cost**
+
+**Key Innovation**: Couples attention quality directly to stopping decisions:
+
+$$\mathcal{L}_{entropy\_ponder} = \lambda_{ent} \cdot \sum_k \left( H_{norm}(M_k) \cdot (1 - \sigma(s_k)) \right)$$
+
+Where $H_{norm}(M_k) = \frac{H(M_k)}{\log(HW)}$ is the normalized entropy of attention map $M_k$.
+
+**Intuition**:
+- **Sharp attention (low entropy)** → small $H_{norm}$ → cheap to use this clue
+- **Diffuse attention (high entropy)** → large $H_{norm}$ → expensive bad clue
+- Weighted by usage probability $(1 - \sigma(s_k))$ so unused clues don't contribute
+
+**Learning Dynamics**:
+
+| Training Phase | Entropy State | Clue Behavior | Dominant Signal |
+|----------------|---------------|---------------|-----------------|
+| Early (1-30) | High (~4.0) | Use all clues | Entropy loss → sharpen attention |
+| Mid (30-100) | Medium (~2.5) | 4-5 clues | Pondering cost → learn when to stop |
+| Late (100+) | Low (~1.5) | 2-3 clues | Task-optimal efficiency |
+
+#### 9.2.4 Entropy-Aware Stop Predictor
+
+The stop predictor in DSC receives both content AND attention quality:
+
+$$s_k = \sigma\left(\text{MLP}\left([h_k \| H_{norm}(M_k)]\right)\right)$$
+
+Where $h_k$ is the attended feature vector and $H_{norm}(M_k)$ is the normalized attention entropy.
+
+**Why this matters**: Creates a direct gradient path from attention quality to stopping decision:
+- Sharp attention → low entropy input → stop predictor learns "confident, can stop"
+- Diffuse attention → high entropy input → stop predictor learns "uncertain, need more clues"
+
+This coupling ensures that clue count naturally adapts to both task complexity AND attention quality.
+
+#### 9.2.5 Sparsity Loss (Distinct Clues)
 
 Encourages clues to be spatially distinct:
 
@@ -554,7 +619,7 @@ $$\mathcal{L}_{sparsity} = \sum_{t} \|M_t\|_1 + \sum_{t \neq t'} \max(0, \text{C
 
 The second term penalizes clues that overlap too much.
 
-#### 9.2.4 Predicate Diversity Loss
+#### 9.2.6 Predicate Diversity Loss
 
 Prevents predicates from collapsing to trivial values:
 
@@ -564,7 +629,7 @@ Where $H(p_k) = -p_k \log(p_k) - (1-p_k) \log(1-p_k)$.
 
 **Effect**: Pushes predicates away from 0.5 (uninformative) toward decisive 0 or 1.
 
-#### 9.2.5 Curriculum Loss (Occam's Razor)
+#### 9.2.7 Curriculum Loss (Occam's Razor)
 
 Penalizes using more clues than necessary:
 
