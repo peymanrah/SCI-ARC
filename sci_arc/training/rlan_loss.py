@@ -387,16 +387,21 @@ class SparsityRegularization(nn.Module):
     New behavior:
     - Penalizes stopping too early (min_clues term)
     - Allows natural stopping after min_clues are used
-    - Encourages using at least 2-3 clues for meaningful spatial reasoning
+    - Model learns to grow clues when needed for harder tasks
+    
+    ARC-AGI Analysis:
+    - Some tasks need only 1 clue: single object, fill region, extend pattern
+    - Some tasks need 2+ clues: relative positioning, copy/paste, symmetry
+    - min_clues=1 allows simple tasks while attention entropy handles complexity
     
     Formula: L = max(0, min_clues - expected_clues_used)
     where expected_clues_used = Σ_k (1 - stop_prob_k)
     """
     
-    def __init__(self, min_clues: float = 2.0, epsilon: float = 1e-6):
+    def __init__(self, min_clues: float = 1.0, epsilon: float = 1e-6):
         """
         Args:
-            min_clues: Minimum expected number of clues to use (soft target)
+            min_clues: Minimum expected number of clues to use (soft target, default 1)
             epsilon: Small constant for numerical stability
         """
         super().__init__()
@@ -570,7 +575,7 @@ class RLANLoss(nn.Module):
         lambda_curriculum: float = 0.1,
         lambda_deep_supervision: float = 0.5,
         lambda_act: float = 0.1,  # Weight for ACT pondering cost
-        min_clues: float = 2.0,  # Minimum clues to use (for sparsity/usage penalty)
+        min_clues: float = 1.0,  # Minimum clues to use (1 for simple, grows for complex)
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'focal_stablemax', or 'focal'

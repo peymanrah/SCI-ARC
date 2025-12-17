@@ -143,8 +143,8 @@ training:
   # Without this, the model tends to stop immediately (DSC Clues Used → 0.17)
   # =================================================================
   lambda_entropy: 0.5      # Strong pressure - force sharp attention on sparse foreground
-  lambda_sparsity: 0.3     # ENABLED - minimum clue usage penalty (use at least 2 clues)
-  min_clues: 2.0           # Soft minimum: encourage using at least 2 clues
+  lambda_sparsity: 0.3     # ENABLED - minimum clue usage penalty
+  min_clues: 1.0           # Minimum 1 clue (some ARC tasks need only 1, model learns to grow)
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.5  # Stronger intermediate supervision
