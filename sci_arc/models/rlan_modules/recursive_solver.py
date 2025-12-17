@@ -346,15 +346,22 @@ class RecursiveSolver(nn.Module):
                 final_layer = module
         
         if final_layer is not None and final_layer.bias is not None:
-            # Initialize bias:
-            # - Class 0 (background): slight negative bias
-            # - Classes 1-9 (foreground): slight positive bias
-            # This creates initial predictions closer to uniform rather than all-background
+            # Initialize bias for balanced starting point
+            # 
+            # MATH: For softmax with C=10 classes, to get P(bg) = 50%:
+            #   P(bg) = exp(bg_bias) / (exp(bg_bias) + 9*exp(fg_bias))
+            #   0.5 = exp(bg_bias) / (exp(bg_bias) + 9*exp(0))
+            #   0.5 * (exp(bg_bias) + 9) = exp(bg_bias)
+            #   4.5 = 0.5 * exp(bg_bias)
+            #   bg_bias = ln(9) ≈ 2.2
+            #
+            # This creates 50-50 start, letting the weighted loss (10x for FG)
+            # guide learning without initial bias toward either direction.
             with torch.no_grad():
-                # Background bias: -0.5 → P(bg) ≈ 38% with uniform other logits
-                # Foreground bias: +0.5 → P(fg) ≈ 62% total for all fg classes
-                final_layer.bias[0] = -0.5  # Background slightly discouraged
-                final_layer.bias[1:] = 0.5 / (self.num_classes - 1)  # Foreground slightly encouraged
+                import math
+                # ln(9) gives P(bg)=50%, P(all_fg)=50% when fg_bias=0
+                final_layer.bias[0] = math.log(self.num_classes - 1)  # ≈2.2 for C=10
+                final_layer.bias[1:] = 0.0  # Uniform fg classes
     
     def _aggregate_clues(
         self,
