@@ -10,10 +10,11 @@
 # - If complex training is required, the architecture may be flawed
 # - TRM achieves 50% with just cross-entropy loss
 #
-# HYPOTHESIS:
-# The training instability seen in epochs 175-180 is caused by
-# conflicting gradient signals from multiple auxiliary losses,
-# NOT by architectural issues.
+# KEY INSIGHT (from Epoch 26-30 collapse):
+# Pure stablemax causes BG mode collapse because ~93% of pixels
+# are background. The model finds a local minimum predicting all-BG.
+# We use weighted_stablemax for inverse frequency class balancing,
+# which is still "minimal" (just task loss, no auxiliary losses).
 #
 # ===========================
 
@@ -61,11 +62,23 @@ training:
   temperature_end: 0.1
   
   # ============================================================
-  # MINIMAL LOSS: Just task loss, like TRM
+  # MINIMAL LOSS: Just task loss, but with class balancing
   # ============================================================
-  loss_mode: 'stablemax'        # Pure stablemax like TRM
+  # Pure stablemax causes BG mode collapse (100% BG predictions)
+  # because ~93% of pixels are BG - model finds local minimum
+  # by predicting all-BG.
+  #
+  # weighted_stablemax uses inverse frequency weighting to give
+  # rare FG classes stronger gradients. This is still "minimal"
+  # because it's just task loss - no auxiliary losses.
+  # ============================================================
+  loss_mode: 'weighted_stablemax'  # Inverse frequency weighting
   
-  # Focal loss params (not used with stablemax)
+  # BG/FG weight caps (prevents extreme weights)
+  bg_weight_cap: 2.0              # Max weight for background
+  fg_weight_cap: 5.0              # Max weight for foreground (2.5x BG emphasis)
+  
+  # Focal loss params (not used with weighted_stablemax)
   focal_gamma: 2.0
   focal_alpha: 0.75
   
