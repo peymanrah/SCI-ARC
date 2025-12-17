@@ -379,44 +379,53 @@ class EntropyRegularization(nn.Module):
 
 class SparsityRegularization(nn.Module):
     """
-    Sparsity regularization for clue usage.
+    Clue usage regularization (renamed from "sparsity" which was misleading).
     
-    Encourages the model to use fewer clues when possible.
-    Rewards high stop probabilities (stopping early).
+    CRITICAL FIX: The old implementation encouraged STOPPING early, which
+    caused the model to not use clues at all (DSC Clues Used → 0.17).
     
-    Formula: L_sparsity = -Σ_k log(p_stop_k + ε)
+    New behavior:
+    - Penalizes stopping too early (min_clues term)
+    - Allows natural stopping after min_clues are used
+    - Encourages using at least 2-3 clues for meaningful spatial reasoning
+    
+    Formula: L = max(0, min_clues - expected_clues_used)
+    where expected_clues_used = Σ_k (1 - stop_prob_k)
     """
     
-    def __init__(self, epsilon: float = 1e-6):
+    def __init__(self, min_clues: float = 2.0, epsilon: float = 1e-6):
         """
         Args:
+            min_clues: Minimum expected number of clues to use (soft target)
             epsilon: Small constant for numerical stability
         """
         super().__init__()
+        self.min_clues = min_clues
         self.epsilon = epsilon
     
     def forward(self, stop_logits: torch.Tensor) -> torch.Tensor:
         """
-        Compute sparsity regularization loss.
+        Compute clue usage regularization loss.
         
         Args:
             stop_logits: Shape (B, K) stop probability logits
             
         Returns:
-            loss: Scalar sparsity loss
+            loss: Scalar regularization loss
         """
         # Convert to probabilities
         stop_probs = torch.sigmoid(stop_logits)  # (B, K)
         
-        # Encourage high stop probabilities (stopping early)
-        # -log(p_stop) is minimized when p_stop is high
-        # Clamp to prevent numerical instability
-        sparsity_loss = -torch.log(stop_probs.clamp(min=self.epsilon, max=1.0)).mean()
+        # Expected clues used = sum of (1 - stop_prob) across clues
+        # If stop_prob is low (0.1), this clue contributes ~0.9 to the count
+        # If stop_prob is high (0.9), this clue contributes ~0.1
+        expected_clues_used = (1 - stop_probs).sum(dim=-1)  # (B,)
         
-        # Clamp final loss to reasonable range
-        sparsity_loss = sparsity_loss.clamp(max=10.0)
+        # Penalty for using fewer than min_clues (hinge loss)
+        # No penalty if expected_clues_used >= min_clues
+        min_clue_penalty = F.relu(self.min_clues - expected_clues_used).mean()
         
-        return sparsity_loss
+        return min_clue_penalty
 
 
 class PredicateDiversityLoss(nn.Module):
@@ -561,6 +570,7 @@ class RLANLoss(nn.Module):
         lambda_curriculum: float = 0.1,
         lambda_deep_supervision: float = 0.5,
         lambda_act: float = 0.1,  # Weight for ACT pondering cost
+        min_clues: float = 2.0,  # Minimum clues to use (for sparsity/usage penalty)
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'focal_stablemax', or 'focal'
@@ -570,11 +580,12 @@ class RLANLoss(nn.Module):
             focal_gamma: Focal loss gamma parameter
             focal_alpha: Focal loss alpha parameter
             lambda_entropy: Weight for entropy regularization
-            lambda_sparsity: Weight for sparsity regularization
+            lambda_sparsity: Weight for minimum clue usage penalty (renamed from sparsity)
             lambda_predicate: Weight for predicate diversity
             lambda_curriculum: Weight for curriculum penalty
             lambda_deep_supervision: Weight for intermediate step losses
             lambda_act: Weight for ACT halting loss (pondering cost)
+            min_clues: Minimum expected clues to use (soft target, typically 2-3)
             max_clues: Maximum number of clues
             use_stablemax: DEPRECATED - use loss_mode instead
             loss_mode: Loss function mode:
@@ -610,7 +621,7 @@ class RLANLoss(nn.Module):
         self.focal_loss = self.task_loss
         
         self.entropy_reg = EntropyRegularization()
-        self.sparsity_reg = SparsityRegularization()
+        self.sparsity_reg = SparsityRegularization(min_clues=min_clues)
         self.predicate_diversity = PredicateDiversityLoss()
         self.curriculum_penalty = CurriculumPenalty(max_clues=max_clues)
         

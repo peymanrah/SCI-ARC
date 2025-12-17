@@ -314,6 +314,7 @@ def create_loss(config: dict) -> RLANLoss:
         lambda_curriculum=train_config['lambda_curriculum'],
         lambda_deep_supervision=train_config['lambda_deep_supervision'],
         lambda_act=train_config.get('lambda_act', 0.1),  # ACT halting loss weight
+        min_clues=train_config.get('min_clues', 2.0),  # Minimum clues to use
         max_clues=model_config['max_clues'],
         use_stablemax=train_config.get('use_stablemax', True),
         loss_mode=train_config.get('loss_mode', 'focal_stablemax'),  # TRM uses 'stablemax'

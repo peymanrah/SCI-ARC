@@ -141,12 +141,16 @@ class DynamicSaliencyController(nn.Module):
         
         # Stop-token predictor
         # Predicts whether to stop after this clue
+        # CRITICAL: Initialize with negative bias to default to "continue" not "stop"
+        # sigmoid(-2.0) ≈ 0.12, so model starts by using most clues
         self.stop_predictor = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
         )
+        # Initialize the final layer with negative bias
+        self._init_stop_predictor_bias(init_bias=-2.0)
         
         # Layer norm for stability
         self.query_norm = nn.LayerNorm(hidden_dim)
@@ -157,6 +161,29 @@ class DynamicSaliencyController(nn.Module):
         
         # Coordinate grids (will be registered as buffers)
         self._init_coord_grids(30)  # Max ARC size
+    
+    def _init_stop_predictor_bias(self, init_bias: float = -2.0):
+        """
+        Initialize stop predictor with negative bias to encourage clue usage.
+        
+        With sigmoid(-2.0) ≈ 0.12, model defaults to low stop probability,
+        meaning it will use clues rather than immediately stopping.
+        This is critical because without explicit task-loss gradient flow
+        through stop_logits, the model tends to collapse to "stop immediately".
+        
+        Args:
+            init_bias: Initial bias value. Negative = default to continue.
+                -2.0 → sigmoid ≈ 0.12 (use most clues)
+                -1.0 → sigmoid ≈ 0.27
+                 0.0 → sigmoid = 0.50 (50/50)
+                +2.0 → sigmoid ≈ 0.88 (stop early)
+        """
+        # Find the last Linear layer in stop_predictor
+        for module in reversed(list(self.stop_predictor.modules())):
+            if isinstance(module, nn.Linear):
+                nn.init.zeros_(module.weight)
+                nn.init.constant_(module.bias, init_bias)
+                break
     
     def _init_coord_grids(self, max_size: int):
         """Initialize coordinate grids for centroid computation."""

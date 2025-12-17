@@ -137,9 +137,14 @@ training:
   #
   # CRITICAL: Higher entropy penalty forces DSC to focus on fewer pixels,
   # which naturally leads to focusing on foreground objects (sparse in ARC)
+  #
+  # lambda_sparsity: Now a MINIMUM CLUE USAGE penalty (not sparsity!)
+  # Encourages using at least 2-3 clues for meaningful spatial reasoning.
+  # Without this, the model tends to stop immediately (DSC Clues Used → 0.17)
   # =================================================================
   lambda_entropy: 0.5      # Strong pressure - force sharp attention on sparse foreground
-  lambda_sparsity: 0.0     # Disabled - don't penalize clue usage
+  lambda_sparsity: 0.3     # ENABLED - minimum clue usage penalty (use at least 2 clues)
+  min_clues: 2.0           # Soft minimum: encourage using at least 2 clues
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.5  # Stronger intermediate supervision
