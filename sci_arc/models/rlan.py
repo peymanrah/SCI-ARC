@@ -393,9 +393,9 @@ class RLAN(nn.Module):
         if self.use_lcr and self.lcr is not None:
             count_embedding = self.lcr(input_grid, features)  # (B, num_colors, D)
         else:
-            # Default: empty tensor (RecursiveSolver will skip count injection when use_lcr=False)
-            # Creating minimal tensor for API compatibility
-            count_embedding = torch.empty(
+            # Default: zeros (RecursiveSolver will skip count injection when use_lcr=False)
+            # Using zeros instead of empty() to avoid inf/nan garbage values
+            count_embedding = torch.zeros(
                 B, self.num_colors, self.hidden_dim, device=features.device
             )
         
@@ -403,9 +403,9 @@ class RLAN(nn.Module):
         if self.use_sph and self.sph is not None:
             predicates = self.sph(features, temperature=temperature)  # (B, P)
         else:
-            # Default: empty tensor (RecursiveSolver will skip predicate gating when use_sph=False)
-            # Creating minimal tensor for API compatibility
-            predicates = torch.empty(B, self.num_predicates, device=features.device)
+            # Default: zeros (RecursiveSolver will skip predicate gating when use_sph=False)
+            # Using zeros instead of empty() to avoid inf/nan garbage values
+            predicates = torch.zeros(B, self.num_predicates, device=features.device)
         
         # 7. Recursive Solver - generate output
         if return_all_steps or return_intermediates:
