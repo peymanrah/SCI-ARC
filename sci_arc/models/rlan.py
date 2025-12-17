@@ -451,6 +451,11 @@ class RLAN(nn.Module):
                 result["context"] = context
             if act_outputs is not None:
                 result["act_outputs"] = act_outputs
+            # Add DSC diagnostics if available
+            if self.use_dsc and self.dsc is not None:
+                entropy_inputs = self.dsc.get_last_entropy_inputs()
+                if entropy_inputs is not None:
+                    result["dsc_entropy_inputs"] = entropy_inputs
             return result
         else:
             return logits

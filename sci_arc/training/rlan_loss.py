@@ -601,7 +601,20 @@ class SparsityRegularization(nn.Module):
             + entropy_pondering
         )
         
+        # Store component breakdown for diagnostics (can be retrieved after forward)
+        self._last_components = {
+            'min_clue_penalty': min_clue_penalty.item() if torch.is_tensor(min_clue_penalty) else min_clue_penalty,
+            'base_pondering': base_pondering.item() if torch.is_tensor(base_pondering) else base_pondering,
+            'entropy_pondering': entropy_pondering.item() if torch.is_tensor(entropy_pondering) else entropy_pondering,
+            'expected_clues_used': expected_clues_used.mean().item(),
+            'stop_prob_mean': stop_probs.mean().item(),
+        }
+        
         return total_loss
+    
+    def get_last_components(self) -> dict:
+        """Get breakdown of last sparsity loss computation for diagnostics."""
+        return getattr(self, '_last_components', {})
 
 
 class PredicateDiversityLoss(nn.Module):
@@ -930,6 +943,9 @@ class RLANLoss(nn.Module):
             + self.lambda_act * act_loss
         )
         
+        # Get sparsity loss component breakdown for diagnostics
+        sparsity_components = self.sparsity_reg.get_last_components()
+        
         return {
             "total_loss": total_loss,
             "task_loss": task_loss,  # Accurate name (stablemax, focal_stablemax, or focal)
@@ -941,6 +957,12 @@ class RLANLoss(nn.Module):
             "deep_supervision_loss": deep_supervision_loss,
             "act_loss": act_loss,
             "loss_mode": self.loss_mode,  # Include mode for logging
+            # Sparsity component breakdown (for debugging clue usage)
+            "sparsity_min_clue_penalty": sparsity_components.get('min_clue_penalty', 0.0),
+            "sparsity_base_pondering": sparsity_components.get('base_pondering', 0.0),
+            "sparsity_entropy_pondering": sparsity_components.get('entropy_pondering', 0.0),
+            "expected_clues_used": sparsity_components.get('expected_clues_used', 0.0),
+            "stop_prob_from_loss": sparsity_components.get('stop_prob_mean', 0.0),
         }
 
 

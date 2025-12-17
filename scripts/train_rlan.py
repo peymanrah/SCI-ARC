@@ -412,11 +412,19 @@ def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
     if hasattr(model, 'dsc') and model.dsc is not None:
         dsc_grad = 0.0
         dsc_count = 0
+        stop_pred_grad = 0.0
+        stop_pred_count = 0
         for name, param in model.dsc.named_parameters():
             if param.grad is not None:
-                dsc_grad += param.grad.norm().item() ** 2
+                grad_norm_sq = param.grad.norm().item() ** 2
+                dsc_grad += grad_norm_sq
                 dsc_count += 1
+                # Track stop_predictor specifically (critical for clue usage learning)
+                if 'stop_predictor' in name:
+                    stop_pred_grad += grad_norm_sq
+                    stop_pred_count += 1
         grad_norms['dsc'] = (dsc_grad ** 0.5) if dsc_count > 0 else 0.0
+        grad_norms['stop_predictor'] = (stop_pred_grad ** 0.5) if stop_pred_count > 0 else 0.0
     
     # Encoder gradients
     if hasattr(model, 'encoder') and model.encoder is not None:
@@ -437,6 +445,26 @@ def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
                 solver_grad += param.grad.norm().item() ** 2
                 solver_count += 1
         grad_norms['solver'] = (solver_grad ** 0.5) if solver_count > 0 else 0.0
+    
+    # Context encoder gradients (if enabled)
+    if hasattr(model, 'context_encoder') and model.context_encoder is not None:
+        ctx_grad = 0.0
+        ctx_count = 0
+        for name, param in model.context_encoder.named_parameters():
+            if param.grad is not None:
+                ctx_grad += param.grad.norm().item() ** 2
+                ctx_count += 1
+        grad_norms['context_encoder'] = (ctx_grad ** 0.5) if ctx_count > 0 else 0.0
+    
+    # MSRE gradients (if enabled)
+    if hasattr(model, 'msre') and model.msre is not None:
+        msre_grad = 0.0
+        msre_count = 0
+        for name, param in model.msre.named_parameters():
+            if param.grad is not None:
+                msre_grad += param.grad.norm().item() ** 2
+                msre_count += 1
+        grad_norms['msre'] = (msre_grad ** 0.5) if msre_count > 0 else 0.0
     
     return grad_norms
 
@@ -487,9 +515,12 @@ def train_epoch(
     # ======================================================
     epoch_diagnostics = {
         # Gradient flow (are gradients reaching each module?)
-        'dsc_grad_norm_sum': 0.0,     # Gradient norm flowing to DSC
-        'encoder_grad_norm_sum': 0.0,  # Gradient norm to encoder
-        'solver_grad_norm_sum': 0.0,   # Gradient norm to solver
+        'dsc_grad_norm_sum': 0.0,           # Gradient norm flowing to DSC
+        'stop_predictor_grad_norm_sum': 0.0, # Gradient norm to stop_predictor specifically
+        'encoder_grad_norm_sum': 0.0,        # Gradient norm to encoder
+        'solver_grad_norm_sum': 0.0,         # Gradient norm to solver
+        'context_encoder_grad_norm_sum': 0.0, # Gradient norm to context encoder
+        'msre_grad_norm_sum': 0.0,           # Gradient norm to MSRE
         
         # DSC attention quality (is DSC learning meaningful patterns?)
         'per_clue_entropy': [],        # Per-clue entropy breakdown (K values)
@@ -582,8 +613,11 @@ def train_epoch(
                 if batch_idx < grad_accumulation_steps:
                     grad_norms = compute_module_grad_norms(model)
                     epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
+                    epoch_diagnostics['stop_predictor_grad_norm_sum'] += grad_norms.get('stop_predictor', 0.0)
                     epoch_diagnostics['encoder_grad_norm_sum'] += grad_norms.get('encoder', 0.0)
                     epoch_diagnostics['solver_grad_norm_sum'] += grad_norms.get('solver', 0.0)
+                    epoch_diagnostics['context_encoder_grad_norm_sum'] += grad_norms.get('context_encoder', 0.0)
+                    epoch_diagnostics['msre_grad_norm_sum'] += grad_norms.get('msre', 0.0)
                 
                 scaler.step(optimizer)
                 scaler.update()
@@ -625,8 +659,11 @@ def train_epoch(
                 if batch_idx < grad_accumulation_steps:
                     grad_norms = compute_module_grad_norms(model)
                     epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
+                    epoch_diagnostics['stop_predictor_grad_norm_sum'] += grad_norms.get('stop_predictor', 0.0)
                     epoch_diagnostics['encoder_grad_norm_sum'] += grad_norms.get('encoder', 0.0)
                     epoch_diagnostics['solver_grad_norm_sum'] += grad_norms.get('solver', 0.0)
+                    epoch_diagnostics['context_encoder_grad_norm_sum'] += grad_norms.get('context_encoder', 0.0)
+                    epoch_diagnostics['msre_grad_norm_sum'] += grad_norms.get('msre', 0.0)
                 
                 optimizer.step()
                 optimizer.zero_grad()
@@ -684,6 +721,41 @@ def train_epoch(
             if 'stop_logits' in outputs:
                 stop_probs = torch.sigmoid(outputs['stop_logits'])  # (B, K)
                 epoch_diagnostics['stop_prob_mean'] = stop_probs.mean().item()
+                # Per-clue stop probability for detailed tracking
+                epoch_diagnostics['per_clue_stop_prob'] = stop_probs.mean(dim=0).tolist()  # (K,)
+            
+            # DSC entropy inputs to stop_predictor (coupling verification)
+            if 'dsc_entropy_inputs' in outputs:
+                entropy_inputs = outputs['dsc_entropy_inputs']  # (B, K)
+                epoch_diagnostics['dsc_entropy_input_mean'] = entropy_inputs.mean().item()
+                epoch_diagnostics['per_clue_entropy_input'] = entropy_inputs.mean(dim=0).tolist()  # (K,)
+            
+            # Context encoder diagnostics
+            if 'context' in outputs:
+                context = outputs['context']  # (B, D)
+                epoch_diagnostics['context_magnitude'] = context.norm(dim=-1).mean().item()
+                epoch_diagnostics['context_std'] = context.std(dim=0).mean().item()  # Variation across batch
+            
+            # Sparsity loss component breakdown (from losses dict)
+            epoch_diagnostics['sparsity_min_clue_penalty'] = losses.get('sparsity_min_clue_penalty', 0.0)
+            epoch_diagnostics['sparsity_base_pondering'] = losses.get('sparsity_base_pondering', 0.0)
+            epoch_diagnostics['sparsity_entropy_pondering'] = losses.get('sparsity_entropy_pondering', 0.0)
+            epoch_diagnostics['expected_clues_used'] = losses.get('expected_clues_used', 0.0)
+            
+            # Feature statistics for numerical stability check
+            if 'features' in outputs:
+                features = outputs['features']  # (B, D, H, W)
+                epoch_diagnostics['features_mean'] = features.mean().item()
+                epoch_diagnostics['features_std'] = features.std().item()
+                epoch_diagnostics['features_max'] = features.max().item()
+                epoch_diagnostics['features_min'] = features.min().item()
+            
+            # Logits statistics for numerical stability
+            logits = outputs['logits']
+            epoch_diagnostics['logits_max'] = logits.max().item()
+            epoch_diagnostics['logits_min'] = logits.min().item()
+            epoch_diagnostics['logits_has_nan'] = torch.isnan(logits).any().item()
+            epoch_diagnostics['logits_has_inf'] = torch.isinf(logits).any().item()
             
             # Centroid spread (how diverse are clue locations)
             if 'centroids' in outputs:
@@ -1391,13 +1463,25 @@ Config Overrides:
             
             # Gradient flow diagnostics
             dsc_grad = diagnostics.get('dsc_grad_norm_sum', 0)
+            stop_pred_grad = diagnostics.get('stop_predictor_grad_norm_sum', 0)
             enc_grad = diagnostics.get('encoder_grad_norm_sum', 0)
             solver_grad = diagnostics.get('solver_grad_norm_sum', 0)
-            print(f"  Grad Norms: DSC={dsc_grad:.4f}, Encoder={enc_grad:.4f}, Solver={solver_grad:.4f}")
+            ctx_grad = diagnostics.get('context_encoder_grad_norm_sum', 0)
+            msre_grad = diagnostics.get('msre_grad_norm_sum', 0)
+            
+            print(f"  Grad Norms: DSC={dsc_grad:.4f}, StopPred={stop_pred_grad:.4f}, Encoder={enc_grad:.4f}, Solver={solver_grad:.4f}")
+            if ctx_grad > 0 or msre_grad > 0:
+                print(f"              ContextEnc={ctx_grad:.4f}, MSRE={msre_grad:.4f}")
+            
+            # Gradient flow warnings
             if dsc_grad < 0.001 and enc_grad > 0:
                 print(f"    [!] DSC gradients near zero - not learning!")
+            if stop_pred_grad < 0.0001 and dsc_grad > 0.001:
+                print(f"    [!] Stop predictor gradients near zero - clue count not learning!")
             if solver_grad < 0.001 and enc_grad > 0:
                 print(f"    [!] Solver gradients near zero - check architecture!")
+            if ctx_grad < 0.001 and enc_grad > 0.01 and config.get('model', {}).get('use_context_encoder', False):
+                print(f"    [!] Context encoder gradients near zero - not learning from examples!")
             
             # Attention sharpness (is DSC focusing?)
             attn_max = diagnostics.get('attn_max_mean', 0)
@@ -1445,6 +1529,62 @@ Config Overrides:
                     print(f"    [!] Clues clustered (spread < 2) - should spread out")
                 elif centroid_spread > 8.0:
                     print(f"    Good spread - clues are distributed across grid")
+            
+            # ============================================================
+            # NEW DIAGNOSTICS: Entropy-Stop Coupling & Sparsity Components
+            # ============================================================
+            
+            # DSC entropy inputs to stop_predictor (verify coupling is working)
+            dsc_entropy_input = diagnostics.get('dsc_entropy_input_mean', None)
+            per_clue_entropy_input = diagnostics.get('per_clue_entropy_input', [])
+            if dsc_entropy_input is not None:
+                print(f"  --- Stop Predictor Coupling ---")
+                print(f"  Entropy Input to Stop: {dsc_entropy_input:.4f} (normalized, lower=sharper)")
+                if per_clue_entropy_input:
+                    ei_str = ', '.join(f"{e:.3f}" for e in per_clue_entropy_input)
+                    print(f"  Per-Clue Entropy Input: [{ei_str}]")
+                
+                # Check if entropy is actually influencing stop decisions
+                per_clue_stop = diagnostics.get('per_clue_stop_prob', [])
+                if per_clue_stop and per_clue_entropy_input:
+                    # Lower entropy should correlate with higher stop_prob
+                    # (sharp attention = can stop, diffuse = need more clues)
+                    print(f"  Per-Clue Stop Prob: [{', '.join(f'{s:.3f}' for s in per_clue_stop)}]")
+            
+            # Sparsity loss component breakdown
+            min_clue_pen = diagnostics.get('sparsity_min_clue_penalty', 0)
+            base_ponder = diagnostics.get('sparsity_base_pondering', 0)
+            entropy_ponder = diagnostics.get('sparsity_entropy_pondering', 0)
+            expected_clues = diagnostics.get('expected_clues_used', 0)
+            if base_ponder > 0 or entropy_ponder > 0:
+                print(f"  --- Sparsity Loss Breakdown ---")
+                print(f"  Min Clue Penalty: {min_clue_pen:.4f}")
+                print(f"  Base Pondering: {base_ponder:.4f} (clues={expected_clues:.2f})")
+                print(f"  Entropy Pondering: {entropy_ponder:.4f}")
+                if min_clue_pen > 0:
+                    print(f"    [!] Using fewer than min_clues!")
+            
+            # Context encoder diagnostics
+            context_mag = diagnostics.get('context_magnitude', None)
+            context_std = diagnostics.get('context_std', None)
+            if context_mag is not None:
+                print(f"  --- Context Encoder ---")
+                print(f"  Context Magnitude: {context_mag:.4f} (should be > 0.5)")
+                print(f"  Context Batch Std: {context_std:.4f} (should vary)")
+                if context_mag < 0.1:
+                    print(f"    [!] Context near zero - ContextEncoder not contributing!")
+                if context_std < 0.01:
+                    print(f"    [!] Context identical across batch - collapsed!")
+            
+            # Numerical stability checks
+            logits_max = diagnostics.get('logits_max', None)
+            logits_min = diagnostics.get('logits_min', None)
+            has_nan = diagnostics.get('logits_has_nan', False)
+            has_inf = diagnostics.get('logits_has_inf', False)
+            if has_nan or has_inf:
+                print(f"  [CRITICAL] Numerical instability: NaN={has_nan}, Inf={has_inf}")
+            if logits_max is not None and (logits_max > 50 or logits_min < -50):
+                print(f"  [WARNING] Extreme logit values: [{logits_min:.1f}, {logits_max:.1f}]")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:

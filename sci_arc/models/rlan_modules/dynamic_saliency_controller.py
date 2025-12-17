@@ -286,6 +286,7 @@ class DynamicSaliencyController(nn.Module):
         all_centroids = []
         all_attention_maps = []
         all_stop_logits = []
+        all_entropy_inputs = []  # Track entropy input to stop_predictor for diagnostics
         
         # Cumulative mask for progressive masking
         cumulative_mask = torch.ones(B, H, W, device=features.device)
@@ -355,13 +356,22 @@ class DynamicSaliencyController(nn.Module):
             all_centroids.append(centroid)
             all_attention_maps.append(attention)
             all_stop_logits.append(stop_logit)
+            all_entropy_inputs.append(attn_entropy_normalized.squeeze(-1))  # (B,)
         
         # Stack outputs
         centroids = torch.stack(all_centroids, dim=1)  # (B, K, 2)
         attention_maps = torch.stack(all_attention_maps, dim=1)  # (B, K, H, W)
         stop_logits = torch.stack(all_stop_logits, dim=1)  # (B, K)
         
+        # Store entropy inputs for diagnostics (can be retrieved after forward)
+        entropy_inputs = torch.stack(all_entropy_inputs, dim=1)  # (B, K)
+        self._last_entropy_inputs = entropy_inputs.detach()
+        
         return centroids, attention_maps, stop_logits
+    
+    def get_last_entropy_inputs(self) -> torch.Tensor:
+        """Get the normalized entropy inputs used in last forward pass for diagnostics."""
+        return getattr(self, '_last_entropy_inputs', None)
     
     def get_active_clues(
         self, 
