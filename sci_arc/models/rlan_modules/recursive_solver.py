@@ -495,12 +495,24 @@ class RecursiveSolver(nn.Module):
             all_logits.append(logits)
             
             # Optional: Use prediction to update input embedding (feedback)
-            # NOTE: Disabled by default because argmax is non-differentiable.
-            # This breaks the gradient chain, causing later steps to receive
-            # increasingly corrupted inputs during training without learning signal.
+            # When enabled, uses DIFFERENTIABLE soft feedback during training
+            # and hard argmax during inference.
             if self.use_feedback and t < self.num_steps - 1:
-                pred = logits.argmax(dim=1)  # (B, H, W)
-                input_embed = self.input_embed(pred.clamp(0, 10)).permute(0, 3, 1, 2)
+                if self.training:
+                    # TRAINING: Use Gumbel-Softmax for differentiable discrete samples
+                    # This allows gradients to flow through the feedback loop
+                    # tau=1.0 gives soft samples; lower tau → sharper (more discrete-like)
+                    soft_pred = F.gumbel_softmax(logits, tau=1.0, hard=False, dim=1)  # (B, C, H, W)
+                    # Weighted sum of embeddings: soft_pred @ embedding_weights
+                    # input_embed shape: (B, D, H, W)
+                    # embedding weights shape: (num_classes, D)
+                    emb_weights = self.input_embed.weight[:self.num_classes]  # (C, D)
+                    # Einsum: (B, C, H, W) @ (C, D) -> (B, D, H, W)
+                    input_embed = torch.einsum('bchw,cd->bdhw', soft_pred, emb_weights)
+                else:
+                    # INFERENCE: Use hard argmax (non-differentiable, but that's OK)
+                    pred = logits.argmax(dim=1)  # (B, H, W)
+                    input_embed = self.input_embed(pred.clamp(0, 10)).permute(0, 3, 1, 2)
         
         if return_all_steps:
             return all_logits
