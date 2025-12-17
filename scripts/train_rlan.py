@@ -31,6 +31,7 @@ from functools import partial
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 import yaml
@@ -770,6 +771,38 @@ def train_epoch(
                 epoch_diagnostics['clues_used_std'] = clues_used_per_sample.std().item()
                 epoch_diagnostics['clues_used_min'] = clues_used_per_sample.min().item()
                 epoch_diagnostics['clues_used_max'] = clues_used_per_sample.max().item()
+                
+                # CRITICAL: Compute per-sample loss to correlate with clue count
+                # This verifies that harder tasks (higher loss) use more clues
+                with torch.no_grad():
+                    logits = outputs['logits']  # (B, C, H, W)
+                    B = logits.shape[0]
+                    # Per-sample cross entropy (no reduction)
+                    per_sample_loss = torch.zeros(B, device=logits.device)
+                    for i in range(B):
+                        sample_loss = F.cross_entropy(
+                            logits[i:i+1], test_outputs[i:i+1], 
+                            reduction='mean'
+                        )
+                        per_sample_loss[i] = sample_loss
+                    
+                    # Correlation between clues used and task loss
+                    # Positive correlation = harder tasks use more clues (GOOD!)
+                    # Zero/negative = clue count not task-dependent (BAD)
+                    if B > 1 and clues_used_per_sample.std() > 1e-6 and per_sample_loss.std() > 1e-6:
+                        # Pearson correlation
+                        clues_centered = clues_used_per_sample - clues_used_per_sample.mean()
+                        loss_centered = per_sample_loss - per_sample_loss.mean()
+                        correlation = (clues_centered * loss_centered).sum() / (
+                            clues_centered.norm() * loss_centered.norm() + 1e-8
+                        )
+                        epoch_diagnostics['clue_loss_correlation'] = correlation.item()
+                    else:
+                        epoch_diagnostics['clue_loss_correlation'] = 0.0
+                    
+                    epoch_diagnostics['per_sample_loss_std'] = per_sample_loss.std().item()
+                    epoch_diagnostics['per_sample_loss_min'] = per_sample_loss.min().item()
+                    epoch_diagnostics['per_sample_loss_max'] = per_sample_loss.max().item()
             
             # DSC entropy inputs to stop_predictor (coupling verification)
             if 'dsc_entropy_inputs' in outputs:
@@ -1623,8 +1656,20 @@ Config Overrides:
                 clues_std = diagnostics.get('clues_used_std', 0)
                 clues_min = diagnostics.get('clues_used_min', 0)
                 clues_max = diagnostics.get('clues_used_max', 0)
+                clue_loss_corr = diagnostics.get('clue_loss_correlation', 0)
                 print(f"  Stop Prob: {stop_prob:.3f} (approx {clues_used:.1f} clues active)")
                 print(f"  Clues Used: mean={clues_used:.2f}, std={clues_std:.2f}, range=[{clues_min:.1f}, {clues_max:.1f}]")
+                print(f"  Clue-Loss Correlation: {clue_loss_corr:+.3f}", end="")
+                # Interpret correlation
+                if clue_loss_corr > 0.3:
+                    print(" (GOOD: harder tasks use more clues)")
+                elif clue_loss_corr > 0.1:
+                    print(" (mild positive - learning)")
+                elif clue_loss_corr < -0.1:
+                    print(" (unexpected negative!)")
+                else:
+                    print(" (weak - clue count may not be task-dependent)")
+                
                 # Check for task-dependent clue count
                 if clues_std < 0.1:
                     print(f"    [!] Low variance in clue count - may not be task-dependent!")

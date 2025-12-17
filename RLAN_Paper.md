@@ -611,7 +611,57 @@ Where $h_k$ is the attended feature vector and $H_{norm}(M_k)$ is the normalized
 
 This coupling ensures that clue count naturally adapts to both task complexity AND attention quality.
 
-#### 9.2.5 Sparsity Loss (Distinct Clues)
+#### 9.2.5 Clue Count as a True Latent Variable
+
+**Critical Implementation Detail**: For clue count to be learned from task loss (not just regularization), the aggregation mechanism must preserve clue count information in its gradient.
+
+**The Problem with Normalization**:
+
+A naive implementation normalizes clue usage weights to sum to 1:
+
+$$\text{clue\_usage}_k = \frac{1 - \sigma(s_k)}{\sum_j (1 - \sigma(s_j))}$$
+
+$$\text{aggregated} = \sum_k \text{clue\_usage}_k \cdot \text{clue\_features}_k$$
+
+This creates a critical issue: **the output is identical regardless of how many clues are "used"**. Only relative weights matter, not absolute count.
+
+| Stop Probs (all same) | Expected Clues | Normalized Weights | Output |
+|----------------------|---------------|-------------------|--------|
+| All 0.1 | 4.5 | [0.2, 0.2, 0.2, 0.2, 0.2] | **SAME** |
+| All 0.5 | 2.5 | [0.2, 0.2, 0.2, 0.2, 0.2] | **SAME** |
+| All 0.9 | 0.5 | [0.2, 0.2, 0.2, 0.2, 0.2] | **SAME** |
+
+**Result**: Task loss gradient contains **zero information** about clue count. Only regularization (ponder loss) drives clue count, causing collapse to minimum.
+
+**The Solution**:
+
+Do NOT normalize clue usage. Instead, divide by constant $K$ (number of clue slots):
+
+$$\text{clue\_usage}_k = 1 - \sigma(s_k) \quad \text{(no normalization)}$$
+
+$$\text{aggregated} = \frac{1}{K} \sum_k \text{clue\_usage}_k \cdot \text{clue\_features}_k$$
+
+Now output magnitude scales with fraction of clues used:
+- **5 clues active**: Full-magnitude aggregation
+- **1 clue active**: 1/5 magnitude (sparse information)
+- **0 clues active**: Near-zero (no information)
+
+The solver learns to work with varying input magnitudes, and task loss gradient **directly informs** stop probabilities about whether more/fewer clues are needed.
+
+**Training Metrics for Verification**:
+
+| Metric | Healthy Value | Problem If... |
+|--------|---------------|---------------|
+| `clues_used_std` | > 0.3 | Near 0 = all samples use same count |
+| `clue_loss_correlation` | > 0.2 | Near 0 = count not task-dependent |
+| `clues_used_range` | [1.5, 4.5] | Range < 1 = no differentiation |
+
+**Expected Learning Dynamics**:
+- Early training: Model uses many clues (playing it safe)
+- Mid training: Model correlates clue count with task difficulty
+- Late training: Stable per-task clue counts with positive loss correlation
+
+#### 9.2.6 Sparsity Loss (Distinct Clues)
 
 Encourages clues to be spatially distinct:
 
@@ -619,7 +669,7 @@ $$\mathcal{L}_{sparsity} = \sum_{t} \|M_t\|_1 + \sum_{t \neq t'} \max(0, \text{C
 
 The second term penalizes clues that overlap too much.
 
-#### 9.2.6 Predicate Diversity Loss
+#### 9.2.7 Predicate Diversity Loss
 
 Prevents predicates from collapsing to trivial values:
 
