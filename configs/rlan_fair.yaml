@@ -99,18 +99,32 @@ training:
   temperature_start: 5.0
   temperature_end: 0.1
   
-  # Loss weights - REBALANCED after background collapse analysis
-  # Problem: DSC entropy stuck at 1.88, clues used = 0.00
-  # Solution: Increase entropy weight to force DSC to sharpen
-  focal_gamma: 2.0
-  focal_alpha: 0.5       # INCREASED from 0.25 - more weight on non-background
-  lambda_entropy: 0.1    # INCREASED 10x from 0.01 - force DSC sharpening
-  lambda_sparsity: 0.0   # DISABLED - was preventing clue usage
+  # =============================================================
+  # LOSS CONFIGURATION - TRM-MATCHED
+  # =============================================================
+  # TRM uses PURE stablemax cross-entropy (no focal loss!)
+  # Focal loss may have caused background collapse by:
+  #   1. Unstable gradients from (1-p)^gamma
+  #   2. Alpha weighting conflicts with task learning
+  #
+  # Loss Modes:
+  #   'stablemax': Pure stablemax CE (TRM uses this - RECOMMENDED)
+  #   'focal_stablemax': Focal + stablemax (original RLAN)
+  #   'focal': Standard focal loss
+  # =============================================================
+  loss_mode: 'stablemax'  # TRM-style: pure stablemax cross-entropy
+  
+  focal_gamma: 2.0        # Only used if loss_mode='focal*'
+  focal_alpha: 0.5        # Only used if loss_mode='focal*'
+  
+  # Regularization weights (for RLAN-specific modules)
+  lambda_entropy: 0.1    # Force DSC attention sharpening
+  lambda_sparsity: 0.0   # Disabled - was preventing clue usage
   lambda_predicate: 0.001
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.3
   
-  # TRM numerical stability technique
+  # TRM numerical stability (used in all loss modes)
   use_stablemax: true
   
   # =============================================================

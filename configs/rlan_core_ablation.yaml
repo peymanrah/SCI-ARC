@@ -62,11 +62,14 @@ training:
   temperature_start: 5.0
   temperature_end: 0.1
   
+  # TRM-style loss (pure stablemax, no focal)
+  loss_mode: 'stablemax'
+  
   focal_gamma: 2.0
   focal_alpha: 0.25
-  lambda_entropy: 0.1    # INCREASED - force DSC to sharpen attention
-  lambda_sparsity: 0.0   # DISABLED - don't penalize clue usage
-  lambda_predicate: 0.0  # DISABLED - no SPH
+  lambda_entropy: 0.1    # Force DSC to sharpen attention
+  lambda_sparsity: 0.0   # Disabled - don't penalize clue usage
+  lambda_predicate: 0.0  # Disabled - no SPH
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.3
   

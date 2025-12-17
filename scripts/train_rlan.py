@@ -313,7 +313,8 @@ def create_loss(config: dict) -> RLANLoss:
         lambda_curriculum=train_config['lambda_curriculum'],
         lambda_deep_supervision=train_config['lambda_deep_supervision'],
         max_clues=model_config['max_clues'],
-        use_stablemax=train_config.get('use_stablemax', True),  # TRM technique
+        use_stablemax=train_config.get('use_stablemax', True),
+        loss_mode=train_config.get('loss_mode', 'focal_stablemax'),  # TRM uses 'stablemax'
     )
     
     return loss_fn

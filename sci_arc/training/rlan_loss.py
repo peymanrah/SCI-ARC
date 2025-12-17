@@ -535,11 +535,16 @@ class RLANLoss(nn.Module):
     Combined loss for RLAN training.
     
     Combines all loss components with configurable weights:
-    - Focal Loss: Primary task loss (with optional stablemax from TRM)
+    - Task Loss: StablemaxCrossEntropy (TRM-style) or FocalStablemaxLoss
     - Entropy Regularization: Sharp attention
     - Sparsity Regularization: Efficient clue usage
     - Predicate Diversity: Decorrelated predicates
     - Curriculum Penalty: Progressive complexity
+    
+    Loss Mode Options:
+    - 'stablemax': Pure stablemax cross-entropy (TRM uses this)
+    - 'focal_stablemax': Focal loss + stablemax (original RLAN)
+    - 'focal': Standard focal loss with softmax
     """
     
     def __init__(
@@ -553,6 +558,7 @@ class RLANLoss(nn.Module):
         lambda_deep_supervision: float = 0.5,
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
+        loss_mode: str = 'focal_stablemax',  # 'stablemax', 'focal_stablemax', or 'focal'
     ):
         """
         Args:
@@ -564,15 +570,38 @@ class RLANLoss(nn.Module):
             lambda_curriculum: Weight for curriculum penalty
             lambda_deep_supervision: Weight for intermediate step losses
             max_clues: Maximum number of clues
-            use_stablemax: If True, use FocalStablemaxLoss (TRM technique)
+            use_stablemax: DEPRECATED - use loss_mode instead
+            loss_mode: Loss function mode:
+                - 'stablemax': Pure stablemax CE (TRM uses this - RECOMMENDED)
+                - 'focal_stablemax': Focal loss + stablemax
+                - 'focal': Standard focal loss
         """
         super().__init__()
         
-        # Use stablemax for better numerical stability (TRM technique)
-        if use_stablemax:
-            self.focal_loss = FocalStablemaxLoss(gamma=focal_gamma, alpha=focal_alpha)
+        self.loss_mode = loss_mode
+        
+        # Select loss function based on mode
+        if loss_mode == 'stablemax':
+            # Pure stablemax cross-entropy (TRM style - RECOMMENDED)
+            self.task_loss = StablemaxCrossEntropy()
+            print(f"  Loss Mode: STABLEMAX (TRM-style, pure cross-entropy)")
+        elif loss_mode == 'focal_stablemax':
+            # Focal loss with stablemax (original RLAN)
+            self.task_loss = FocalStablemaxLoss(gamma=focal_gamma, alpha=focal_alpha)
+            print(f"  Loss Mode: FOCAL_STABLEMAX (gamma={focal_gamma}, alpha={focal_alpha})")
+        elif loss_mode == 'focal':
+            # Standard focal loss with softmax
+            self.task_loss = FocalLoss(gamma=focal_gamma, alpha=focal_alpha)
+            print(f"  Loss Mode: FOCAL (gamma={focal_gamma}, alpha={focal_alpha})")
         else:
-            self.focal_loss = FocalLoss(gamma=focal_gamma, alpha=focal_alpha)
+            # Fallback to use_stablemax for backward compatibility
+            if use_stablemax:
+                self.task_loss = FocalStablemaxLoss(gamma=focal_gamma, alpha=focal_alpha)
+            else:
+                self.task_loss = FocalLoss(gamma=focal_gamma, alpha=focal_alpha)
+        
+        # Keep focal_loss as alias for backward compatibility
+        self.focal_loss = self.task_loss
         
         self.entropy_reg = EntropyRegularization()
         self.sparsity_reg = SparsityRegularization()
