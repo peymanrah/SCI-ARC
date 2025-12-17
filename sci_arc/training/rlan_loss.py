@@ -39,6 +39,8 @@ def stablemax(x: torch.Tensor, epsilon: float = 1e-30) -> torch.Tensor:
     Returns:
         Stablemax activations
     """
+    # Clamp input to prevent extreme values that could cause overflow
+    x = x.clamp(min=-1000, max=1000)
     return torch.where(
         x < 0,
         1 / (1 - x + epsilon),
@@ -57,8 +59,13 @@ def log_stablemax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     Returns:
         Log probabilities using stablemax normalization
     """
+    # Clamp input first
+    x = x.clamp(min=-1000, max=1000)
     s_x = stablemax(x)
-    return torch.log(s_x / torch.sum(s_x, dim=dim, keepdim=True))
+    # Add epsilon to prevent log(0)
+    log_probs = torch.log(s_x / (torch.sum(s_x, dim=dim, keepdim=True) + 1e-10))
+    # Clamp output to reasonable range
+    return log_probs.clamp(min=-100, max=0)
 
 
 class StablemaxCrossEntropy(nn.Module):

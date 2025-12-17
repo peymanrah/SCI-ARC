@@ -651,10 +651,16 @@ def train_epoch(
                 with torch.no_grad():
                     step_losses = []
                     for step_logits in all_logits:
-                        step_loss = torch.nn.functional.cross_entropy(
-                            step_logits, test_outputs, reduction='mean'
-                        )
-                        step_losses.append(step_loss.item())
+                        # Check for inf/nan in logits (numerical instability)
+                        if torch.isfinite(step_logits).all():
+                            step_loss = torch.nn.functional.cross_entropy(
+                                step_logits, test_outputs, reduction='mean'
+                            )
+                            # Clamp to prevent inf in display
+                            step_losses.append(min(step_loss.item(), 100.0))
+                        else:
+                            # Log warning and use placeholder
+                            step_losses.append(float('nan'))
                     epoch_diagnostics['per_step_loss'] = step_losses
             
             # Per-clue entropy breakdown

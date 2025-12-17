@@ -181,7 +181,9 @@ class DynamicSaliencyController(nn.Module):
         # Find the last Linear layer in stop_predictor
         for module in reversed(list(self.stop_predictor.modules())):
             if isinstance(module, nn.Linear):
-                nn.init.zeros_(module.weight)
+                # Use small weights so output is dominated by bias initially
+                # but can still learn from gradients
+                nn.init.normal_(module.weight, mean=0.0, std=0.01)
                 nn.init.constant_(module.bias, init_bias)
                 break
     
