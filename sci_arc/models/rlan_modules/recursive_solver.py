@@ -326,18 +326,19 @@ class RecursiveSolver(nn.Module):
     
     def _init_output_head_for_balanced_predictions(self):
         """
-        Initialize output head to prevent background collapse.
+        Initialize output head to PREVENT background collapse.
         
         The problem: With 90% background pixels, the model learns to predict
         background everywhere as a "safe" default. Even with weighted loss,
         the initial random predictions favor background due to class imbalance.
         
         Solution: Initialize the final layer bias to give foreground classes
-        a small advantage, encouraging the model to explore foreground predictions
-        early in training.
+        a STRONG advantage, forcing the model to start by predicting foreground
+        and then learn to correctly identify background.
         
-        This is similar to how object detection models initialize the classification
-        head with a prior probability for the positive class.
+        This is the OPPOSITE of object detection (which has rare positives).
+        In ARC, background is the "easy" class that the model gravitates toward.
+        We need to push it AWAY from background initially.
         """
         # Get the final Conv2d layer in output_head
         final_layer = None
@@ -346,22 +347,28 @@ class RecursiveSolver(nn.Module):
                 final_layer = module
         
         if final_layer is not None and final_layer.bias is not None:
-            # Initialize bias for balanced starting point
+            # Initialize bias to FAVOR FOREGROUND
             # 
-            # MATH: For softmax with C=10 classes, to get P(bg) = 50%:
-            #   P(bg) = exp(bg_bias) / (exp(bg_bias) + 9*exp(fg_bias))
-            #   0.5 = exp(bg_bias) / (exp(bg_bias) + 9*exp(0))
-            #   0.5 * (exp(bg_bias) + 9) = exp(bg_bias)
-            #   4.5 = 0.5 * exp(bg_bias)
-            #   bg_bias = ln(9) ≈ 2.2
+            # MATH: For softmax with C=10 classes:
+            #   P(class_i) = exp(bias_i) / sum(exp(bias_j))
             #
-            # This creates 50-50 start, letting the weighted loss (10x for FG)
-            # guide learning without initial bias toward either direction.
+            # To get P(bg) ≈ 10% and P(each fg) ≈ 10% (uniform):
+            #   We want exp(bg_bias) / (exp(bg_bias) + 9*exp(fg_bias)) = 0.1
+            #   exp(bg_bias) = 0.1 * (exp(bg_bias) + 9*exp(fg_bias))
+            #   0.9 * exp(bg_bias) = 0.9 * exp(fg_bias)
+            #   bg_bias = fg_bias  (uniform)
+            #
+            # But we want to STRONGLY favor fg initially, then let weighted loss fix it:
+            #   bg_bias = -2.0, fg_bias = 0.0
+            #   P(bg) = exp(-2) / (exp(-2) + 9*exp(0)) = 0.135 / (0.135 + 9) ≈ 1.5%
+            #
+            # This forces model to predict foreground initially!
+            # The weighted loss (bg_cap=1.0, fg_cap=10.0) will then teach it
+            # where background actually belongs.
             with torch.no_grad():
-                import math
-                # ln(9) gives P(bg)=50%, P(all_fg)=50% when fg_bias=0
-                final_layer.bias[0] = math.log(self.num_classes - 1)  # ≈2.2 for C=10
-                final_layer.bias[1:] = 0.0  # Uniform fg classes
+                final_layer.bias[0] = -2.0  # Strong negative for background
+                final_layer.bias[1:] = 0.0  # Neutral for foreground classes
+            print(f"[RecursiveSolver] Output head initialized: bg_bias={final_layer.bias[0].item():.2f}, fg_bias={final_layer.bias[1].item():.2f}")
     
     def _aggregate_clues(
         self,
