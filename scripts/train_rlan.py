@@ -317,6 +317,10 @@ def create_loss(config: dict) -> RLANLoss:
     """Create RLAN loss function from config."""
     train_config = config['training']
     model_config = config['model']
+    data_config = config.get('data', {})
+    
+    # Get TRM encoding flag from data config
+    use_trm_encoding = data_config.get('use_trm_encoding', True)
     
     loss_fn = RLANLoss(
         focal_gamma=train_config['focal_gamma'],
@@ -337,6 +341,7 @@ def create_loss(config: dict) -> RLANLoss:
         # BG/FG weight caps for weighted_stablemax (CRITICAL for preventing collapse)
         bg_weight_cap=train_config.get('bg_weight_cap', 2.0),  # Increased from 1.0
         fg_weight_cap=train_config.get('fg_weight_cap', 5.0),  # Reduced from 10.0
+        use_trm_encoding=use_trm_encoding,  # Handle TRM encoding in class weights
     )
     
     return loss_fn
@@ -349,24 +354,119 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
         model: The model to optimize
         config: Configuration dict
         steps_per_epoch: Number of training batches per epoch (for OneCycle)
+        
+    CRITICAL INSIGHT (from gradient analysis):
+    DSC/MSRE have ~60x smaller gradients than Solver due to:
+    1. Long gradient path through coordinate computation
+    2. Coordinate normalization and Fourier encoding
+    3. Feature fusion before task loss
+    
+    Solution: Use higher learning rates for DSC/MSRE modules to compensate.
+    This is similar to layer-wise learning rate scaling in NLP transformers.
     """
     train_config = config['training']
+    base_lr = train_config['learning_rate']
+    weight_decay = train_config['weight_decay']
     
-    # Separate parameters with and without weight decay
-    decay_params = []
-    no_decay_params = []
+    # Get LR multipliers from config (default: 10x for DSC/MSRE to compensate for ~60x smaller gradients)
+    dsc_lr_mult = train_config.get('dsc_lr_multiplier', 10.0)
+    msre_lr_mult = train_config.get('msre_lr_multiplier', 10.0)
+    
+    # Separate parameters into groups:
+    # 1. DSC parameters (higher LR)
+    # 2. MSRE parameters (higher LR)  
+    # 3. Other parameters with decay
+    # 4. Other parameters without decay (bias, norm, embedding)
+    
+    dsc_decay_params = []
+    dsc_no_decay_params = []
+    msre_decay_params = []
+    msre_no_decay_params = []
+    other_decay_params = []
+    other_no_decay_params = []
+    
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if 'bias' in name or 'norm' in name or 'embedding' in name:
-            no_decay_params.append(param)
+        
+        is_no_decay = 'bias' in name or 'norm' in name or 'embedding' in name
+        
+        # Route to appropriate group based on module name
+        if '.dsc.' in name or name.startswith('dsc.'):
+            if is_no_decay:
+                dsc_no_decay_params.append(param)
+            else:
+                dsc_decay_params.append(param)
+        elif '.msre.' in name or name.startswith('msre.'):
+            if is_no_decay:
+                msre_no_decay_params.append(param)
+            else:
+                msre_decay_params.append(param)
         else:
-            decay_params.append(param)
+            if is_no_decay:
+                other_no_decay_params.append(param)
+            else:
+                other_decay_params.append(param)
     
-    param_groups = [
-        {'params': decay_params, 'weight_decay': train_config['weight_decay']},
-        {'params': no_decay_params, 'weight_decay': 0.0},
-    ]
+    # Build param groups with per-group learning rates
+    param_groups = []
+    
+    # DSC params with higher LR
+    if dsc_decay_params:
+        param_groups.append({
+            'params': dsc_decay_params, 
+            'weight_decay': weight_decay,
+            'lr': base_lr * dsc_lr_mult,
+            'name': 'dsc_decay'
+        })
+    if dsc_no_decay_params:
+        param_groups.append({
+            'params': dsc_no_decay_params, 
+            'weight_decay': 0.0,
+            'lr': base_lr * dsc_lr_mult,
+            'name': 'dsc_no_decay'
+        })
+    
+    # MSRE params with higher LR
+    if msre_decay_params:
+        param_groups.append({
+            'params': msre_decay_params, 
+            'weight_decay': weight_decay,
+            'lr': base_lr * msre_lr_mult,
+            'name': 'msre_decay'
+        })
+    if msre_no_decay_params:
+        param_groups.append({
+            'params': msre_no_decay_params, 
+            'weight_decay': 0.0,
+            'lr': base_lr * msre_lr_mult,
+            'name': 'msre_no_decay'
+        })
+    
+    # Other params with base LR
+    if other_decay_params:
+        param_groups.append({
+            'params': other_decay_params, 
+            'weight_decay': weight_decay,
+            'lr': base_lr,
+            'name': 'other_decay'
+        })
+    if other_no_decay_params:
+        param_groups.append({
+            'params': other_no_decay_params, 
+            'weight_decay': 0.0,
+            'lr': base_lr,
+            'name': 'other_no_decay'
+        })
+    
+    # Log param group sizes for verification
+    dsc_count = len(dsc_decay_params) + len(dsc_no_decay_params)
+    msre_count = len(msre_decay_params) + len(msre_no_decay_params)
+    other_count = len(other_decay_params) + len(other_no_decay_params)
+    print(f"  Optimizer param groups:")
+    print(f"    DSC: {dsc_count} params @ {dsc_lr_mult}x LR ({base_lr * dsc_lr_mult:.2e})")
+    print(f"    MSRE: {msre_count} params @ {msre_lr_mult}x LR ({base_lr * msre_lr_mult:.2e})")
+    print(f"    Other: {other_count} params @ 1x LR ({base_lr:.2e})")
     
     # Get optimizer betas (TRM uses beta2=0.95 instead of default 0.999)
     beta1 = train_config.get('beta1', 0.9)
@@ -374,7 +474,7 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     
     optimizer = torch.optim.AdamW(
         param_groups,
-        lr=train_config['learning_rate'],
+        lr=base_lr,  # Use base_lr; per-group LRs are in param_groups
         betas=(beta1, beta2),
     )
     
@@ -393,9 +493,11 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     elif scheduler_type == 'onecycle':
         # OneCycleLR needs total_steps = epochs × steps_per_epoch
         total_steps = max_epochs * (steps_per_epoch or 1)
+        # For per-group LR, provide list of max_lr values
+        max_lrs = [pg.get('lr', base_lr) for pg in param_groups]
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
-            max_lr=train_config['learning_rate'],
+            max_lr=max_lrs,  # Per-group max learning rates
             total_steps=total_steps,
             pct_start=warmup_epochs / max_epochs,  # Warmup fraction
             anneal_strategy='cos',
@@ -413,12 +515,25 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     return optimizer, scheduler
 
 
-def warmup_lr(optimizer, step: int, warmup_steps: int, base_lr: float):
-    """Apply linear warmup to learning rate."""
+def warmup_lr(optimizer, step: int, warmup_steps: int, base_lr: float, initial_lrs: list = None):
+    """Apply linear warmup to learning rate.
+    
+    Args:
+        optimizer: The optimizer with param groups
+        step: Current step number
+        warmup_steps: Total warmup steps
+        base_lr: Base learning rate (used if initial_lrs not provided)
+        initial_lrs: Per-group initial learning rates (to preserve LR ratios)
+    """
     if step < warmup_steps:
         lr_scale = float(step + 1) / float(max(1, warmup_steps))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = base_lr * lr_scale
+        for i, param_group in enumerate(optimizer.param_groups):
+            # Use per-group LR if available, otherwise base_lr
+            if initial_lrs is not None and i < len(initial_lrs):
+                target_lr = initial_lrs[i]
+            else:
+                target_lr = base_lr
+            param_group['lr'] = target_lr * lr_scale
 
 
 def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
@@ -575,11 +690,14 @@ def train_epoch(
     warmup_steps = warmup_epochs * len(dataloader)
     base_lr = config['training']['learning_rate']
     
+    # Capture initial LRs for each param group (to preserve per-group LR ratios during warmup)
+    initial_lrs = [pg.get('lr', base_lr) for pg in optimizer.param_groups]
+    
     optimizer.zero_grad()
     
     for batch_idx, batch in enumerate(dataloader):
-        # Apply warmup
-        warmup_lr(optimizer, global_step, warmup_steps, base_lr)
+        # Apply warmup with per-group LR preservation
+        warmup_lr(optimizer, global_step, warmup_steps, base_lr, initial_lrs)
         
         # Collect augmentation statistics from batch (CRITICAL for diversity verification)
         if 'aug_stats' in batch:
@@ -1608,6 +1726,22 @@ Config Overrides:
             print(f"  ACT Loss: {act_loss_val:.4f} (weight={train_cfg['lambda_act']})")
         
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
+        
+        # Show per-module LRs if different groups exist
+        if len(optimizer.param_groups) > 2:  # More than just decay/no_decay
+            lr_summary = []
+            for pg in optimizer.param_groups:
+                name = pg.get('name', 'unnamed')
+                if 'dsc' in name:
+                    lr_summary.append(f"DSC:{pg['lr']:.2e}")
+                elif 'msre' in name:
+                    lr_summary.append(f"MSRE:{pg['lr']:.2e}")
+                elif 'other' in name and 'decay' in name:
+                    lr_summary.append(f"Other:{pg['lr']:.2e}")
+            if lr_summary:
+                # Deduplicate
+                unique_lrs = list(dict.fromkeys(lr_summary))
+                print(f"    Per-module LRs: {', '.join(unique_lrs)}")
         
         # Current temperature (affects attention sharpness)
         current_temp = get_temperature(epoch, config)

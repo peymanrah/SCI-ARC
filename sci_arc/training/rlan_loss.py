@@ -152,17 +152,22 @@ class WeightedStablemaxLoss(nn.Module):
     when the model is confident), this uses INVERSE FREQUENCY WEIGHTING computed
     per-batch to always give minority classes strong gradients.
     
-    For ARC-AGI:
-    - If 87% pixels are background, foreground gets ~7x higher weight
-    - This ensures foreground pixels ALWAYS get strong gradient signal
-    - No focal gamma that can suppress gradients when confident
+    For ARC-AGI with TRM encoding:
+    - Class 0 = BOUNDARY marker (structural, low weight like BG)
+    - Class 1 = Color 0 (black/background, low weight)
+    - Classes 2-10 = Colors 1-9 (foreground, high weight)
+    
+    Without TRM encoding:
+    - Class 0 = Color 0 (background, low weight)
+    - Classes 1-9 = Colors 1-9 (foreground, high weight)
     
     Args:
-        bg_weight_cap: Maximum weight for background (prevents instability if very few bg)
-        fg_weight_cap: Maximum weight for foreground classes
+        bg_weight_cap: Maximum weight for background/boundary classes
+        fg_weight_cap: Maximum weight for foreground classes  
         min_class_weight: Minimum weight for any class (prevents zero weights)
         reduction: 'mean', 'sum', or 'none'
         ignore_index: Label to ignore
+        use_trm_encoding: If True, treat classes 0-1 as BG, 2+ as FG
     """
     
     def __init__(
@@ -172,12 +177,14 @@ class WeightedStablemaxLoss(nn.Module):
         min_class_weight: float = 0.1,
         reduction: str = "mean",
         ignore_index: int = -100,
+        use_trm_encoding: bool = True,  # NEW: Handle TRM encoding
     ):
         super().__init__()
         self.bg_weight_cap = bg_weight_cap
         self.fg_weight_cap = fg_weight_cap
         self.min_class_weight = min_class_weight
         self.reduction = reduction
+        self.use_trm_encoding = use_trm_encoding
         self.ignore_index = ignore_index
     
     def forward(
@@ -225,9 +232,18 @@ class WeightedStablemaxLoss(nn.Module):
         raw_weights = 1.0 / (class_freq + 1e-6)
         
         # Apply different caps for background vs foreground
+        # With TRM encoding: 0=boundary, 1=color0(BG), 2-10=colors1-9(FG)
+        # Without TRM encoding: 0=color0(BG), 1-9=colors1-9(FG)
         weights = torch.zeros_like(raw_weights)
-        weights[0] = raw_weights[0].clamp(self.min_class_weight, self.bg_weight_cap)  # Background
-        weights[1:] = raw_weights[1:].clamp(self.min_class_weight, self.fg_weight_cap)  # Foreground
+        if self.use_trm_encoding:
+            # TRM encoding: classes 0-1 are BG-like, classes 2+ are FG
+            weights[0] = raw_weights[0].clamp(self.min_class_weight, self.bg_weight_cap)  # Boundary
+            weights[1] = raw_weights[1].clamp(self.min_class_weight, self.bg_weight_cap)  # Color 0 (black/BG)
+            weights[2:] = raw_weights[2:].clamp(self.min_class_weight, self.fg_weight_cap)  # Colors 1-9 (FG)
+        else:
+            # Original encoding: class 0 is BG, classes 1-9 are FG
+            weights[0] = raw_weights[0].clamp(self.min_class_weight, self.bg_weight_cap)  # Background
+            weights[1:] = raw_weights[1:].clamp(self.min_class_weight, self.fg_weight_cap)  # Foreground
         
         # Normalize weights so they sum to C (preserves loss magnitude)
         weights = weights * (C / (weights.sum() + 1e-6))
@@ -788,6 +804,7 @@ class RLANLoss(nn.Module):
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_stablemax', or 'focal'
         bg_weight_cap: float = 2.0,  # Max weight for BG in weighted_stablemax (increased from 1.0)
         fg_weight_cap: float = 5.0,  # Max weight for FG in weighted_stablemax (reduced from 10.0)
+        use_trm_encoding: bool = True,  # If True, classes 0-1 are BG, 2+ are FG
     ):
         """
         Args:
@@ -844,8 +861,9 @@ class RLANLoss(nn.Module):
                 bg_weight_cap=bg_weight_cap,
                 fg_weight_cap=fg_weight_cap,
                 min_class_weight=0.1,
+                use_trm_encoding=use_trm_encoding,  # Handle TRM encoding
             )
-            print(f"  Loss Mode: WEIGHTED_STABLEMAX (inverse frequency, bg_cap={bg_weight_cap}, fg_cap={fg_weight_cap})")
+            print(f"  Loss Mode: WEIGHTED_STABLEMAX (inverse frequency, bg_cap={bg_weight_cap}, fg_cap={fg_weight_cap}, trm_enc={use_trm_encoding})")
         elif loss_mode == 'focal_stablemax':
             # Focal loss with stablemax (original RLAN)
             self.task_loss = FocalStablemaxLoss(gamma=focal_gamma, alpha=focal_alpha)

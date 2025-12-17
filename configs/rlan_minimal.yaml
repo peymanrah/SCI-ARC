@@ -59,6 +59,20 @@ training:
   weight_decay: 0.1
   gradient_clip: 5.0
   
+  # ============================================================
+  # MODULE-SPECIFIC LEARNING RATES (Gradient Compensation)
+  # ============================================================
+  # CRITICAL INSIGHT (from gradient analysis, epochs 21-32):
+  # DSC gradient norm: ~0.01-0.02
+  # Solver gradient norm: ~0.8-1.4
+  # This 60-100x difference means DSC learns 60-100x slower!
+  # 
+  # Root cause: Long gradient path + coordinate normalization + Fourier encoding
+  # Solution: Higher LR for DSC/MSRE to compensate for gradient dilution
+  # ============================================================
+  dsc_lr_multiplier: 10.0   # DSC needs 10x LR due to gradient dilution
+  msre_lr_multiplier: 10.0  # MSRE also needs higher LR
+  
   # Temperature schedule (still needed for DSC attention)
   temperature_start: 1.0
   temperature_end: 0.1
@@ -115,7 +129,7 @@ training:
   min_lr: 1.0e-6
   
   use_ema: true
-  ema_decay: 0.995
+  ema_decay: 0.99  # Reduced from 0.995 - EMA was lagging too much behind training
 
 data:
   train_path: "./data/arc-agi/data/training"
