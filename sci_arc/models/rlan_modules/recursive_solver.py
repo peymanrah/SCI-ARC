@@ -142,6 +142,9 @@ class ConvGRUCell(nn.Module):
             # SwiGLU path
             proj = self.candidate_proj(combined_reset)
             h_candidate = self.candidate(proj)
+            # Bound the candidate to prevent drift in later steps
+            # tanh bounds to [-1, 1] which helps stability
+            h_candidate = torch.tanh(h_candidate)
         else:
             # Standard Tanh path
             h_candidate = torch.tanh(self.candidate(combined_reset))

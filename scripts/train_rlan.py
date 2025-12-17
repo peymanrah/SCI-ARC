@@ -689,8 +689,21 @@ def train_epoch(
                 # Per-step loss breakdown (verify deep supervision is working)
                 with torch.no_grad():
                     step_losses = []
-                    for step_logits in all_logits:
+                    step_logits_stats = []  # Track logit statistics per step
+                    for step_idx, step_logits in enumerate(all_logits):
                         # Check for inf/nan in logits (numerical instability)
+                        has_nan = torch.isnan(step_logits).any().item()
+                        has_inf = torch.isinf(step_logits).any().item()
+                        logits_max = step_logits.max().item() if torch.isfinite(step_logits).any() else float('inf')
+                        logits_min = step_logits.min().item() if torch.isfinite(step_logits).any() else float('-inf')
+                        
+                        step_logits_stats.append({
+                            'max': logits_max,
+                            'min': logits_min,
+                            'has_nan': has_nan,
+                            'has_inf': has_inf,
+                        })
+                        
                         if torch.isfinite(step_logits).all():
                             step_loss = torch.nn.functional.cross_entropy(
                                 step_logits, test_outputs, reduction='mean'
@@ -701,6 +714,7 @@ def train_epoch(
                             # Log warning and use placeholder
                             step_losses.append(float('nan'))
                     epoch_diagnostics['per_step_loss'] = step_losses
+                    epoch_diagnostics['per_step_logits_stats'] = step_logits_stats
             
             # Per-clue entropy breakdown
             if 'attention_maps' in outputs:
@@ -1451,13 +1465,37 @@ Config Overrides:
                 if per_step_loss:
                     loss_str = ', '.join(f"{l:.3f}" for l in per_step_loss)
                     print(f"  Per-Step Loss: [{loss_str}]")
-                    # Check if loss decreases across steps (good = later steps better)
-                    if len(per_step_loss) > 1:
-                        if per_step_loss[-1] < per_step_loss[0]:
-                            improvement = (per_step_loss[0] - per_step_loss[-1]) / per_step_loss[0] * 100
-                            print(f"    Step improvement: {improvement:.1f}% (later steps better)")
+                    
+                    # Find best step (should ideally be the last)
+                    valid_losses = [(i, l) for i, l in enumerate(per_step_loss) if l < 100 and not (l != l)]  # exclude 100 and NaN
+                    if valid_losses:
+                        best_step, best_loss = min(valid_losses, key=lambda x: x[1])
+                        worst_step, worst_loss = max(valid_losses, key=lambda x: x[1])
+                        
+                        if best_step == len(per_step_loss) - 1:
+                            improvement = (per_step_loss[0] - per_step_loss[-1]) / max(per_step_loss[0], 0.001) * 100
+                            print(f"    Step improvement: {improvement:.1f}% (later steps better - GOOD!)")
+                        elif best_step == 0:
+                            degradation = (per_step_loss[-1] - per_step_loss[0]) / max(per_step_loss[0], 0.001) * 100
+                            print(f"    [!] SOLVER DEGRADATION: Step 0 is best! Later steps {degradation:.1f}% worse!")
+                            print(f"    [!] Best: step {best_step} ({best_loss:.3f}), Worst: step {worst_step} ({worst_loss:.3f})")
                         else:
-                            print(f"    [!] Later steps NOT improving - solver not refining!")
+                            print(f"    [!] Best step is {best_step} (middle), not last - solver unstable!")
+                            print(f"    [!] Best: step {best_step} ({best_loss:.3f}), Final: step {len(per_step_loss)-1} ({per_step_loss[-1]:.3f})")
+                    
+                    # Check for loss = 100 (clamped infinite loss)
+                    if 100.0 in per_step_loss:
+                        bad_steps = [i for i, l in enumerate(per_step_loss) if l >= 100.0]
+                        print(f"    [CRITICAL] Steps {bad_steps} have loss >= 100 (numerical explosion!)")
+                
+                # Per-step logit statistics (numerical stability check)
+                per_step_stats = diagnostics.get('per_step_logits_stats', [])
+                if per_step_stats:
+                    for step_idx, stats in enumerate(per_step_stats):
+                        if stats.get('has_nan') or stats.get('has_inf'):
+                            print(f"    [CRITICAL] Step {step_idx}: NaN={stats['has_nan']}, Inf={stats['has_inf']}")
+                        elif abs(stats.get('max', 0)) > 50 or abs(stats.get('min', 0)) > 50:
+                            print(f"    [!] Step {step_idx} logits extreme: [{stats['min']:.1f}, {stats['max']:.1f}]")
             else:
                 print(f"  Solver Steps: [!] NO INTERMEDIATE LOGITS (deep supervision disabled!)")
             
