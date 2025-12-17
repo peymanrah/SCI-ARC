@@ -143,6 +143,118 @@ class StablemaxCrossEntropy(nn.Module):
             return full_loss.view(B, H, W)
 
 
+class WeightedStablemaxLoss(nn.Module):
+    """
+    Weighted Cross-Entropy Loss with Stablemax and DYNAMIC class weights.
+    
+    Unlike focal loss which down-weights "easy" examples (causing vanishing gradients
+    when the model is confident), this uses INVERSE FREQUENCY WEIGHTING computed
+    per-batch to always give minority classes strong gradients.
+    
+    For ARC-AGI:
+    - If 87% pixels are background, foreground gets ~7x higher weight
+    - This ensures foreground pixels ALWAYS get strong gradient signal
+    - No focal gamma that can suppress gradients when confident
+    
+    Args:
+        bg_weight_cap: Maximum weight for background (prevents instability if very few bg)
+        fg_weight_cap: Maximum weight for foreground classes
+        min_class_weight: Minimum weight for any class (prevents zero weights)
+        reduction: 'mean', 'sum', or 'none'
+        ignore_index: Label to ignore
+    """
+    
+    def __init__(
+        self,
+        bg_weight_cap: float = 1.0,
+        fg_weight_cap: float = 10.0,
+        min_class_weight: float = 0.1,
+        reduction: str = "mean",
+        ignore_index: int = -100,
+    ):
+        super().__init__()
+        self.bg_weight_cap = bg_weight_cap
+        self.fg_weight_cap = fg_weight_cap
+        self.min_class_weight = min_class_weight
+        self.reduction = reduction
+        self.ignore_index = ignore_index
+    
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Forward pass.
+        
+        Args:
+            logits: Shape (B, C, H, W) unnormalized logits
+            targets: Shape (B, H, W) target class indices
+            
+        Returns:
+            loss: Scalar or per-pixel loss
+        """
+        B, C, H, W = logits.shape
+        
+        # Flatten for loss computation
+        logits_flat = logits.permute(0, 2, 3, 1).reshape(-1, C)  # (B*H*W, C)
+        targets_flat = targets.reshape(-1)  # (B*H*W,)
+        
+        # Create mask for valid positions
+        valid_mask = targets_flat != self.ignore_index
+        
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+        
+        # Filter to valid positions
+        logits_valid = logits_flat[valid_mask]
+        targets_valid = targets_flat[valid_mask]
+        n_valid = targets_valid.numel()
+        
+        # Compute DYNAMIC class weights based on batch statistics
+        # Count each class in this batch
+        class_counts = torch.bincount(targets_valid, minlength=C).float()  # (C,)
+        
+        # Inverse frequency weighting: rarer classes get higher weight
+        # Add epsilon to avoid division by zero
+        class_freq = class_counts / (n_valid + 1e-6)
+        
+        # Compute weights as inverse of frequency (normalized)
+        # More frequent = lower weight, less frequent = higher weight
+        raw_weights = 1.0 / (class_freq + 1e-6)
+        
+        # Apply different caps for background vs foreground
+        weights = torch.zeros_like(raw_weights)
+        weights[0] = raw_weights[0].clamp(self.min_class_weight, self.bg_weight_cap)  # Background
+        weights[1:] = raw_weights[1:].clamp(self.min_class_weight, self.fg_weight_cap)  # Foreground
+        
+        # Normalize weights so they sum to C (preserves loss magnitude)
+        weights = weights * (C / (weights.sum() + 1e-6))
+        
+        # Get per-pixel weights
+        pixel_weights = weights[targets_valid]
+        
+        # Compute log stablemax probabilities
+        logprobs = log_stablemax(logits_valid.to(torch.float64), dim=-1)
+        logprobs = logprobs.to(logits.dtype)
+        
+        # Gather log probs for target classes
+        ce_loss = -torch.gather(logprobs, 1, targets_valid.unsqueeze(1)).squeeze(1)
+        ce_loss = ce_loss.clamp(max=100.0)  # Numerical stability
+        
+        # Apply class weights
+        weighted_loss = pixel_weights * ce_loss
+        
+        if self.reduction == "mean":
+            return weighted_loss.mean()
+        elif self.reduction == "sum":
+            return weighted_loss.sum()
+        else:
+            full_loss = torch.zeros(B * H * W, device=logits.device)
+            full_loss[valid_mask] = weighted_loss
+            return full_loss.view(B, H, W)
+
+
 class FocalStablemaxLoss(nn.Module):
     """
     Focal Loss with Stablemax denominator.
@@ -585,7 +697,7 @@ class RLANLoss(nn.Module):
         min_clues: float = 1.0,  # Minimum clues to use (1 for simple, grows for complex)
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
-        loss_mode: str = 'focal_stablemax',  # 'stablemax', 'focal_stablemax', or 'focal'
+        loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_stablemax', or 'focal'
     ):
         """
         Args:
@@ -601,7 +713,8 @@ class RLANLoss(nn.Module):
             max_clues: Maximum number of clues
             use_stablemax: DEPRECATED - use loss_mode instead
             loss_mode: Loss function mode:
-                - 'stablemax': Pure stablemax CE (TRM uses this - RECOMMENDED)
+                - 'stablemax': Pure stablemax CE (TRM uses this)
+                - 'weighted_stablemax': Inverse frequency weighting (BEST for ARC)
                 - 'focal_stablemax': Focal loss + stablemax
                 - 'focal': Standard focal loss
         """
@@ -614,6 +727,16 @@ class RLANLoss(nn.Module):
             # Pure stablemax cross-entropy (TRM style - RECOMMENDED)
             self.task_loss = StablemaxCrossEntropy()
             print(f"  Loss Mode: STABLEMAX (TRM-style, pure cross-entropy)")
+        elif loss_mode == 'weighted_stablemax':
+            # Inverse frequency weighted stablemax (BEST for ARC class imbalance)
+            # bg_weight_cap=1.0: Background never gets more than 1.0 weight
+            # fg_weight_cap=10.0: Foreground can get up to 10x weight
+            self.task_loss = WeightedStablemaxLoss(
+                bg_weight_cap=1.0,
+                fg_weight_cap=10.0,
+                min_class_weight=0.1,
+            )
+            print(f"  Loss Mode: WEIGHTED_STABLEMAX (inverse frequency, bg_cap=1.0, fg_cap=10.0)")
         elif loss_mode == 'focal_stablemax':
             # Focal loss with stablemax (original RLAN)
             self.task_loss = FocalStablemaxLoss(gamma=focal_gamma, alpha=focal_alpha)

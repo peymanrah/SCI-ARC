@@ -118,15 +118,26 @@ training:
   temperature_start: 1.0   # Sharp from start for debugging DSC
   temperature_end: 0.1
   
-  # FOCAL_STABLEMAX: Critical for anti-background-collapse
-  # ARC grids are ~85% background, so pure CE leads to predicting all-background.
-  # Focal loss down-weights easy (background) predictions, alpha weights foreground more.
-  loss_mode: 'focal_stablemax'
+  # WEIGHTED_STABLEMAX: Best for ARC class imbalance
+  # ================================================================
+  # Why NOT focal_stablemax?
+  # - Focal loss uses (1-p)^gamma to down-weight "easy" examples
+  # - When model predicts bg with high confidence, gradient VANISHES
+  # - This allows model to "lock in" to predicting all-background
+  # - Even with alpha=0.75, the focal weight kills the gradient
+  #
+  # Why weighted_stablemax works:
+  # - Uses inverse frequency weighting (no focal gamma!)
+  # - If 87% is background, foreground gets ~7x higher weight ALWAYS
+  # - Gradient never vanishes, model always learns from foreground pixels
+  # - bg_weight_cap=1.0 ensures background never dominates
+  # - fg_weight_cap=10.0 allows strong foreground learning
+  # ================================================================
+  loss_mode: 'weighted_stablemax'
   
-  # focal_gamma=2.0: Hard examples (low confidence) get 25x more weight than easy ones
-  # focal_alpha=0.75: Foreground pixels get 3x more weight than background
+  # These are only used if loss_mode is 'focal' or 'focal_stablemax':
   focal_gamma: 2.0
-  focal_alpha: 0.75  # HIGH alpha = MORE weight on foreground (was 0.25, which inverted!)
+  focal_alpha: 0.75
   
   # Auxiliary loss weights
   # =================================================================
