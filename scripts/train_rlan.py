@@ -142,6 +142,7 @@ def create_train_loader(
     augment_cfg = data_cfg.get('augmentation', {})
     augment_enabled = augment_cfg.get('enabled', True)
     color_permutation = augment_cfg.get('color_permutation', False)
+    color_permutation_prob = augment_cfg.get('color_permutation_prob', 0.3)  # Default to 30%!
     translational_augment = augment_cfg.get('translational', True)  # TRM-style offset
     
     # Enable augmentation tracking for debugging (verifies diversity)
@@ -152,6 +153,7 @@ def create_train_loader(
         max_size=max_grid_size,
         augment=augment_enabled,
         color_permutation=color_permutation,
+        color_permutation_prob=color_permutation_prob,  # Control permutation frequency
         translational_augment=translational_augment,
         curriculum_stage=curriculum_stage,  # Apply curriculum filtering!
         track_augmentation=track_augmentation,  # Enable for diversity logging
@@ -322,6 +324,9 @@ def create_loss(config: dict) -> RLANLoss:
         max_clues=model_config['max_clues'],
         use_stablemax=train_config.get('use_stablemax', True),
         loss_mode=train_config.get('loss_mode', 'focal_stablemax'),  # TRM uses 'stablemax'
+        # BG/FG weight caps for weighted_stablemax (CRITICAL for preventing collapse)
+        bg_weight_cap=train_config.get('bg_weight_cap', 2.0),  # Increased from 1.0
+        fg_weight_cap=train_config.get('fg_weight_cap', 5.0),  # Reduced from 10.0
     )
     
     return loss_fn
@@ -770,10 +775,19 @@ def train_epoch(
             
             # Stop probability (how many clues are used)
             if 'stop_logits' in outputs:
-                stop_probs = torch.sigmoid(outputs['stop_logits'])  # (B, K)
+                stop_logits = outputs['stop_logits']  # (B, K)
+                stop_probs = torch.sigmoid(stop_logits)  # (B, K)
                 epoch_diagnostics['stop_prob_mean'] = stop_probs.mean().item()
                 # Per-clue stop probability for detailed tracking
                 epoch_diagnostics['per_clue_stop_prob'] = stop_probs.mean(dim=0).tolist()  # (K,)
+                
+                # CRITICAL: Track stop_logits statistics to diagnose saturation
+                # If |mean| > 5, sigmoid is saturated and gradients vanish!
+                epoch_diagnostics['stop_logits_mean'] = stop_logits.mean().item()
+                epoch_diagnostics['stop_logits_std'] = stop_logits.std().item()
+                epoch_diagnostics['stop_logits_min'] = stop_logits.min().item()
+                epoch_diagnostics['stop_logits_max'] = stop_logits.max().item()
+                
                 # NEW: Track per-sample variance to verify task-dependent clue count
                 # If this is high, different samples use different clue counts (GOOD!)
                 # If this is near zero, all samples use same clues (BAD - no task-dependence)
@@ -1332,6 +1346,7 @@ Config Overrides:
     augment_cfg = data_cfg.get('augmentation', {})
     augment_enabled = augment_cfg.get('enabled', True)
     color_permutation = augment_cfg.get('color_permutation', False)
+    color_permutation_prob = augment_cfg.get('color_permutation_prob', 0.3)  # Default 30%
     translational_augment = augment_cfg.get('translational', True)
     
     print(f"\nLoading data from: {data_cfg['train_path']}")
@@ -1349,13 +1364,14 @@ Config Overrides:
     print(f"  2. Color Permutation:   {'ENABLED' if color_permutation else 'DISABLED'}")
     if color_permutation:
         print(f"     - 9! = 362,880 permutations (colors 1-9 shuffled, 0 fixed)")
+        print(f"     - Probability: {color_permutation_prob*100:.0f}% (CRITICAL: 100% breaks color identity learning!)")
     print(f"  3. Translational:       {'ENABLED' if translational_augment else 'DISABLED'}")
     if translational_augment:
         print(f"     - Random offset within 30x30 canvas (~100 positions)")
     
-    # Calculate augmentation diversity
+    # Calculate augmentation diversity (accounting for probability)
     dihedral_transforms = 8 if augment_enabled else 1
-    color_perms = 362880 if color_permutation else 1  # 9!
+    color_perms = int(362880 * color_permutation_prob) if color_permutation else 1  # 9! * prob
     translational_positions = 100 if translational_augment else 1  # approximate
     total_augmentations = dihedral_transforms * color_perms * translational_positions
     print(f"\n  Total Diversity: {dihedral_transforms} x {color_perms:,} x ~{translational_positions} = ~{total_augmentations:,} unique per task")
@@ -1718,6 +1734,19 @@ Config Overrides:
                     print(" (unexpected negative - check gradient flow)")
                 else:
                     print(" (weak - per-sample coupling may need tuning)")
+                
+                # CRITICAL: Check stop_logits saturation (causes zero gradient!)
+                stop_logits_mean = diagnostics.get('stop_logits_mean', 0)
+                stop_logits_std = diagnostics.get('stop_logits_std', 0)
+                stop_logits_min = diagnostics.get('stop_logits_min', 0)
+                stop_logits_max = diagnostics.get('stop_logits_max', 0)
+                print(f"  Stop Logits: mean={stop_logits_mean:.2f}, std={stop_logits_std:.2f}, range=[{stop_logits_min:.1f}, {stop_logits_max:.1f}]")
+                if abs(stop_logits_mean) > 5.0:
+                    print(f"    [CRITICAL] Stop logits saturated! |mean|={abs(stop_logits_mean):.1f} > 5.0")
+                    print(f"    Sigmoid gradient ≈ 0, stop predictor cannot learn!")
+                    print(f"    Consider adding L2 regularization on stop_logits")
+                elif abs(stop_logits_mean) > 3.0:
+                    print(f"    [!] Stop logits approaching saturation |mean|={abs(stop_logits_mean):.1f}")
                 
                 # Check for task-dependent clue count (the goal of per-sample gradient coupling)
                 if clues_std < 0.1:

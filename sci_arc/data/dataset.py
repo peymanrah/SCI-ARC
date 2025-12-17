@@ -72,6 +72,7 @@ class ARCDataset(Dataset):
         max_size: int = 30,
         augment: bool = True,
         color_permutation: bool = False,
+        color_permutation_prob: float = 1.0,  # NEW: probability of applying color permutation
         translational_augment: bool = True,  # NEW: TRM-style random offset
         curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
         track_augmentation: bool = True,  # Track augmentation stats for debugging
@@ -84,6 +85,9 @@ class ARCDataset(Dataset):
             max_size: Maximum grid size (grids are padded to this size)
             augment: Whether to apply dihedral augmentation (rotation, flip, transpose)
             color_permutation: Whether to apply random color permutation (9! possibilities)
+            color_permutation_prob: Probability of applying color permutation (0.0-1.0)
+                                    100% can break color identity learning!
+                                    Recommended: 0.3-0.5 for balanced augmentation
             translational_augment: Whether to apply random positional offset (TRM-style)
             curriculum_stage: Curriculum learning stage (0=all, 1=easy, 2=+medium, 3=+hard)
             track_augmentation: Whether to return augmentation metadata for logging
@@ -92,6 +96,7 @@ class ARCDataset(Dataset):
         self.max_size = max_size
         self.augment = augment
         self.color_permutation = color_permutation
+        self.color_permutation_prob = color_permutation_prob
         self.translational_augment = translational_augment
         self.curriculum_stage = curriculum_stage
         self.track_augmentation = track_augmentation
@@ -180,7 +185,8 @@ class ARCDataset(Dataset):
             aug_info['dihedral_id'] = dihedral_id
         
         # Apply color permutation (9! = 362,880 possibilities)
-        if self.color_permutation:
+        # Use color_permutation_prob to control frequency (100% can break color learning!)
+        if self.color_permutation and random.random() < self.color_permutation_prob:
             train_inputs, train_outputs, test_input, test_output = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )

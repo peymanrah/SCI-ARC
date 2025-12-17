@@ -786,6 +786,8 @@ class RLANLoss(nn.Module):
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_stablemax', or 'focal'
+        bg_weight_cap: float = 2.0,  # Max weight for BG in weighted_stablemax (increased from 1.0)
+        fg_weight_cap: float = 5.0,  # Max weight for FG in weighted_stablemax (reduced from 10.0)
     ):
         """
         Args:
@@ -808,6 +810,9 @@ class RLANLoss(nn.Module):
                 - 'weighted_stablemax': Inverse frequency weighting (BEST for ARC)
                 - 'focal_stablemax': Focal loss + stablemax
                 - 'focal': Standard focal loss
+            bg_weight_cap: Max weight for background in weighted_stablemax (default=2.0)
+            fg_weight_cap: Max weight for foreground in weighted_stablemax (default=5.0)
+                           Ratio of 5:2=2.5x FG emphasis (reduced from 10:1 to prevent collapse)
         """
         super().__init__()
         
@@ -822,14 +827,13 @@ class RLANLoss(nn.Module):
             print(f"  Loss Mode: STABLEMAX (TRM-style, pure cross-entropy)")
         elif loss_mode == 'weighted_stablemax':
             # Inverse frequency weighted stablemax (BEST for ARC class imbalance)
-            # bg_weight_cap=1.0: Background never gets more than 1.0 weight
-            # fg_weight_cap=10.0: Foreground can get up to 10x weight
+            # Use configurable caps to prevent BG/FG collapse
             self.task_loss = WeightedStablemaxLoss(
-                bg_weight_cap=1.0,
-                fg_weight_cap=10.0,
+                bg_weight_cap=bg_weight_cap,
+                fg_weight_cap=fg_weight_cap,
                 min_class_weight=0.1,
             )
-            print(f"  Loss Mode: WEIGHTED_STABLEMAX (inverse frequency, bg_cap=1.0, fg_cap=10.0)")
+            print(f"  Loss Mode: WEIGHTED_STABLEMAX (inverse frequency, bg_cap={bg_weight_cap}, fg_cap={fg_weight_cap})")
         elif loss_mode == 'focal_stablemax':
             # Focal loss with stablemax (original RLAN)
             self.task_loss = FocalStablemaxLoss(gamma=focal_gamma, alpha=focal_alpha)

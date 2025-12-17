@@ -326,18 +326,17 @@ class RecursiveSolver(nn.Module):
     
     def _init_output_head_for_balanced_predictions(self):
         """
-        Initialize output head with MILD foreground preference.
+        Initialize output head with NEUTRAL initialization.
         
         History of attempts:
         - bg_bias=+2.2 (50% BG): Model collapses to 100% BG immediately
         - bg_bias=-2.0 (1.5% BG): Model over-corrects, ends at 98% BG
-        - bg_bias=0.0 (10% BG): Uniform, but may still collapse
+        - bg_bias=-0.5 (6% BG): Combined with 10x FG weight, caused FG collapse!
+        - bg_bias=0.0 (10% BG): Uniform, let weighted loss guide learning
         
-        New approach: bg_bias=-0.5, giving P(bg) ≈ 6%
-        This is a MILD preference for foreground that:
-        1. Prevents immediate BG collapse
-        2. Doesn't over-correct like -2.0 did
-        3. Lets the weighted loss (10x FG) guide learning smoothly
+        New approach: bg_bias=0.0, NEUTRAL initialization
+        This is NEUTRAL and lets the weighted loss (bg_cap=2.0, fg_cap=5.0) guide learning.
+        The key insight is that initialization bias + loss weighting was too aggressive.
         """
         # Get the final Conv2d layer in output_head
         final_layer = None
@@ -346,12 +345,12 @@ class RecursiveSolver(nn.Module):
                 final_layer = module
         
         if final_layer is not None and final_layer.bias is not None:
-            # Mild negative bias for background
-            # P(bg) = exp(-0.5) / (exp(-0.5) + 9*exp(0)) = 0.606 / 9.606 ≈ 6.3%
+            # NEUTRAL initialization - let weighted loss guide learning
+            # With bg_cap=2.0, fg_cap=5.0, the ratio is 2.5x which is reasonable
             with torch.no_grad():
-                final_layer.bias[0] = -0.5  # Mild negative for background
-                final_layer.bias[1:] = 0.0  # Neutral for foreground classes
-            print(f"[RecursiveSolver] Output head initialized: bg_bias=-0.5 (P(bg)≈6%), fg_bias=0.0")
+                final_layer.bias[0] = 0.0  # NEUTRAL for background
+                final_layer.bias[1:] = 0.0  # NEUTRAL for foreground classes
+            print(f"[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0")
     
     def _aggregate_clues(
         self,
