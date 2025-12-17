@@ -608,6 +608,9 @@ class SparsityRegularization(nn.Module):
             'entropy_pondering': entropy_pondering.item() if torch.is_tensor(entropy_pondering) else entropy_pondering,
             'expected_clues_used': expected_clues_used.mean().item(),
             'stop_prob_mean': stop_probs.mean().item(),
+            # NEW: Track per-sample variance to verify task-dependent clue count
+            'stop_prob_std': stop_probs.mean(dim=-1).std().item(),  # Std of mean stop_prob per sample
+            'clues_used_std': (1 - stop_probs).sum(dim=-1).std().item(),  # Std of clues used per sample
         }
         
         return total_loss

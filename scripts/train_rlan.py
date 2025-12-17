@@ -762,6 +762,13 @@ def train_epoch(
                 epoch_diagnostics['stop_prob_mean'] = stop_probs.mean().item()
                 # Per-clue stop probability for detailed tracking
                 epoch_diagnostics['per_clue_stop_prob'] = stop_probs.mean(dim=0).tolist()  # (K,)
+                # NEW: Track per-sample variance to verify task-dependent clue count
+                # If this is high, different samples use different clue counts (GOOD!)
+                # If this is near zero, all samples use same clues (BAD - no task-dependence)
+                clues_used_per_sample = (1 - stop_probs).sum(dim=-1)  # (B,) - clues used per sample
+                epoch_diagnostics['clues_used_std'] = clues_used_per_sample.std().item()
+                epoch_diagnostics['clues_used_min'] = clues_used_per_sample.min().item()
+                epoch_diagnostics['clues_used_max'] = clues_used_per_sample.max().item()
             
             # DSC entropy inputs to stop_predictor (coupling verification)
             if 'dsc_entropy_inputs' in outputs:
@@ -1611,7 +1618,17 @@ Config Overrides:
             stop_prob = diagnostics.get('stop_prob_mean', 0)
             if stop_prob > 0:
                 clues_used = (1 - stop_prob) * all_logits_count if all_logits_count > 0 else 0
+                # NEW: Show variance to verify task-dependent clue count
+                clues_std = diagnostics.get('clues_used_std', 0)
+                clues_min = diagnostics.get('clues_used_min', 0)
+                clues_max = diagnostics.get('clues_used_max', 0)
                 print(f"  Stop Prob: {stop_prob:.3f} (approx {clues_used:.1f} clues active)")
+                print(f"  Clues Used: mean={clues_used:.2f}, std={clues_std:.2f}, range=[{clues_min:.1f}, {clues_max:.1f}]")
+                # Check for task-dependent clue count
+                if clues_std < 0.1:
+                    print(f"    [!] Low variance in clue count - may not be task-dependent!")
+                elif clues_std > 0.3:
+                    print(f"    Clue count varies by task (good!)")
             
             # Per-clue entropy breakdown
             per_clue_entropy = diagnostics.get('per_clue_entropy', [])
