@@ -99,15 +99,15 @@ training:
   temperature_start: 5.0
   temperature_end: 0.1
   
-  # Loss weights - focal loss dominates
-  # NOTE: lambda_sparsity was too high (0.005) causing DSC clues to collapse to 0
-  # Reduced to 0.001 to allow model to use spatial anchors
+  # Loss weights - REBALANCED after background collapse analysis
+  # Problem: DSC entropy stuck at 1.88, clues used = 0.00
+  # Solution: Increase entropy weight to force DSC to sharpen
   focal_gamma: 2.0
-  focal_alpha: 0.25
-  lambda_entropy: 0.01
-  lambda_sparsity: 0.001   # REDUCED: was 0.005, caused DSC collapse
+  focal_alpha: 0.5       # INCREASED from 0.25 - more weight on non-background
+  lambda_entropy: 0.1    # INCREASED 10x from 0.01 - force DSC sharpening
+  lambda_sparsity: 0.0   # DISABLED - was preventing clue usage
   lambda_predicate: 0.001
-  lambda_curriculum: 0.01
+  lambda_curriculum: 0.0
   lambda_deep_supervision: 0.3
   
   # TRM numerical stability technique
