@@ -55,20 +55,19 @@ training:
   # BATCH SIZE STRATEGY FOR SINGLE RTX 3090 (24GB VRAM)
   # =============================================================
   # TRM: global_batch=768 across 8 A100 GPUs
-  # RLAN target: effective_batch=340 (~22GB, 2GB headroom)
   # 
-  # Memory breakdown (hidden_dim=256):
-  #   Model + Optimizer + EMA: ~0.2GB fixed
-  #   Per-sample activations: ~250MB with AMP
-  #   Target: 24GB - 2GB headroom = 22GB usable
-  #   Max batch: (22 - 0.2) / 0.25 ≈ 87
-  #   Using 85 for safety margin
+  # Memory breakdown (hidden_dim=256, ~13.2M params):
+  #   Model + Optimizer + EMA: ~0.5GB fixed
+  #   Per-sample activations: ~300MB with AMP (measured)
+  #   With batch=85: 26.5GB (2.5GB spillover observed)
+  #   Reduce by: 2.5GB / 0.3GB ≈ 8-10 samples
+  #   New batch: 85 - 10 = 75
   # 
-  # grad_accumulation=4 → effective_batch = 85 × 4 = 340
+  # grad_accumulation=4 → effective_batch = 75 × 4 = 300
   # =============================================================
-  batch_size: 85
+  batch_size: 75
   grad_accumulation_steps: 4
-  # effective_batch_size = 85 × 4 = 340
+  # effective_batch_size = 75 × 4 = 300
   
   learning_rate: 1.0e-4  # Match TRM's lr=1e-4
   weight_decay: 0.1      # Match TRM's weight_decay=0.1
@@ -93,20 +92,21 @@ training:
   use_stablemax: true
   
   # =============================================================
-  # 3-STAGE CURRICULUM LEARNING (easy → medium → hard → all)
+  # CURRICULUM LEARNING: DISABLED (following TRM)
   # =============================================================
-  # Difficulty based on grid size and number of examples:
-  #   Stage 1 (easy): small grids (≤10×10), 3+ training examples
-  #   Stage 2 (medium): medium grids (≤20×20), 2+ examples
-  #   Stage 3 (hard): large grids, any examples
-  #   Stage 4: all data mixed (full training)
+  # TRM does NOT use curriculum learning. Instead it relies on:
+  #   1. Massive augmentation (1000× pre-generated per task)
+  #   2. 100K epochs on 8 GPUs
+  #   3. Training on ALL tasks from epoch 1
+  #
+  # Our approach: On-the-fly infinite augmentation (BETTER than TRM)
+  #   - 8 dihedral × 362,880 color perms = 2,903,040 unique per task
+  #   - Each epoch sees COMPLETELY NEW augmentations
+  #   - Prevents overfitting to fixed augmentation set
+  #   - 24 CPU workers saturate single GPU throughput
   # =============================================================
-  use_curriculum: true
-  curriculum_stages:
-    - 100   # Stage 1 (epochs 0-99): easy tasks only
-    - 300   # Stage 2 (epochs 100-299): + medium tasks
-    - 600   # Stage 3 (epochs 300-599): + hard tasks
-            # Stage 4 (epochs 600+): all data mixed
+  use_curriculum: false
+  curriculum_stages: []  # Not used when curriculum disabled
   
   # Optimizer & Scheduler (TRM settings)
   optimizer: "adamw"
@@ -127,22 +127,41 @@ data:
   max_grid_size: 30
   
   # Data loading optimization for 48 vCPU server
-  # Use 12 workers (25% of vCPU) for optimal GPU feeding
-  num_workers: 12
+  # Use 24 workers (50% of vCPU) for on-the-fly augmentation
+  # Each worker generates fresh random augmentations (dihedral + color perm)
+  num_workers: 24
   pin_memory: true
   prefetch_factor: 4
   persistent_workers: true
   
-  # Infinite diversity mode
-  cache_samples: false
+  # =============================================================
+  # INFINITE AUGMENTATION MODE (SUPERIOR TO TRM's PRE-GENERATED)
+  # =============================================================
+  # TRM: 1000 pre-generated augmentations per task = 400K samples
+  #      Same 400K samples seen every epoch → overfitting risk
+  #
+  # RLAN: On-the-fly random augmentation each __getitem__ call
+  #      - 8 dihedral transforms (D4 group)
+  #      - 362,880 color permutations (9!)
+  #      - ~100 translational positions (random offset in 30×30)
+  #      - Total: ~290M unique augmentations per task!
+  #      - EACH EPOCH sees completely different samples!
+  #
+  # With 24 workers @ 48 vCPU server:
+  #      - Workers generate augmentations in parallel
+  #      - GPU is never starved (prefetch_factor=4)
+  #      - Zero disk I/O bottleneck
+  # =============================================================
+  cache_samples: false  # CRITICAL: false = infinite diversity
   
-  # Full augmentation pipeline
+  # Full augmentation pipeline (matching TRM exactly + improvements)
   augmentation:
     enabled: true
-    rotation: true
-    flip: true
-    transpose: true
-    color_permutation: true
+    rotation: true         # 4 rotations (0°, 90°, 180°, 270°)
+    flip: true             # 2 flips (horizontal, vertical)
+    transpose: true        # 2 transposes (main, anti-diagonal)
+    color_permutation: true   # 9! = 362,880 permutations
+    translational: true    # TRM-style random offset in 30×30 canvas
 
 evaluation:
   num_guesses: 2
@@ -157,6 +176,11 @@ logging:
   keep_last_n: 5
   checkpoint_dir: "checkpoints/rlan_fair"  # TRM-matched capacity
   log_to_file: true
+  
+  # Augmentation diversity tracking (CRITICAL for debugging)
+  # Enables per-epoch logging of transformation distribution
+  # Verifies on-the-fly augmentation is truly random and uniform
+  track_augmentation: true
   
   use_wandb: false
   wandb_project: "rlan-arc"

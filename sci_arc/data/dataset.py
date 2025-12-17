@@ -47,13 +47,23 @@ class ARCDataset(Dataset):
     - Single combined JSON file (e.g., arc-agi_training_combined.json)
     - Directory with individual JSON task files (e.g., ./data/arc-agi/data/training/)
     
-    Augmentation:
+    Augmentation (matching TRM exactly):
     - 8 dihedral transforms (D4 group): rotations + flips + transposes
     - Color permutation (9! = 362,880 possibilities): permute colors 1-9, keep 0 fixed
-    - Total: 8 × 362,880 = 2,903,040 unique augmentations per task!
+    - Translational augmentation: random offset within 30×30 canvas
+    - Total: 8 × 362,880 × ~100 positions = ~290M unique augmentations per task!
     
     With cache_samples=false (default), EVERY __getitem__ call generates a NEW
     random augmentation, providing infinite diversity during training.
+    
+    This is SUPERIOR to TRM's pre-generated 1000× augmentation because:
+    - TRM sees same 1000 augmentations every epoch → overfitting risk
+    - RLAN sees completely NEW random augmentations each epoch → better generalization
+    
+    AUGMENTATION TRACKING:
+    - Tracks which augmentations are applied per sample
+    - Returns augmentation metadata for logging and debugging
+    - Enables verification of truly random augmentation distribution
     """
     
     def __init__(
@@ -62,7 +72,9 @@ class ARCDataset(Dataset):
         max_size: int = 30,
         augment: bool = True,
         color_permutation: bool = False,
+        translational_augment: bool = True,  # NEW: TRM-style random offset
         curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
+        track_augmentation: bool = True,  # Track augmentation stats for debugging
     ):
         """
         Initialize ARCDataset.
@@ -72,13 +84,17 @@ class ARCDataset(Dataset):
             max_size: Maximum grid size (grids are padded to this size)
             augment: Whether to apply dihedral augmentation (rotation, flip, transpose)
             color_permutation: Whether to apply random color permutation (9! possibilities)
+            translational_augment: Whether to apply random positional offset (TRM-style)
             curriculum_stage: Curriculum learning stage (0=all, 1=easy, 2=+medium, 3=+hard)
+            track_augmentation: Whether to return augmentation metadata for logging
         """
         self.data_path = Path(data_path)
         self.max_size = max_size
         self.augment = augment
         self.color_permutation = color_permutation
+        self.translational_augment = translational_augment
         self.curriculum_stage = curriculum_stage
+        self.track_augmentation = track_augmentation
         
         # Load tasks
         self.tasks = self._load_tasks()
@@ -132,7 +148,7 @@ class ARCDataset(Dataset):
         return len(self.tasks)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get a single sample with fresh random augmentation."""
+        """Get a single sample with fresh random augmentation and tracking."""
         task = self.tasks[idx]
         
         # Parse train pairs
@@ -149,25 +165,50 @@ class ARCDataset(Dataset):
         test_input = np.array(test_pair['input'], dtype=np.int64)
         test_output = np.array(test_pair.get('output', test_pair['input']), dtype=np.int64)
         
+        # Initialize augmentation tracking
+        aug_info = {
+            'dihedral_id': 0,  # Identity
+            'color_perm_applied': False,
+            'translational_offset': (0, 0),
+        }
+        
         # Apply dihedral augmentation (rotation, flip, transpose)
         if self.augment:
-            train_inputs, train_outputs, test_input, test_output = self._augment_dihedral(
+            train_inputs, train_outputs, test_input, test_output, dihedral_id = self._augment_dihedral_tracked(
                 train_inputs, train_outputs, test_input, test_output
             )
+            aug_info['dihedral_id'] = dihedral_id
         
         # Apply color permutation (9! = 362,880 possibilities)
         if self.color_permutation:
             train_inputs, train_outputs, test_input, test_output = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )
+            aug_info['color_perm_applied'] = True
         
-        # Pad grids
-        train_inputs_padded = [self._pad_grid(g) for g in train_inputs]
-        train_outputs_padded = [self._pad_grid(g) for g in train_outputs]
-        test_input_padded = self._pad_grid(test_input)
-        test_output_padded = self._pad_grid(test_output)
+        # Compute random translational offset (shared across all grids in this sample)
+        # TRM-style: random position within 30×30 canvas
+        offset = None
+        if self.translational_augment:
+            # Find max grid dimensions in this task to determine valid offset range
+            all_grids = train_inputs + train_outputs + [test_input, test_output]
+            max_h = max(g.shape[0] for g in all_grids)
+            max_w = max(g.shape[1] for g in all_grids)
+            
+            # Random offset that keeps all grids within bounds
+            max_offset_r = self.max_size - max_h
+            max_offset_c = self.max_size - max_w
+            if max_offset_r > 0 and max_offset_c > 0:
+                offset = (random.randint(0, max_offset_r), random.randint(0, max_offset_c))
+                aug_info['translational_offset'] = offset
         
-        return {
+        # Pad grids (with optional translational offset)
+        train_inputs_padded = [self._pad_grid(g, offset) for g in train_inputs]
+        train_outputs_padded = [self._pad_grid(g, offset) for g in train_outputs]
+        test_input_padded = self._pad_grid(test_input, offset)
+        test_output_padded = self._pad_grid(test_output, offset)
+        
+        result = {
             'task_id': task.get('task_id', str(idx)),
             'input_grids': [torch.from_numpy(g) for g in train_inputs_padded],
             'output_grids': [torch.from_numpy(g) for g in train_outputs_padded],
@@ -176,16 +217,90 @@ class ARCDataset(Dataset):
             'num_train_pairs': len(train_inputs),
             'transform_family': 0,  # Not used in RLAN
         }
+        
+        # Add augmentation tracking info if enabled
+        if self.track_augmentation:
+            result['aug_info'] = aug_info
+        
+        return result
     
-    def _pad_grid(self, grid: np.ndarray) -> np.ndarray:
-        """Pad grid to max_size x max_size."""
+    def _pad_grid(self, grid: np.ndarray, offset: Tuple[int, int] = None) -> np.ndarray:
+        """
+        Pad grid to max_size x max_size with optional translational offset.
+        
+        Args:
+            grid: Input grid of shape (H, W)
+            offset: Optional (row_offset, col_offset) for translational augmentation
+        
+        Returns:
+            Padded grid of shape (max_size, max_size)
+        """
         h, w = grid.shape
         if h >= self.max_size and w >= self.max_size:
             return grid[:self.max_size, :self.max_size]
         
         padded = np.zeros((self.max_size, self.max_size), dtype=grid.dtype)
-        padded[:min(h, self.max_size), :min(w, self.max_size)] = grid[:min(h, self.max_size), :min(w, self.max_size)]
+        
+        # Apply offset if provided (translational augmentation)
+        if offset is not None:
+            r_off, c_off = offset
+            padded[r_off:r_off+min(h, self.max_size), c_off:c_off+min(w, self.max_size)] = \
+                grid[:min(h, self.max_size), :min(w, self.max_size)]
+        else:
+            padded[:min(h, self.max_size), :min(w, self.max_size)] = \
+                grid[:min(h, self.max_size), :min(w, self.max_size)]
+        
         return padded
+    
+    def _augment_dihedral_tracked(
+        self,
+        train_inputs: List[np.ndarray],
+        train_outputs: List[np.ndarray],
+        test_input: np.ndarray,
+        test_output: np.ndarray
+    ) -> Tuple:
+        """
+        Apply random dihedral augmentation (8 transforms from D4 group) with tracking.
+        
+        Returns the augmented grids PLUS the dihedral_id for logging.
+        
+        Dihedral Transform IDs (matching TRM exactly):
+            0: identity
+            1: rotate 90° CCW
+            2: rotate 180°
+            3: rotate 270° CCW (90° CW)
+            4: horizontal flip (left-right)
+            5: vertical flip (up-down)
+            6: transpose (main diagonal)
+            7: anti-transpose (anti-diagonal)
+        """
+        # Random dihedral transform (0-7) - UNIFORM distribution
+        dihedral_id = random.randint(0, 7)
+        
+        def transform(g):
+            if dihedral_id == 0:
+                return g.copy()
+            elif dihedral_id == 1:
+                return np.rot90(g, k=1).copy()
+            elif dihedral_id == 2:
+                return np.rot90(g, k=2).copy()
+            elif dihedral_id == 3:
+                return np.rot90(g, k=3).copy()
+            elif dihedral_id == 4:
+                return np.fliplr(g).copy()
+            elif dihedral_id == 5:
+                return np.flipud(g).copy()
+            elif dihedral_id == 6:
+                return g.T.copy()  # transpose
+            else:  # 7
+                return np.fliplr(np.rot90(g, k=1)).copy()  # anti-transpose
+        
+        aug_inputs = [transform(g) for g in train_inputs]
+        aug_outputs = [transform(g) for g in train_outputs]
+        aug_test_in = transform(test_input)
+        aug_test_out = transform(test_output)
+        
+        return aug_inputs, aug_outputs, aug_test_in, aug_test_out, dihedral_id
     
     def _augment_dihedral(
         self,
@@ -265,22 +380,35 @@ class ARCDataset(Dataset):
         """
         Filter tasks by difficulty for curriculum learning.
         
-        Difficulty heuristics based on grid size and number of training examples:
-        - Stage 1 (easy): small grids (≤10×10) AND 3+ training examples
-        - Stage 2 (+medium): medium grids (≤20×20) AND 2+ training examples
-        - Stage 3 (+hard): all remaining tasks
+        Uses PERCENTILE-based filtering to ensure enough tasks per stage:
+        - Stage 1 (easy): 70% of tasks (smallest grids by max dimension)
+        - Stage 2 (+medium): 90% of tasks
+        - Stage 3 (+hard): All tasks (100%)
+        
+        This approach ensures:
+        - At least 280/400 tasks in Stage 1 (7+ batches with batch_size=75)
+        - At least 360/400 tasks in Stage 2
+        - All 400 tasks in Stage 3
         
         Args:
-            stage: 1=easy only, 2=easy+medium, 3=all (same as 0)
+            stage: 1=easy (70%), 2=easy+medium (90%), 3=all (100%)
         
         Returns:
             Filtered list of tasks
         """
-        def task_difficulty(task: Dict) -> int:
-            """Estimate task difficulty based on grid size and pairs."""
+        if stage >= 3 or stage == 0:
+            return self.tasks  # All tasks
+        
+        def get_task_complexity(task: Dict) -> float:
+            """
+            Compute complexity score for a task.
+            
+            Combines max grid dimension and inverse of example count.
+            Higher score = harder task.
+            """
             train_pairs = task.get('train', [])
             if not train_pairs:
-                return 3  # Unknown = hard
+                return 100.0  # Unknown = very hard
             
             # Find max grid dimension across all train pairs
             max_size = 0
@@ -292,16 +420,27 @@ class ARCDataset(Dataset):
             
             num_pairs = len(train_pairs)
             
-            # Difficulty classification
-            if max_size <= 10 and num_pairs >= 3:
-                return 1  # Easy
-            elif max_size <= 20 and num_pairs >= 2:
-                return 2  # Medium
-            else:
-                return 3  # Hard
+            # Complexity = grid_size + penalty for few examples
+            # More examples = easier (inverse relationship)
+            example_penalty = max(0, 5 - num_pairs)  # 0-4 penalty
+            return max_size + example_penalty
         
-        # Filter tasks where difficulty <= stage
-        return [t for t in self.tasks if task_difficulty(t) <= stage]
+        # Compute complexity for all tasks
+        task_complexities = [(t, get_task_complexity(t)) for t in self.tasks]
+        
+        # Sort by complexity (easiest first)
+        task_complexities.sort(key=lambda x: x[1])
+        
+        # Percentile thresholds
+        # Stage 1: 70% of tasks, Stage 2: 90% of tasks
+        percentiles = {1: 0.70, 2: 0.90}
+        threshold_pct = percentiles.get(stage, 1.0)
+        
+        # Select top N% easiest tasks
+        num_to_select = int(len(self.tasks) * threshold_pct)
+        selected = [t for t, _ in task_complexities[:num_to_select]]
+        
+        return selected
 
 
 # ============================================================================
@@ -825,6 +964,7 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
     - Pad all grids to max_size x max_size
     - Stack into batch tensors
     - Handle variable number of train pairs with padding
+    - Collect augmentation statistics for diversity logging
     
     Args:
         batch: List of samples from SCIARCDataset
@@ -841,6 +981,7 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
         - transform_families: [B]
         - num_pairs: [B] actual number of train pairs per sample
         - grid_masks: [B, max_pairs] mask for valid train pairs
+        - aug_stats: Optional dict with augmentation statistics for this batch
     """
     # Handle both parameter names
     if max_grid_size is not None:
@@ -862,6 +1003,12 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
     
     task_ids = []
     
+    # Augmentation statistics tracking
+    dihedral_counts = [0] * 8  # Count of each dihedral transform (0-7)
+    color_perm_count = 0
+    translational_count = 0
+    translational_offsets = []  # For computing offset diversity
+    
     for i, sample in enumerate(batch):
         task_ids.append(sample['task_id'])
         n_pairs = sample['num_train_pairs']
@@ -879,8 +1026,22 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
         
         # Transform family
         transform_families[i] = sample['transform_family']
+        
+        # Collect augmentation info if present
+        if 'aug_info' in sample:
+            aug_info = sample['aug_info']
+            dihedral_id = aug_info.get('dihedral_id', 0)
+            dihedral_counts[dihedral_id] += 1
+            
+            if aug_info.get('color_perm_applied', False):
+                color_perm_count += 1
+            
+            offset = aug_info.get('translational_offset', (0, 0))
+            if offset != (0, 0):
+                translational_count += 1
+                translational_offsets.append(offset)
     
-    return {
+    result = {
         'task_ids': task_ids,
         'input_grids': input_grids,
         'output_grids': output_grids,
@@ -890,6 +1051,21 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
         'num_pairs': num_pairs,
         'grid_masks': grid_masks,
     }
+    
+    # Add augmentation stats if any samples had tracking info
+    if any('aug_info' in sample for sample in batch):
+        # Compute offset diversity (number of unique offsets)
+        unique_offsets = len(set(translational_offsets)) if translational_offsets else 0
+        
+        result['aug_stats'] = {
+            'dihedral_counts': dihedral_counts,  # [count_id0, count_id1, ..., count_id7]
+            'color_perm_count': color_perm_count,
+            'translational_count': translational_count,
+            'unique_offsets': unique_offsets,
+            'batch_size': batch_size,
+        }
+    
+    return result
 
 
 def seed_worker(worker_id):

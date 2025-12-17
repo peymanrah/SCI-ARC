@@ -77,20 +77,13 @@ training:
   use_stablemax: true
   
   # =============================================================
-  # 3-STAGE CURRICULUM LEARNING (easy → medium → hard → all)
+  # CURRICULUM LEARNING: DISABLED (following TRM)
   # =============================================================
-  # Difficulty based on grid size and number of examples:
-  #   Stage 1 (easy): small grids (≤10×10), 3+ training examples
-  #   Stage 2 (medium): medium grids (≤20×20), 2+ examples
-  #   Stage 3 (hard): large grids, any examples
-  #   Stage 4: all data mixed (full training)
+  # TRM trains on ALL tasks from epoch 1, relies on augmentation.
+  # On-the-fly infinite augmentation is BETTER than curriculum.
   # =============================================================
-  use_curriculum: true
-  curriculum_stages:
-    - 100   # Stage 1 (epochs 0-99): easy tasks only
-    - 300   # Stage 2 (epochs 100-299): + medium tasks
-    - 600   # Stage 3 (epochs 300-599): + hard tasks
-            # Stage 4 (epochs 600+): all data mixed
+  use_curriculum: false
+  curriculum_stages: []
   
   # Optimizer & Scheduler (TRM settings)
   optimizer: "adamw"
@@ -110,8 +103,9 @@ data:
   
   max_grid_size: 30
   
-  # Data loading optimization
-  num_workers: 12
+  # Data loading optimization for 48 vCPU server
+  # Use 24 workers (50% of vCPU) for on-the-fly augmentation
+  num_workers: 24
   pin_memory: true
   prefetch_factor: 4
   persistent_workers: true
@@ -125,7 +119,8 @@ data:
     rotation: true
     flip: true
     transpose: true
-    color_permutation: true
+    color_permutation: true  # 9! = 362,880 permutations
+    translational: true      # TRM-style random offset in 30×30 canvas
 
 evaluation:
   num_guesses: 2
@@ -140,6 +135,11 @@ logging:
   keep_last_n: 5
   checkpoint_dir: "checkpoints/rlan_large"
   log_to_file: true
+  
+  # Augmentation diversity tracking (CRITICAL for debugging)
+  # Enables per-epoch logging of transformation distribution
+  # Verifies on-the-fly augmentation is truly random and uniform
+  track_augmentation: true
   
   use_wandb: false
   wandb_project: "rlan-arc"

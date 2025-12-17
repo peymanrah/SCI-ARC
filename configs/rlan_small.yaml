@@ -71,20 +71,13 @@ training:
   use_stablemax: true
   
   # =============================================================
-  # 3-STAGE CURRICULUM LEARNING (easy → medium → hard → all)
+  # CURRICULUM LEARNING: DISABLED (following TRM)
   # =============================================================
-  # For small model with 500 epochs, compress stages:
-  #   Stage 1 (easy): epochs 0-49
-  #   Stage 2 (medium): epochs 50-149
-  #   Stage 3 (hard): epochs 150-299
-  #   Stage 4 (all): epochs 300+
+  # TRM trains on ALL tasks from epoch 1, relies on augmentation.
+  # On-the-fly infinite augmentation is BETTER than curriculum.
   # =============================================================
-  use_curriculum: true
-  curriculum_stages:
-    - 50    # Stage 1 (epochs 0-49): easy tasks only
-    - 150   # Stage 2 (epochs 50-149): + medium tasks
-    - 300   # Stage 3 (epochs 150-299): + hard tasks
-            # Stage 4 (epochs 300+): all data mixed
+  use_curriculum: false
+  curriculum_stages: []
   
   # Optimizer and scheduler (TRM settings)
   optimizer: "adamw"
@@ -110,8 +103,8 @@ data:
   max_grid_size: 30
   
   # Data loading optimization for 48 vCPU server
-  # Use 12 workers (25% of vCPU) for optimal GPU feeding
-  num_workers: 12
+  # Use 24 workers (50% of vCPU) for on-the-fly augmentation
+  num_workers: 24
   pin_memory: true
   prefetch_factor: 4
   persistent_workers: true
@@ -131,7 +124,8 @@ data:
     rotation: true
     flip: true
     transpose: true
-    color_permutation: true  # Full augmentation for maximum diversity
+    color_permutation: true  # 9! = 362,880 permutations
+    translational: true      # TRM-style random offset in 30×30 canvas
 
 evaluation:
   num_guesses: 2
@@ -146,6 +140,11 @@ logging:
   keep_last_n: 5  # Keep last N checkpoints
   checkpoint_dir: "checkpoints/rlan_small"
   log_to_file: true  # Save all output to log file
+  
+  # Augmentation diversity tracking (CRITICAL for debugging)
+  # Enables per-epoch logging of transformation distribution
+  # Verifies on-the-fly augmentation is truly random and uniform
+  track_augmentation: true
   
   # Weights & Biases (optional)
   use_wandb: false

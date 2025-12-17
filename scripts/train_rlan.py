@@ -141,13 +141,19 @@ def create_train_loader(
     augment_cfg = data_cfg.get('augmentation', {})
     augment_enabled = augment_cfg.get('enabled', True)
     color_permutation = augment_cfg.get('color_permutation', False)
+    translational_augment = augment_cfg.get('translational', True)  # TRM-style offset
+    
+    # Enable augmentation tracking for debugging (verifies diversity)
+    track_augmentation = config.get('logging', {}).get('track_augmentation', True)
     
     train_dataset = ARCDataset(
         data_cfg['train_path'],
         max_size=max_grid_size,
         augment=augment_enabled,
         color_permutation=color_permutation,
+        translational_augment=translational_augment,
         curriculum_stage=curriculum_stage,  # Apply curriculum filtering!
+        track_augmentation=track_augmentation,  # Enable for diversity logging
     )
     
     batch_size = train_cfg['batch_size']
@@ -388,7 +394,11 @@ def train_epoch(
     global_step: int = 0,
     ema: Optional[EMAHelper] = None,
 ) -> Dict[str, float]:
-    """Train for one epoch."""
+    """
+    Train for one epoch with augmentation diversity tracking.
+    
+    Returns losses dict AND augmentation statistics for debugging.
+    """
     model.train()
     
     total_losses = {
@@ -400,6 +410,15 @@ def train_epoch(
         'curriculum_loss': 0.0,
     }
     num_batches = 0
+    total_samples = 0  # Track total samples processed
+    
+    # Augmentation statistics for the epoch (CRITICAL for verifying diversity)
+    epoch_aug_stats = {
+        'dihedral_counts': [0] * 8,  # Count per dihedral transform ID (0-7)
+        'color_perm_count': 0,       # Samples with color permutation
+        'translational_count': 0,    # Samples with translational offset
+        'unique_offsets': 0,         # Running unique offset count (approximate)
+    }
     
     temperature = get_temperature(epoch, config)
     max_epochs = config['training']['max_epochs']
@@ -416,6 +435,19 @@ def train_epoch(
     for batch_idx, batch in enumerate(dataloader):
         # Apply warmup
         warmup_lr(optimizer, global_step, warmup_steps, base_lr)
+        
+        # Collect augmentation statistics from batch (CRITICAL for diversity verification)
+        if 'aug_stats' in batch:
+            batch_aug = batch['aug_stats']
+            for i in range(8):
+                epoch_aug_stats['dihedral_counts'][i] += batch_aug['dihedral_counts'][i]
+            epoch_aug_stats['color_perm_count'] += batch_aug['color_perm_count']
+            epoch_aug_stats['translational_count'] += batch_aug['translational_count']
+            epoch_aug_stats['unique_offsets'] += batch_aug['unique_offsets']
+        
+        # Track sample count
+        batch_size = batch['test_inputs'].shape[0]
+        total_samples += batch_size
         
         # Move batch to device - handle collated batch format
         test_inputs = batch['test_inputs'].to(device)
@@ -520,6 +552,13 @@ def train_epoch(
     # Average losses
     for key in total_losses:
         total_losses[key] /= max(num_batches, 1)
+    
+    # Add epoch-level statistics
+    total_losses['total_samples'] = total_samples
+    total_losses['num_batches'] = num_batches
+    
+    # Add augmentation diversity stats (CRITICAL for debugging)
+    total_losses['aug_stats'] = epoch_aug_stats
     
     return total_losses, global_step
 
@@ -807,6 +846,34 @@ Config Overrides:
     for name, count in param_counts.items():
         print(f"  {name}: {count:,}")
     
+    # ================================================================
+    # RLAN TRAINING REGIME CONFIGURATION
+    # ================================================================
+    train_cfg = config['training']
+    print(f"\n{'='*60}")
+    print("RLAN TRAINING REGIME")
+    print(f"{'='*60}")
+    print(f"  Batch Size: {train_cfg['batch_size']}")
+    print(f"  Grad Accumulation: {train_cfg.get('grad_accumulation_steps', 1)}")
+    print(f"  Effective Batch: {train_cfg['batch_size'] * train_cfg.get('grad_accumulation_steps', 1)}")
+    print(f"  Learning Rate: {train_cfg['learning_rate']:.1e}")
+    print(f"  Weight Decay: {train_cfg['weight_decay']}")
+    print(f"  Optimizer: {train_cfg.get('optimizer', 'adamw')} (beta1={train_cfg.get('beta1', 0.9)}, beta2={train_cfg.get('beta2', 0.95)})")
+    print(f"  Scheduler: {train_cfg.get('scheduler', 'cosine')}")
+    print(f"  Warmup Epochs: {train_cfg.get('warmup_epochs', 10)}")
+    print(f"  Max Epochs: {train_cfg['max_epochs']}")
+    print(f"\nLoss Weights (RLAN modules):")
+    print(f"  focal_gamma={train_cfg['focal_gamma']}, focal_alpha={train_cfg['focal_alpha']}")
+    print(f"  lambda_entropy={train_cfg['lambda_entropy']} (DSC attention sharpness)")
+    print(f"  lambda_sparsity={train_cfg['lambda_sparsity']} (DSC clue efficiency)")
+    print(f"  lambda_predicate={train_cfg['lambda_predicate']} (predicate diversity)")
+    print(f"  lambda_curriculum={train_cfg['lambda_curriculum']} (complexity penalty)")
+    print(f"  lambda_deep_supervision={train_cfg['lambda_deep_supervision']} (intermediate losses)")
+    print(f"  use_stablemax={train_cfg.get('use_stablemax', True)} (TRM numerical stability)")
+    print(f"\nTemperature Schedule (Gumbel-Softmax):")
+    print(f"  Start: {train_cfg['temperature_start']}, End: {train_cfg['temperature_end']}")
+    print(f"{'='*60}")
+    
     # Create loss function
     loss_fn = create_loss(config)
     
@@ -816,10 +883,36 @@ Config Overrides:
     augment_cfg = data_cfg.get('augmentation', {})
     augment_enabled = augment_cfg.get('enabled', True)
     color_permutation = augment_cfg.get('color_permutation', False)
+    translational_augment = augment_cfg.get('translational', True)
     
     print(f"\nLoading data from: {data_cfg['train_path']}")
     print(f"Cache samples: {data_cfg.get('cache_samples', False)}")
-    print(f"Augmentation: dihedral={augment_enabled}, color_perm={color_permutation}")
+    
+    # ================================================================
+    # AUGMENTATION CONFIGURATION (matching TRM's 3 augmentation types)
+    # ================================================================
+    print(f"\n{'='*60}")
+    print("AUGMENTATION CONFIGURATION")
+    print(f"{'='*60}")
+    print(f"  1. Dihedral (D4 group): {'ENABLED' if augment_enabled else 'DISABLED'}")
+    if augment_enabled:
+        print(f"     - 8 transforms: identity, rot90, rot180, rot270, flipLR, flipUD, transpose, anti-transpose")
+    print(f"  2. Color Permutation:   {'ENABLED' if color_permutation else 'DISABLED'}")
+    if color_permutation:
+        print(f"     - 9! = 362,880 permutations (colors 1-9 shuffled, 0 fixed)")
+    print(f"  3. Translational:       {'ENABLED' if translational_augment else 'DISABLED'}")
+    if translational_augment:
+        print(f"     - Random offset within 30x30 canvas (~100 positions)")
+    
+    # Calculate augmentation diversity
+    dihedral_transforms = 8 if augment_enabled else 1
+    color_perms = 362880 if color_permutation else 1  # 9!
+    translational_positions = 100 if translational_augment else 1  # approximate
+    total_augmentations = dihedral_transforms * color_perms * translational_positions
+    print(f"\n  Total Diversity: {dihedral_transforms} x {color_perms:,} x ~{translational_positions} = ~{total_augmentations:,} unique per task")
+    print(f"  Mode: On-the-fly (EACH sample is NEW random augmentation)")
+    print(f"  Advantage: Infinite diversity vs TRM's fixed 1000 samples")
+    print(f"{'='*60}")
     
     # ================================================================
     # CURRICULUM LEARNING SETUP
@@ -829,20 +922,20 @@ Config Overrides:
     curriculum_stages = train_cfg.get('curriculum_stages', [100, 300, 600])
     
     if use_curriculum:
-        print(f"\nCurriculum learning ENABLED:")
-        print(f"  Stage 1 (easy): epochs 0-{curriculum_stages[0]-1}")
-        print(f"  Stage 2 (+medium): epochs {curriculum_stages[0]}-{curriculum_stages[1]-1}")
-        print(f"  Stage 3 (+hard): epochs {curriculum_stages[1]}-{curriculum_stages[2]-1}")
-        print(f"  Stage 4 (all): epochs {curriculum_stages[2]}+")
-        # Start at stage 1 (easy tasks only)
+        print(f"\nCurriculum learning ENABLED (percentile-based):")
+        print(f"  Stage 1: epochs 0-{curriculum_stages[0]-1} (70% easiest tasks)")
+        print(f"  Stage 2: epochs {curriculum_stages[0]}-{curriculum_stages[1]-1} (90% of tasks)")
+        print(f"  Stage 3: epochs {curriculum_stages[1]}-{curriculum_stages[2]-1} (100% all tasks)")
+        print(f"  Stage 4: epochs {curriculum_stages[2]}+ (all tasks, no filtering)")
+        # Start at stage 1 (70% of tasks)
         current_curriculum_stage = 1
     else:
-        print("\nCurriculum learning DISABLED (using all data)")
+        print("\nCurriculum learning DISABLED (using all data from epoch 1, like TRM)")
         current_curriculum_stage = 0  # 0 means all data
     
     # Create initial train loader (with curriculum stage if enabled)
     train_loader = create_train_loader(
-        config, 
+        config,
         curriculum_stage=current_curriculum_stage,
         max_grid_size=max_grid_size,
     )
@@ -862,12 +955,6 @@ Config Overrides:
     pin_memory = data_cfg.get('pin_memory', True)
     
     collate_fn = partial(collate_sci_arc, max_grid_size=max_grid_size)
-    
-    # Calculate augmentation diversity
-    dihedral_transforms = 8  # D4 group
-    color_perms = 362880 if color_permutation else 1  # 9! or 1
-    total_augmentations = dihedral_transforms * color_perms
-    print(f"Augmentation diversity: {dihedral_transforms} dihedral × {color_perms} color = {total_augmentations:,} per task")
     
     eval_loader = DataLoader(
         eval_dataset,
@@ -950,7 +1037,8 @@ Config Overrides:
         if use_curriculum:
             new_stage = get_curriculum_stage(epoch, curriculum_stages)
             if new_stage != current_curriculum_stage:
-                stage_names = {0: "ALL DATA", 1: "EASY", 2: "EASY+MEDIUM", 3: "EASY+MEDIUM+HARD"}
+                # Percentile-based stage names
+                stage_names = {0: "ALL 100%", 1: "70% EASY", 2: "90% TASKS", 3: "100% ALL"}
                 print(f"\n" + "=" * 60)
                 print(f"  CURRICULUM STAGE TRANSITION: {stage_names.get(current_curriculum_stage, '?')} -> {stage_names.get(new_stage, '?')}")
                 print(f"=" * 60)
@@ -977,8 +1065,8 @@ Config Overrides:
         # Log curriculum stage if enabled
         stage_str = ""
         if use_curriculum:
-            stage_names = {0: "all", 1: "easy", 2: "+medium", 3: "+hard"}
-            stage_str = f", Curriculum: {stage_names.get(current_curriculum_stage, '?')}"
+            stage_names = {0: "100%", 1: "70%", 2: "90%", 3: "100%"}
+            stage_str = f", Curriculum: {stage_names.get(current_curriculum_stage, '?')} tasks"
         
         print(f"Epoch {epoch + 1} Summary:")
         print(f"  Train Loss: {train_losses['total_loss']:.4f}")
@@ -988,6 +1076,53 @@ Config Overrides:
         print(f"  Predicate Loss: {train_losses.get('predicate_loss', 0):.4f}")
         print(f"  Curriculum Loss: {train_losses.get('curriculum_loss', 0):.4f}")
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
+        
+        # ================================================================
+        # AUGMENTATION DIVERSITY LOGGING (CRITICAL for quality assurance)
+        # ================================================================
+        # This verifies that on-the-fly augmentation is truly random and
+        # covers all transformation types uniformly each epoch.
+        # ================================================================
+        aug_stats = train_losses.get('aug_stats', {})
+        total_samples = train_losses.get('total_samples', 0)
+        num_batches = train_losses.get('num_batches', 0)
+        
+        # Initialize augmentation metrics (for logging even if wandb not installed)
+        color_pct = 0.0
+        trans_pct = 0.0
+        
+        print(f"  Samples Processed: {total_samples} ({num_batches} batches)")
+        
+        if aug_stats and total_samples > 0:
+            dihedral_counts = aug_stats.get('dihedral_counts', [0]*8)
+            color_perm_count = aug_stats.get('color_perm_count', 0)
+            translational_count = aug_stats.get('translational_count', 0)
+            
+            # Dihedral distribution (should be ~uniform across 8 transforms)
+            dihedral_total = sum(dihedral_counts)
+            if dihedral_total > 0:
+                dihedral_pcts = [f"{c/dihedral_total*100:.1f}%" for c in dihedral_counts]
+                print(f"  Dihedral Distribution: [{', '.join(dihedral_pcts)}]")
+                
+                # Check for uniformity (should be ~12.5% each)
+                expected_pct = 100.0 / 8  # 12.5%
+                max_deviation = max(abs(c/dihedral_total*100 - expected_pct) for c in dihedral_counts)
+                if max_deviation > 5.0:  # More than 5% deviation from uniform
+                    print(f"    [!] Non-uniform dihedral distribution (max dev: {max_deviation:.1f}%)")
+            
+            # Color permutation rate
+            color_pct = color_perm_count / total_samples * 100 if total_samples > 0 else 0
+            print(f"  Color Permutation: {color_pct:.1f}% ({color_perm_count}/{total_samples})")
+            
+            # Translational augmentation rate
+            trans_pct = translational_count / total_samples * 100 if total_samples > 0 else 0
+            unique_offsets = aug_stats.get('unique_offsets', 0)
+            print(f"  Translational Aug: {trans_pct:.1f}% ({translational_count}/{total_samples}), unique offsets: {unique_offsets}")
+            
+            # Overall augmentation quality indicator
+            aug_enabled_count = dihedral_total  # At least dihedral is applied
+            aug_quality = "GOOD" if (color_pct > 90 and trans_pct > 80) else "OK" if aug_enabled_count > 0 else "NONE"
+            print(f"  Aug Quality: {aug_quality}")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:
@@ -1062,6 +1197,18 @@ Config Overrides:
             
             # Log to wandb - all loss components for complete monitoring
             if wandb_enabled:
+                # Prepare augmentation stats for wandb
+                aug_log = {}
+                if aug_stats:
+                    dihedral_counts = aug_stats.get('dihedral_counts', [0]*8)
+                    dihedral_total = sum(dihedral_counts)
+                    if dihedral_total > 0:
+                        for i, count in enumerate(dihedral_counts):
+                            aug_log[f'aug/dihedral_{i}'] = count / dihedral_total
+                    aug_log['aug/color_perm_pct'] = color_pct
+                    aug_log['aug/translational_pct'] = trans_pct
+                    aug_log['aug/total_samples'] = total_samples
+                
                 wandb.log({
                     'epoch': epoch + 1,
                     # All loss components
@@ -1087,6 +1234,8 @@ Config Overrides:
                     'lr': optimizer.param_groups[0]['lr'],
                     'temperature': get_temperature(epoch, config),
                     'collapse_warnings': collapse_warnings,
+                    # Augmentation diversity (CRITICAL for quality assurance)
+                    **aug_log,
                 })
             
             # Save best model
