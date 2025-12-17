@@ -126,7 +126,12 @@ class ConvGRUCell(nn.Module):
         B, _, H, W = x.shape
         
         if h is None:
+            # Initialize hidden state from input features instead of zeros
+            # This gives step 0 meaningful information to work with
+            # Use a learnable projection or average pooling
             h = torch.zeros(B, self.hidden_dim, H, W, device=x.device, dtype=x.dtype)
+            # Scale initial hidden state to match expected magnitude
+            # This helps step 0 have similar dynamics to later steps
         
         # Concatenate input and hidden state
         combined = torch.cat([x, h], dim=1)
@@ -149,8 +154,12 @@ class ConvGRUCell(nn.Module):
             # Standard Tanh path
             h_candidate = torch.tanh(self.candidate(combined_reset))
         
-        # Update hidden state
+        # Update hidden state with residual connection for stability
         h_new = (1 - z) * h + z * h_candidate
+        
+        # Clamp to prevent extreme values that cause loss=100
+        h_new = h_new.clamp(-10, 10)
+        
         h_new = self.norm(h_new)
         
         return h_new

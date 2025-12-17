@@ -97,7 +97,7 @@ training:
   
   learning_rate: 1.0e-4
   weight_decay: 0.1
-  gradient_clip: 1.0
+  gradient_clip: 2.0  # Increased from 1.0 - gradients were consistently 3-5x over threshold
   
   # Temperature schedule for Gumbel-Softmax (DSC attention sharpness)
   # =================================================================
