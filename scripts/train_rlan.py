@@ -477,12 +477,27 @@ def train_epoch(
     }
     
     # Diagnostic statistics for debugging training dynamics
+    # ======================================================
+    # These metrics help identify WHY training succeeds or fails
+    # ======================================================
     epoch_diagnostics = {
-        'dsc_grad_norm_sum': 0.0,    # Gradient norm flowing to DSC
-        'encoder_grad_norm_sum': 0.0, # Gradient norm to encoder
-        'per_clue_entropy': [],       # Per-clue entropy breakdown (K values)
-        'centroid_spread': 0.0,       # How spread out are clue centroids
-        'all_logits_count': 0,        # Verify deep supervision is receiving steps
+        # Gradient flow (are gradients reaching each module?)
+        'dsc_grad_norm_sum': 0.0,     # Gradient norm flowing to DSC
+        'encoder_grad_norm_sum': 0.0,  # Gradient norm to encoder
+        'solver_grad_norm_sum': 0.0,   # Gradient norm to solver
+        
+        # DSC attention quality (is DSC learning meaningful patterns?)
+        'per_clue_entropy': [],        # Per-clue entropy breakdown (K values)
+        'centroid_spread': 0.0,        # How spread out are clue centroids
+        'all_logits_count': 0,         # Verify deep supervision is receiving steps
+        
+        # Attention statistics (is attention focusing or diffuse?)
+        'attn_max_mean': 0.0,          # Mean of max attention values (higher = sharper)
+        'attn_min_mean': 0.0,          # Mean of min attention values (lower = sharper)
+        'stop_prob_mean': 0.0,         # Mean stop probability (how many clues used)
+        
+        # Per-step loss (is deep supervision working?)
+        'per_step_loss': [],           # Loss at each solver step
     }
     
     temperature = get_temperature(epoch, config)
@@ -562,6 +577,7 @@ def train_epoch(
                     grad_norms = compute_module_grad_norms(model)
                     epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
                     epoch_diagnostics['encoder_grad_norm_sum'] += grad_norms.get('encoder', 0.0)
+                    epoch_diagnostics['solver_grad_norm_sum'] += grad_norms.get('solver', 0.0)
                 
                 scaler.step(optimizer)
                 scaler.update()
@@ -603,6 +619,7 @@ def train_epoch(
                     grad_norms = compute_module_grad_norms(model)
                     epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
                     epoch_diagnostics['encoder_grad_norm_sum'] += grad_norms.get('encoder', 0.0)
+                    epoch_diagnostics['solver_grad_norm_sum'] += grad_norms.get('solver', 0.0)
                 
                 optimizer.step()
                 optimizer.zero_grad()
@@ -624,6 +641,16 @@ def train_epoch(
             all_logits = outputs.get('all_logits')
             if all_logits is not None:
                 epoch_diagnostics['all_logits_count'] = len(all_logits)
+                
+                # Per-step loss breakdown (verify deep supervision is working)
+                with torch.no_grad():
+                    step_losses = []
+                    for step_logits in all_logits:
+                        step_loss = torch.nn.functional.cross_entropy(
+                            step_logits, test_outputs, reduction='mean'
+                        )
+                        step_losses.append(step_loss.item())
+                    epoch_diagnostics['per_step_loss'] = step_losses
             
             # Per-clue entropy breakdown
             if 'attention_maps' in outputs:
@@ -633,6 +660,17 @@ def train_epoch(
                 attn_clamp = attn_flat.clamp(min=1e-10)
                 per_clue_entropy = -(attn_clamp * attn_clamp.log()).sum(dim=-1).mean(dim=0)  # (K,)
                 epoch_diagnostics['per_clue_entropy'] = per_clue_entropy.tolist()
+                
+                # Attention sharpness statistics
+                attn_max = attn_flat.max(dim=-1)[0].mean()  # Mean of max attention
+                attn_min = attn_flat.min(dim=-1)[0].mean()  # Mean of min attention
+                epoch_diagnostics['attn_max_mean'] = attn_max.item()
+                epoch_diagnostics['attn_min_mean'] = attn_min.item()
+            
+            # Stop probability (how many clues are used)
+            if 'stop_logits' in outputs:
+                stop_probs = torch.sigmoid(outputs['stop_logits'])  # (B, K)
+                epoch_diagnostics['stop_prob_mean'] = stop_probs.mean().item()
             
             # Centroid spread (how diverse are clue locations)
             if 'centroids' in outputs:
@@ -1313,38 +1351,84 @@ Config Overrides:
         # ================================================================
         diagnostics = train_losses.get('diagnostics', {})
         if diagnostics:
+            print("  --- Training Diagnostics ---")
+            
             # Deep supervision verification
             all_logits_count = diagnostics.get('all_logits_count', 0)
             if all_logits_count > 0:
                 print(f"  Solver Steps: {all_logits_count} (deep supervision active)")
+                
+                # Per-step loss breakdown
+                per_step_loss = diagnostics.get('per_step_loss', [])
+                if per_step_loss:
+                    loss_str = ', '.join(f"{l:.3f}" for l in per_step_loss)
+                    print(f"  Per-Step Loss: [{loss_str}]")
+                    # Check if loss decreases across steps (good = later steps better)
+                    if len(per_step_loss) > 1:
+                        if per_step_loss[-1] < per_step_loss[0]:
+                            improvement = (per_step_loss[0] - per_step_loss[-1]) / per_step_loss[0] * 100
+                            print(f"    Step improvement: {improvement:.1f}% (later steps better)")
+                        else:
+                            print(f"    [!] Later steps NOT improving - solver not refining!")
             else:
                 print(f"  Solver Steps: [!] NO INTERMEDIATE LOGITS (deep supervision disabled!)")
             
             # Gradient flow diagnostics
             dsc_grad = diagnostics.get('dsc_grad_norm_sum', 0)
             enc_grad = diagnostics.get('encoder_grad_norm_sum', 0)
-            if dsc_grad > 0 or enc_grad > 0:
-                print(f"  Grad Norms: DSC={dsc_grad:.4f}, Encoder={enc_grad:.4f}")
-                if dsc_grad < 0.001:
-                    print(f"    [!] DSC gradients near zero - not learning!")
+            solver_grad = diagnostics.get('solver_grad_norm_sum', 0)
+            print(f"  Grad Norms: DSC={dsc_grad:.4f}, Encoder={enc_grad:.4f}, Solver={solver_grad:.4f}")
+            if dsc_grad < 0.001 and enc_grad > 0:
+                print(f"    [!] DSC gradients near zero - not learning!")
+            if solver_grad < 0.001 and enc_grad > 0:
+                print(f"    [!] Solver gradients near zero - check architecture!")
+            
+            # Attention sharpness (is DSC focusing?)
+            attn_max = diagnostics.get('attn_max_mean', 0)
+            attn_min = diagnostics.get('attn_min_mean', 0)
+            if attn_max > 0:
+                print(f"  Attention: max={attn_max:.4f}, min={attn_min:.6f}")
+                # For a 30x30 grid, uniform attention = 1/900 = 0.0011
+                # Sharp attention should have max >> 0.0011
+                if attn_max < 0.01:
+                    print(f"    [!] Attention too diffuse (max < 0.01) - DSC not focusing!")
+                elif attn_max > 0.1:
+                    print(f"    Attention is sharp (good!)")
+            
+            # Stop probability (how many clues used)
+            stop_prob = diagnostics.get('stop_prob_mean', 0)
+            if stop_prob > 0:
+                clues_used = (1 - stop_prob) * all_logits_count if all_logits_count > 0 else 0
+                print(f"  Stop Prob: {stop_prob:.3f} (approx {clues_used:.1f} clues active)")
             
             # Per-clue entropy breakdown
             per_clue_entropy = diagnostics.get('per_clue_entropy', [])
             if per_clue_entropy:
                 entropy_str = ', '.join(f"{e:.2f}" for e in per_clue_entropy)
-                print(f"  Per-Clue Entropy: [{entropy_str}]")
+                mean_entropy = sum(per_clue_entropy) / len(per_clue_entropy)
+                max_entropy = 6.80  # ln(900) for 30x30 grid
+                print(f"  Per-Clue Entropy: [{entropy_str}] (mean={mean_entropy:.2f}, max={max_entropy:.2f})")
+                
                 # Check if all clues have similar entropy (bad - not differentiating)
                 if len(per_clue_entropy) > 1:
-                    entropy_std = (sum((e - sum(per_clue_entropy)/len(per_clue_entropy))**2 for e in per_clue_entropy) / len(per_clue_entropy)) ** 0.5
+                    entropy_std = (sum((e - mean_entropy)**2 for e in per_clue_entropy) / len(per_clue_entropy)) ** 0.5
                     if entropy_std < 0.1:
-                        print(f"    [!] Clues have uniform entropy - not differentiating!")
+                        print(f"    [!] Clues have uniform entropy (std={entropy_std:.3f}) - not differentiating!")
+                
+                # Check if entropy is too high (attention too diffuse)
+                if mean_entropy > 5.0:
+                    print(f"    [!] High entropy ({mean_entropy:.2f}) - attention still diffuse!")
+                elif mean_entropy < 3.0:
+                    print(f"    Good entropy ({mean_entropy:.2f}) - attention is focused!")
             
             # Centroid spread
             centroid_spread = diagnostics.get('centroid_spread', 0)
             if centroid_spread > 0:
                 print(f"  Centroid Spread: {centroid_spread:.2f} (higher=more diverse)")
-                if centroid_spread < 1.0:
-                    print(f"    [!] Clues clustered together - should spread out")
+                if centroid_spread < 2.0:
+                    print(f"    [!] Clues clustered (spread < 2) - should spread out")
+                elif centroid_spread > 8.0:
+                    print(f"    Good spread - clues are distributed across grid")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:

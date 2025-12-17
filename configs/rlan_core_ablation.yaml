@@ -18,6 +18,36 @@
 #
 # If this config works better than RLAN-Full, it proves the core novelty
 # and suggests LCR/SPH are not essential.
+#
+# ==================================
+# DEBUGGING CHECKPOINTS (what to look for in training logs)
+# ==================================
+# 
+# EPOCH 5-10 (Early training):
+#   - Grad Norms: DSC should be > 0.01 (gradients flowing)
+#   - Per-Clue Entropy: Should be < 5.0 (attention starting to focus)
+#   - Attention max: Should be > 0.01 (not uniform)
+#   - Task Loss: Should be dropping from ~2.4
+#
+# EPOCH 25 (DSC should be contributing):
+#   - Per-Clue Entropy: Should be < 4.0 (focused attention)
+#   - Centroid Spread: Should be > 3.0 (clues spreading out)
+#   - Per-Step Loss: Later steps should be lower than earlier steps
+#   - Non-BG Accuracy: Should be > 0.1 (not just predicting black)
+#
+# EPOCH 50 (DSC fully engaged):
+#   - Per-Clue Entropy: Should be < 3.0 (sharp attention)
+#   - Attention max: Should be > 0.1 (very focused)
+#   - Task Accuracy: Should be > 0.0 (some tasks solved)
+#   - Deep Supervision Loss: Should be > 0.0 (contributing to learning)
+#
+# RED FLAGS (problems requiring intervention):
+#   - DSC grad norm < 0.001 → gradients not reaching DSC
+#   - Entropy > 5.0 after epoch 25 → attention still diffuse
+#   - Centroid spread < 2.0 → all clues attending to same location
+#   - Non-BG Accuracy decreasing → background collapse
+#   - Per-Step Loss not improving → solver not refining
+# ==================================
 
 model:
   type: "rlan"
@@ -70,11 +100,22 @@ training:
   gradient_clip: 1.0
   
   # Temperature schedule for Gumbel-Softmax (DSC attention sharpness)
-  # Lower start = sharper attention earlier = faster DSC learning
-  # At temp=5.0, attention is 99% uniform (too soft to learn)
-  # At temp=1.0, attention starts becoming meaningful
-  # Changed from 5.0 to 2.0 so DSC learns faster
-  temperature_start: 2.0   # WAS 5.0 - too soft for first 200 epochs!
+  # =================================================================
+  # GOAL: See DSC contribute meaningfully within first 50 epochs
+  # 
+  # Temperature controls attention sharpness in Gumbel-Softmax:
+  #   temp > 2.0: Nearly uniform attention (99% entropy) - DSC can't learn
+  #   temp ~ 1.0: Moderately sharp - DSC starts learning
+  #   temp < 0.5: Very sharp - risk of gradient issues
+  #
+  # Schedule analysis (exponential decay):
+  #   tau_start=5.0: reaches 1.0 at epoch 206 (TOO SLOW)
+  #   tau_start=2.0: reaches 1.0 at epoch 116 (STILL SLOW)
+  #   tau_start=1.0: always below 1.0, sharp from start (FOR DEBUGGING)
+  #
+  # Using 1.0 for debugging - we need to see DSC working early!
+  # =================================================================
+  temperature_start: 1.0   # Sharp from start for debugging DSC
   temperature_end: 0.1
   
   # TRM-style loss (pure stablemax, no focal)
@@ -82,11 +123,19 @@ training:
   
   focal_gamma: 2.0
   focal_alpha: 0.25
-  lambda_entropy: 0.1    # Force DSC to sharpen attention
-  lambda_sparsity: 0.0   # Disabled - don't penalize clue usage
-  lambda_predicate: 0.0  # Disabled - no SPH
+  
+  # Auxiliary loss weights
+  # =================================================================
+  # lambda_entropy: Penalizes high entropy (diffuse attention)
+  #   - Higher = stronger pressure for sharp attention
+  #   - 0.1 is mild, 0.5 is strong
+  #   - Increase if DSC entropy stays high (>4.0) after epoch 25
+  # =================================================================
+  lambda_entropy: 0.2      # Increased from 0.1 for stronger DSC pressure
+  lambda_sparsity: 0.0     # Disabled - don't penalize clue usage
+  lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
-  lambda_deep_supervision: 0.3
+  lambda_deep_supervision: 0.3  # Helps intermediate steps learn
   
   use_stablemax: true
   
