@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import random
+import math
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List
@@ -412,8 +413,20 @@ def warmup_lr(optimizer, step: int, warmup_steps: int, base_lr: float):
 
 
 def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
-    """Compute gradient norms for key modules to verify learning signal."""
+    """Compute gradient norms for key modules to verify learning signal.
+    
+    Returns 0.0 for modules with no gradients, handles NaN gracefully.
+    """
     grad_norms = {}
+    
+    def safe_grad_norm(param):
+        """Safely compute gradient norm, returning 0 for NaN/Inf."""
+        if param.grad is None:
+            return 0.0
+        norm = param.grad.norm().item()
+        if not math.isfinite(norm):  # Handle NaN and Inf
+            return 0.0
+        return norm ** 2
     
     # DSC gradients
     if hasattr(model, 'dsc') and model.dsc is not None:
@@ -423,7 +436,7 @@ def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
         stop_pred_count = 0
         for name, param in model.dsc.named_parameters():
             if param.grad is not None:
-                grad_norm_sq = param.grad.norm().item() ** 2
+                grad_norm_sq = safe_grad_norm(param)
                 dsc_grad += grad_norm_sq
                 dsc_count += 1
                 # Track stop_predictor specifically (critical for clue usage learning)
@@ -439,7 +452,7 @@ def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
         enc_count = 0
         for name, param in model.encoder.named_parameters():
             if param.grad is not None:
-                enc_grad += param.grad.norm().item() ** 2
+                enc_grad += safe_grad_norm(param)
                 enc_count += 1
         grad_norms['encoder'] = (enc_grad ** 0.5) if enc_count > 0 else 0.0
     
@@ -449,7 +462,7 @@ def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
         solver_count = 0
         for name, param in model.solver.named_parameters():
             if param.grad is not None:
-                solver_grad += param.grad.norm().item() ** 2
+                solver_grad += safe_grad_norm(param)
                 solver_count += 1
         grad_norms['solver'] = (solver_grad ** 0.5) if solver_count > 0 else 0.0
     
@@ -459,7 +472,7 @@ def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
         ctx_count = 0
         for name, param in model.context_encoder.named_parameters():
             if param.grad is not None:
-                ctx_grad += param.grad.norm().item() ** 2
+                ctx_grad += safe_grad_norm(param)
                 ctx_count += 1
         grad_norms['context_encoder'] = (ctx_grad ** 0.5) if ctx_count > 0 else 0.0
     
@@ -469,7 +482,7 @@ def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
         msre_count = 0
         for name, param in model.msre.named_parameters():
             if param.grad is not None:
-                msre_grad += param.grad.norm().item() ** 2
+                msre_grad += safe_grad_norm(param)
                 msre_count += 1
         grad_norms['msre'] = (msre_grad ** 0.5) if msre_count > 0 else 0.0
     
@@ -619,11 +632,14 @@ def train_epoch(
                     total_grad_norm_before = 0.0
                     for p in model.parameters():
                         if p.grad is not None:
-                            total_grad_norm_before += p.grad.norm().item() ** 2
+                            norm_val = p.grad.norm().item()
+                            if math.isfinite(norm_val):
+                                total_grad_norm_before += norm_val ** 2
                     total_grad_norm_before = total_grad_norm_before ** 0.5
                     
-                    # Capture per-module gradient norms BEFORE clipping (first batch only)
-                    if batch_idx < grad_accumulation_steps:
+                    # Capture per-module gradient norms BEFORE clipping (first optimizer step only)
+                    # This is when (batch_idx + 1) == grad_accumulation_steps
+                    if (batch_idx + 1) == grad_accumulation_steps:
                         grad_norms = compute_module_grad_norms(model)
                         epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
                         epoch_diagnostics['stop_predictor_grad_norm_sum'] += grad_norms.get('stop_predictor', 0.0)
@@ -673,11 +689,13 @@ def train_epoch(
                 total_grad_norm_before = 0.0
                 for p in model.parameters():
                     if p.grad is not None:
-                        total_grad_norm_before += p.grad.norm().item() ** 2
+                        norm_val = p.grad.norm().item()
+                        if math.isfinite(norm_val):
+                            total_grad_norm_before += norm_val ** 2
                 total_grad_norm_before = total_grad_norm_before ** 0.5
                 
-                # Capture per-module gradient norms BEFORE clipping (first batch only)
-                if batch_idx < grad_accumulation_steps:
+                # Capture per-module gradient norms BEFORE clipping (first optimizer step only)
+                if (batch_idx + 1) == grad_accumulation_steps:
                     grad_norms = compute_module_grad_norms(model)
                     epoch_diagnostics['dsc_grad_norm_sum'] += grad_norms.get('dsc', 0.0)
                     epoch_diagnostics['stop_predictor_grad_norm_sum'] += grad_norms.get('stop_predictor', 0.0)
