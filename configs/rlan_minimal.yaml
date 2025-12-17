@@ -10,11 +10,14 @@
 # - If complex training is required, the architecture may be flawed
 # - TRM achieves 50% with just cross-entropy loss
 #
-# KEY INSIGHT (from Epoch 26-30 collapse):
-# Pure stablemax causes BG mode collapse because ~93% of pixels
-# are background. The model finds a local minimum predicting all-BG.
-# We use weighted_stablemax for inverse frequency class balancing,
-# which is still "minimal" (just task loss, no auxiliary losses).
+# KEY INSIGHT (from TRM comparison):
+# TRM ignores padding pixels in loss computation. Our grids are
+# padded to 30x30, but the actual content is much smaller. Without
+# ignoring padding, 80-90% of pixels are padding (0), causing mode
+# collapse to background-only predictions.
+#
+# FIX: Use ignore_padding_in_loss=true in data config, and now
+# we can use pure stablemax like TRM.
 #
 # ===========================
 
@@ -62,23 +65,15 @@ training:
   temperature_end: 0.1
   
   # ============================================================
-  # MINIMAL LOSS: Just task loss, but with class balancing
+  # MINIMAL LOSS: Just task loss, like TRM
   # ============================================================
-  # Pure stablemax causes BG mode collapse (100% BG predictions)
-  # because ~93% of pixels are BG - model finds local minimum
-  # by predicting all-BG.
-  #
-  # weighted_stablemax uses inverse frequency weighting to give
-  # rare FG classes stronger gradients. This is still "minimal"
-  # because it's just task loss - no auxiliary losses.
+  # Now that we ignore padding in loss (like TRM), we can use
+  # pure stablemax cross-entropy. The actual grid content has
+  # a more balanced class distribution.
   # ============================================================
-  loss_mode: 'weighted_stablemax'  # Inverse frequency weighting
+  loss_mode: 'stablemax'          # Pure stablemax like TRM
   
-  # BG/FG weight caps (prevents extreme weights)
-  bg_weight_cap: 2.0              # Max weight for background
-  fg_weight_cap: 5.0              # Max weight for foreground (2.5x BG emphasis)
-  
-  # Focal loss params (not used with weighted_stablemax)
+  # Focal loss params (not used with stablemax)
   focal_gamma: 2.0
   focal_alpha: 0.75
   
@@ -118,6 +113,11 @@ data:
   eval_path: "./data/arc-agi/data/evaluation"
   
   max_grid_size: 30
+  
+  # CRITICAL: Ignore padding in loss (like TRM)
+  # Without this, padding pixels (93% of grid) dominate the loss
+  # and cause mode collapse to background-only predictions
+  ignore_padding_in_loss: true
   
   num_workers: 24
   pin_memory: true

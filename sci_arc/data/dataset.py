@@ -66,6 +66,11 @@ class ARCDataset(Dataset):
     - Enables verification of truly random augmentation distribution
     """
     
+    # Padding value for target grids (used to ignore padding in loss)
+    # TRM uses 0 as PAD and shifts colors by +2, we use -100 as PAD to ignore in loss
+    # -100 is the standard PyTorch ignore_index value
+    PADDING_IGNORE_VALUE = -100
+    
     def __init__(
         self,
         data_path: str,
@@ -76,6 +81,7 @@ class ARCDataset(Dataset):
         translational_augment: bool = True,  # NEW: TRM-style random offset
         curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
         track_augmentation: bool = True,  # Track augmentation stats for debugging
+        ignore_padding_in_loss: bool = True,  # NEW: Use -1 for padding in targets
     ):
         """
         Initialize ARCDataset.
@@ -91,6 +97,8 @@ class ARCDataset(Dataset):
             translational_augment: Whether to apply random positional offset (TRM-style)
             curriculum_stage: Curriculum learning stage (0=all, 1=easy, 2=+medium, 3=+hard)
             track_augmentation: Whether to return augmentation metadata for logging
+            ignore_padding_in_loss: If True, use -1 as padding value for target grids
+                                    so loss ignores padding pixels (like TRM)
         """
         self.data_path = Path(data_path)
         self.max_size = max_size
@@ -100,6 +108,7 @@ class ARCDataset(Dataset):
         self.translational_augment = translational_augment
         self.curriculum_stage = curriculum_stage
         self.track_augmentation = track_augmentation
+        self.ignore_padding_in_loss = ignore_padding_in_loss
         
         # Load tasks
         self.tasks = self._load_tasks()
@@ -209,10 +218,11 @@ class ARCDataset(Dataset):
                 aug_info['translational_offset'] = offset
         
         # Pad grids (with optional translational offset)
-        train_inputs_padded = [self._pad_grid(g, offset) for g in train_inputs]
-        train_outputs_padded = [self._pad_grid(g, offset) for g in train_outputs]
-        test_input_padded = self._pad_grid(test_input, offset)
-        test_output_padded = self._pad_grid(test_output, offset)
+        # Use is_target=True for output grids so padding is ignored in loss
+        train_inputs_padded = [self._pad_grid(g, offset, is_target=False) for g in train_inputs]
+        train_outputs_padded = [self._pad_grid(g, offset, is_target=True) for g in train_outputs]
+        test_input_padded = self._pad_grid(test_input, offset, is_target=False)
+        test_output_padded = self._pad_grid(test_output, offset, is_target=True)
         
         result = {
             'task_id': task.get('task_id', str(idx)),
@@ -230,13 +240,15 @@ class ARCDataset(Dataset):
         
         return result
     
-    def _pad_grid(self, grid: np.ndarray, offset: Tuple[int, int] = None) -> np.ndarray:
+    def _pad_grid(self, grid: np.ndarray, offset: Tuple[int, int] = None, is_target: bool = False) -> np.ndarray:
         """
         Pad grid to max_size x max_size with optional translational offset.
         
         Args:
             grid: Input grid of shape (H, W)
             offset: Optional (row_offset, col_offset) for translational augmentation
+            is_target: If True and ignore_padding_in_loss is enabled, use -1 as padding
+                       so that loss function ignores padding pixels (like TRM)
         
         Returns:
             Padded grid of shape (max_size, max_size)
@@ -245,9 +257,14 @@ class ARCDataset(Dataset):
         if h >= self.max_size and w >= self.max_size:
             return grid[:self.max_size, :self.max_size]
         
-        padded = np.zeros((self.max_size, self.max_size), dtype=grid.dtype)
+        # Use -1 as padding for target grids (ignored in loss), 0 for input grids
+        pad_value = self.PADDING_IGNORE_VALUE if (is_target and self.ignore_padding_in_loss) else 0
         
-        # Apply offset if provided (translational augmentation)
+        # Need int64 for -1 values (uint8 can't hold -1)
+        dtype = np.int64 if pad_value < 0 else grid.dtype
+        padded = np.full((self.max_size, self.max_size), pad_value, dtype=dtype)
+        
+        # Copy actual content
         if offset is not None:
             r_off, c_off = offset
             padded[r_off:r_off+min(h, self.max_size), c_off:c_off+min(w, self.max_size)] = \

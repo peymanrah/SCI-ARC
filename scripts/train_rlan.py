@@ -149,6 +149,9 @@ def create_train_loader(
     # Enable augmentation tracking for debugging (verifies diversity)
     track_augmentation = config.get('logging', {}).get('track_augmentation', True)
     
+    # CRITICAL: Ignore padding in loss (like TRM) to prevent BG mode collapse
+    ignore_padding_in_loss = data_cfg.get('ignore_padding_in_loss', True)  # Default True!
+    
     train_dataset = ARCDataset(
         data_cfg['train_path'],
         max_size=max_grid_size,
@@ -158,6 +161,7 @@ def create_train_loader(
         translational_augment=translational_augment,
         curriculum_stage=curriculum_stage,  # Apply curriculum filtering!
         track_augmentation=track_augmentation,  # Enable for diversity logging
+        ignore_padding_in_loss=ignore_padding_in_loss,  # Ignore padding (like TRM)
     )
     
     batch_size = train_cfg['batch_size']
@@ -1424,11 +1428,14 @@ Config Overrides:
     )
     
     # Eval dataset (no curriculum filtering - always full eval)
+    # Also use ignore_padding_in_loss for consistent loss computation
+    ignore_padding_in_loss = data_cfg.get('ignore_padding_in_loss', True)
     eval_dataset = ARCDataset(
         data_cfg['eval_path'],
         max_size=max_grid_size,
         augment=False,
         color_permutation=False,
+        ignore_padding_in_loss=ignore_padding_in_loss,
     )
     
     # Create eval loader
