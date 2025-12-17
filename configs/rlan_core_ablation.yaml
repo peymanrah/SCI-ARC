@@ -136,6 +136,7 @@ training:
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.3  # Helps intermediate steps learn
+  lambda_act: 0.1          # ACT halting loss (teaches when to stop refining)
   
   use_stablemax: true
   

@@ -313,6 +313,7 @@ def create_loss(config: dict) -> RLANLoss:
         lambda_predicate=train_config['lambda_predicate'],
         lambda_curriculum=train_config['lambda_curriculum'],
         lambda_deep_supervision=train_config['lambda_deep_supervision'],
+        lambda_act=train_config.get('lambda_act', 0.1),  # ACT halting loss weight
         max_clues=model_config['max_clues'],
         use_stablemax=train_config.get('use_stablemax', True),
         loss_mode=train_config.get('loss_mode', 'focal_stablemax'),  # TRM uses 'stablemax'
@@ -464,6 +465,7 @@ def train_epoch(
         'predicate_loss': 0.0,
         'curriculum_loss': 0.0,
         'deep_supervision_loss': 0.0,  # FIX: Was missing, caused zero reporting
+        'act_loss': 0.0,  # ACT halting loss
     }
     num_batches = 0
     total_samples = 0  # Track total samples processed
@@ -559,6 +561,7 @@ def train_epoch(
                     epoch=epoch,
                     max_epochs=max_epochs,
                     all_logits=outputs.get('all_logits'),
+                    act_outputs=outputs.get('act_outputs'),
                 )
                 
                 # Scale loss for gradient accumulation
@@ -605,6 +608,7 @@ def train_epoch(
                 epoch=epoch,
                 max_epochs=max_epochs,
                 all_logits=outputs.get('all_logits'),
+                act_outputs=outputs.get('act_outputs'),
             )
             
             loss = losses['total_loss'] / grad_accumulation_steps
@@ -1296,6 +1300,9 @@ Config Overrides:
             print(f"  Curriculum Loss: {train_losses.get('curriculum_loss', 0):.4f} (weight={train_cfg['lambda_curriculum']})")
         if train_cfg.get('lambda_deep_supervision', 0) > 0:
             print(f"  Deep Supervision: {deep_sup_loss:.4f} (weight={train_cfg['lambda_deep_supervision']})")
+        if train_cfg.get('lambda_act', 0) > 0 and config['model'].get('use_act', False):
+            act_loss_val = train_losses.get('act_loss', 0)
+            print(f"  ACT Loss: {act_loss_val:.4f} (weight={train_cfg['lambda_act']})")
         
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
         

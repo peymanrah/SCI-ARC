@@ -408,15 +408,22 @@ class RLAN(nn.Module):
             predicates = torch.zeros(B, self.num_predicates, device=features.device)
         
         # 7. Recursive Solver - generate output
+        act_outputs = None
         if return_all_steps or return_intermediates:
-            all_logits = self.solver(
+            solver_output = self.solver(
                 clue_features=clue_features,
                 count_embedding=count_embedding,
                 predicates=predicates,
                 input_grid=input_grid,
                 attention_maps=attention_maps,
                 return_all_steps=True,
+                return_act_outputs=return_intermediates and self.use_act,
             )
+            # Handle ACT outputs if returned
+            if isinstance(solver_output, tuple):
+                all_logits, act_outputs = solver_output
+            else:
+                all_logits = solver_output
             logits = all_logits[-1]
         else:
             logits = self.solver(
@@ -442,6 +449,8 @@ class RLAN(nn.Module):
             }
             if context is not None:
                 result["context"] = context
+            if act_outputs is not None:
+                result["act_outputs"] = act_outputs
             return result
         else:
             return logits

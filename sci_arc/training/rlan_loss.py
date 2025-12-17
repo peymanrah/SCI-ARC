@@ -556,6 +556,7 @@ class RLANLoss(nn.Module):
         lambda_predicate: float = 0.01,
         lambda_curriculum: float = 0.1,
         lambda_deep_supervision: float = 0.5,
+        lambda_act: float = 0.1,  # Weight for ACT pondering cost
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'focal_stablemax', or 'focal'
@@ -569,6 +570,7 @@ class RLANLoss(nn.Module):
             lambda_predicate: Weight for predicate diversity
             lambda_curriculum: Weight for curriculum penalty
             lambda_deep_supervision: Weight for intermediate step losses
+            lambda_act: Weight for ACT halting loss (pondering cost)
             max_clues: Maximum number of clues
             use_stablemax: DEPRECATED - use loss_mode instead
             loss_mode: Loss function mode:
@@ -613,6 +615,7 @@ class RLANLoss(nn.Module):
         self.lambda_predicate = lambda_predicate
         self.lambda_curriculum = lambda_curriculum
         self.lambda_deep_supervision = lambda_deep_supervision
+        self.lambda_act = lambda_act
     
     def forward(
         self,
@@ -624,6 +627,7 @@ class RLANLoss(nn.Module):
         epoch: int = 0,
         max_epochs: int = 250,
         all_logits: Optional[list] = None,
+        act_outputs: Optional[dict] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Compute all RLAN losses.
@@ -637,6 +641,9 @@ class RLANLoss(nn.Module):
             epoch: Current epoch number
             max_epochs: Total number of epochs
             all_logits: Optional list of (B, C, H, W) for deep supervision
+            act_outputs: Optional dict with ACT outputs for halt loss computation
+                - 'q_halt_logits': List of (B,) Q-values for halting at each step
+                - 'q_continue_logits': List of (B,) Q-values for continuing
             
         Returns:
             Dict with keys:
@@ -647,6 +654,7 @@ class RLANLoss(nn.Module):
                 - predicate_loss: Predicate diversity loss
                 - curriculum_loss: Complexity penalty
                 - deep_supervision_loss: Intermediate step losses (if all_logits provided)
+                - act_loss: ACT halting loss (if act_outputs provided)
         """
         # Primary task loss (name reflects actual loss function used)
         task_loss = self.task_loss(logits, targets)
@@ -669,6 +677,30 @@ class RLANLoss(nn.Module):
         else:
             deep_supervision_loss = torch.tensor(0.0, device=logits.device)
         
+        # ACT loss (if ACT outputs available)
+        # Uses per-step correctness as reward signal for Q-learning
+        act_loss = torch.tensor(0.0, device=logits.device)
+        if act_outputs is not None and 'q_halt_logits' in act_outputs:
+            q_halt_list = act_outputs['q_halt_logits']  # List of (B,) tensors per step
+            
+            if all_logits is not None and len(all_logits) == len(q_halt_list):
+                # Compute per-step correctness as reward signal
+                # A step is "correct" if its prediction matches the target
+                act_losses = []
+                for t, (q_halt, step_logits) in enumerate(zip(q_halt_list, all_logits)):
+                    # Per-pixel accuracy at this step
+                    step_preds = step_logits.argmax(dim=1)  # (B, H, W)
+                    step_correct = (step_preds == targets).float().mean(dim=(1, 2))  # (B,)
+                    
+                    # Q_halt should predict whether halting NOW gives correct answer
+                    # BCE loss: q_halt should be high when step is correct
+                    step_act_loss = F.binary_cross_entropy_with_logits(
+                        q_halt, step_correct, reduction='mean'
+                    )
+                    act_losses.append(step_act_loss)
+                
+                act_loss = sum(act_losses) / len(act_losses) if act_losses else act_loss
+        
         # Combine losses
         total_loss = (
             task_loss
@@ -677,6 +709,7 @@ class RLANLoss(nn.Module):
             + self.lambda_predicate * predicate_loss
             + self.lambda_curriculum * curriculum_loss
             + self.lambda_deep_supervision * deep_supervision_loss
+            + self.lambda_act * act_loss
         )
         
         return {
@@ -688,6 +721,7 @@ class RLANLoss(nn.Module):
             "predicate_loss": predicate_loss,
             "curriculum_loss": curriculum_loss,
             "deep_supervision_loss": deep_supervision_loss,
+            "act_loss": act_loss,
             "loss_mode": self.loss_mode,  # Include mode for logging
         }
 

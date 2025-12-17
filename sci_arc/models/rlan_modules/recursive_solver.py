@@ -397,6 +397,7 @@ class RecursiveSolver(nn.Module):
         input_grid: torch.Tensor,
         attention_maps: Optional[torch.Tensor] = None,
         return_all_steps: bool = False,
+        return_act_outputs: bool = False,
     ) -> torch.Tensor:
         """
         Generate output through iterative refinement.
@@ -408,12 +409,15 @@ class RecursiveSolver(nn.Module):
             input_grid: Shape (B, H, W) original input grid
             attention_maps: Optional (B, K, H, W) clue attention maps
             return_all_steps: If True, return predictions at all steps
+            return_act_outputs: If True, also return ACT outputs for loss computation
             
         Returns:
             If return_all_steps:
                 all_logits: List of (B, num_classes, H, W) for each step
             Else:
                 logits: Shape (B, num_classes, H, W) final prediction
+            If return_act_outputs (and use_act=True):
+                Returns tuple: (logits_or_all_logits, act_outputs_dict)
         """
         B, K, D, H, W = clue_features.shape
         device = clue_features.device
@@ -514,10 +518,14 @@ class RecursiveSolver(nn.Module):
                     pred = logits.argmax(dim=1)  # (B, H, W)
                     input_embed = self.input_embed(pred.clamp(0, 10)).permute(0, 3, 1, 2)
         
-        if return_all_steps:
-            return all_logits
+        # Prepare return value
+        logits_output = all_logits if return_all_steps else all_logits[-1]
+        
+        # Return ACT outputs if requested (for computing ACT loss during training)
+        if return_act_outputs and self.use_act and act_outputs:
+            return logits_output, act_outputs
         else:
-            return all_logits[-1]
+            return logits_output
     
     def compute_deep_supervision_loss(
         self,
