@@ -1,0 +1,139 @@
+# RLAN Simple Baseline Configuration
+# ====================================
+# Disables ALL novel modules to create a baseline ConvNet-style model
+# 
+# This is effectively: GridEncoder → RecursiveSolver
+# No spatial anchoring, no relative coordinates, no context, no counting
+#
+# DISABLED MODULES:
+#   - ContextEncoder: 4.2M params → 0
+#   - DSC: 266K params → 0
+#   - MSRE: 109K params → 0
+#   - LCR: 403K params → 0
+#   - SPH: 232K params → 0
+#
+# ENABLED MODULES:
+#   - GridEncoder: 68K params
+#   - RecursiveSolver: 7.7M params
+#   - Total: ~7.8M params
+#
+# This answers: "Do the novel modules help at all?"
+# If RLAN-Simple performs similarly to RLAN-Full, the modules are useless.
+# If RLAN-Simple performs worse, the modules provide value (even if not optimal).
+
+model:
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10
+  max_grid_size: 30
+  
+  max_clues: 6
+  num_predicates: 8
+  num_solver_steps: 6
+  
+  use_act: true
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8
+  
+  # =============================================================
+  # ABLATION: Simple Baseline (no novel modules)
+  # =============================================================
+  use_context_encoder: false  # DISABLED
+  use_dsc: false              # DISABLED
+  use_msre: false             # DISABLED (requires DSC anyway)
+  use_lcr: false              # DISABLED
+  use_sph: false              # DISABLED
+
+training:
+  max_epochs: 500
+  
+  batch_size: 100  # More memory available without modules
+  grad_accumulation_steps: 4
+  
+  learning_rate: 1.0e-4
+  weight_decay: 0.1
+  gradient_clip: 1.0
+  
+  temperature_start: 5.0
+  temperature_end: 0.1
+  
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  lambda_entropy: 0.0    # No DSC
+  lambda_sparsity: 0.0   # No DSC
+  lambda_predicate: 0.0  # No SPH
+  lambda_curriculum: 0.0
+  lambda_deep_supervision: 0.3
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  scheduler: "onecycle"
+  warmup_epochs: 20
+  min_lr: 1.0e-6
+  
+  use_ema: true
+  ema_decay: 0.999
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  
+  num_workers: 24
+  pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
+  
+  cache_samples: false
+  
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    translational: true
+
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+
+logging:
+  log_every: 1
+  save_every: 25
+  eval_every: 5
+  keep_last_n: 5
+  checkpoint_dir: "checkpoints/rlan_simple_baseline"
+  log_to_file: true
+  track_augmentation: true
+  
+  use_wandb: false
+  wandb_project: "rlan-arc"
+  wandb_run_name: null
+
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false
+
+device:
+  use_cuda: true
+  mixed_precision: true
+  dtype: "bfloat16"
+  compile: false

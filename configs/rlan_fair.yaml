@@ -44,6 +44,28 @@ model:
   msre_encoding_dim: 32  # hidden_dim/8, sufficient for relative positions
   msre_num_freq: 8       # Fixed: 2^0 to 2^7 covers 30×30 grids
   lcr_num_freq: 8        # Fixed: covers counts 0-30
+  
+  # =============================================================
+  # MODULE ABLATION FLAGS
+  # =============================================================
+  # Enable/disable modules for ablation studies
+  # 
+  # RLAN NOVELTY vs TRM:
+  #   - DSC + MSRE: Core novelty (spatial anchoring + relative coords)
+  #   - ContextEncoder: Important but has bottleneck (4.2M → 256-dim)
+  #   - LCR + SPH: Auxiliary (nice-to-have)
+  #
+  # RECOMMENDED ABLATION EXPERIMENTS:
+  #   1. RLAN-Full: All modules enabled (baseline)
+  #   2. RLAN-Core: DSC+MSRE only (test core novelty)
+  #   3. RLAN-NoContext: Disable ContextEncoder (test its impact)
+  #   4. RLAN-Simple: All disabled except encoder+solver (baseline)
+  # =============================================================
+  use_context_encoder: true  # Encode training pairs (4.2M params)
+  use_dsc: true              # Dynamic Saliency Controller (266K) - CORE NOVELTY
+  use_msre: true             # Multi-Scale Relative Encoding (109K) - CORE NOVELTY
+  use_lcr: true              # Latent Counting Registers (403K) - auxiliary
+  use_sph: true              # Symbolic Predicate Heads (232K) - auxiliary
 
 training:
   # TRM trains for 100K epochs on 8+ GPUs

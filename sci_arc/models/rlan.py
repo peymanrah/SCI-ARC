@@ -82,6 +82,23 @@ class RLANConfig:
     
     # Training parameters
     dropout: float = 0.1
+    
+    # =============================================================
+    # MODULE ABLATION FLAGS
+    # =============================================================
+    # Enable/disable individual modules for ablation studies
+    # When disabled, modules output zeros or identity transformations
+    #
+    # RLAN Novelty Analysis:
+    #   - DSC + MSRE: Core novelty (spatial anchoring + relative coords)
+    #   - ContextEncoder: Critical but has bottleneck issue
+    #   - LCR + SPH: Auxiliary (nice-to-have, not core)
+    # =============================================================
+    use_context_encoder: bool = True   # Encode training pairs (4.2M params)
+    use_dsc: bool = True               # Dynamic Saliency Controller (266K)
+    use_msre: bool = True              # Multi-Scale Relative Encoding (109K)
+    use_lcr: bool = True               # Latent Counting Registers (403K)
+    use_sph: bool = True               # Symbolic Predicate Heads (232K)
 
 
 class RLAN(nn.Module):
@@ -158,7 +175,14 @@ class RLAN(nn.Module):
         self.use_act = use_act
         self.max_grid_size = max_grid_size
         
-        # Grid Encoder (reuse existing implementation)
+        # Module ablation flags (default to True if no config)
+        self.use_context_encoder = config.use_context_encoder if config else True
+        self.use_dsc = config.use_dsc if config else True
+        self.use_msre = config.use_msre if config else True
+        self.use_lcr = config.use_lcr if config else True
+        self.use_sph = config.use_sph if config else True
+        
+        # Grid Encoder (reuse existing implementation) - ALWAYS REQUIRED
         self.encoder = GridEncoder(
             hidden_dim=hidden_dim,
             num_colors=num_colors,
@@ -166,59 +190,73 @@ class RLAN(nn.Module):
             dropout=dropout,
         )
         
-        # Feature projection to channel-first format
+        # Feature projection to channel-first format - ALWAYS REQUIRED
         self.feature_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.LayerNorm(hidden_dim),
         )
         
-        # Context Encoder - learns from training examples (CRITICAL for ARC!)
-        self.context_encoder = ContextEncoder(
-            hidden_dim=hidden_dim,
-            num_colors=num_colors,
-            max_size=max_grid_size,
-            max_pairs=5,  # ARC has 2-5 training pairs
-            num_heads=config.dsc_num_heads if config else 4,
-            dropout=dropout,
-        )
+        # Context Encoder - learns from training examples (OPTIONAL)
+        if self.use_context_encoder:
+            self.context_encoder = ContextEncoder(
+                hidden_dim=hidden_dim,
+                num_colors=num_colors,
+                max_size=max_grid_size,
+                max_pairs=5,  # ARC has 2-5 training pairs
+                num_heads=config.dsc_num_heads if config else 4,
+                dropout=dropout,
+            )
+            self.context_injector = ContextInjector(hidden_dim=hidden_dim)
+        else:
+            self.context_encoder = None
+            self.context_injector = None
         
-        # Context Injector - modulates features based on task context
-        self.context_injector = ContextInjector(hidden_dim=hidden_dim)
+        # Dynamic Saliency Controller (OPTIONAL - but core novelty)
+        if self.use_dsc:
+            self.dsc = DynamicSaliencyController(
+                hidden_dim=hidden_dim,
+                max_clues=max_clues,
+                num_heads=config.dsc_num_heads if config else 4,
+                dropout=dropout,
+            )
+        else:
+            self.dsc = None
         
-        # Dynamic Saliency Controller
-        self.dsc = DynamicSaliencyController(
-            hidden_dim=hidden_dim,
-            max_clues=max_clues,
-            num_heads=config.dsc_num_heads if config else 4,
-            dropout=dropout,
-        )
+        # Multi-Scale Relative Encoding (OPTIONAL - depends on DSC)
+        if self.use_msre and self.use_dsc:
+            self.msre = MultiScaleRelativeEncoding(
+                hidden_dim=hidden_dim,
+                encoding_dim=config.msre_encoding_dim if config else 32,
+                max_size=max_grid_size,
+                num_freq=config.msre_num_freq if config else 8,
+            )
+        else:
+            self.msre = None
         
-        # Multi-Scale Relative Encoding
-        self.msre = MultiScaleRelativeEncoding(
-            hidden_dim=hidden_dim,
-            encoding_dim=config.msre_encoding_dim if config else 32,
-            max_size=max_grid_size,
-            num_freq=config.msre_num_freq if config else 8,
-        )
+        # Latent Counting Registers (OPTIONAL)
+        if self.use_lcr:
+            self.lcr = LatentCountingRegisters(
+                num_colors=num_colors,
+                hidden_dim=hidden_dim,
+                num_freq=config.lcr_num_freq if config else 8,
+                num_heads=config.lcr_num_heads if config else 4,
+                dropout=dropout,
+            )
+        else:
+            self.lcr = None
         
-        # Latent Counting Registers
-        self.lcr = LatentCountingRegisters(
-            num_colors=num_colors,
-            hidden_dim=hidden_dim,
-            num_freq=config.lcr_num_freq if config else 8,
-            num_heads=config.lcr_num_heads if config else 4,
-            dropout=dropout,
-        )
+        # Symbolic Predicate Heads (OPTIONAL)
+        if self.use_sph:
+            self.sph = SymbolicPredicateHeads(
+                hidden_dim=hidden_dim,
+                num_predicates=num_predicates,
+                dropout=dropout,
+            )
+        else:
+            self.sph = None
         
-        # Symbolic Predicate Heads
-        self.sph = SymbolicPredicateHeads(
-            hidden_dim=hidden_dim,
-            num_predicates=num_predicates,
-            dropout=dropout,
-        )
-        
-        # Recursive Solver
+        # Recursive Solver - ALWAYS REQUIRED (core output generation)
         self.solver = RecursiveSolver(
             hidden_dim=hidden_dim,
             num_classes=num_classes,
@@ -227,6 +265,21 @@ class RLAN(nn.Module):
             num_colors=num_colors,
             dropout=dropout,
         )
+        
+        # Print module configuration
+        enabled = []
+        disabled = []
+        for name, flag in [
+            ('ContextEncoder', self.use_context_encoder),
+            ('DSC', self.use_dsc),
+            ('MSRE', self.use_msre),
+            ('LCR', self.use_lcr),
+            ('SPH', self.use_sph),
+        ]:
+            (enabled if flag else disabled).append(name)
+        
+        if disabled:
+            print(f"RLAN Module Config: Enabled=[{', '.join(enabled)}], Disabled=[{', '.join(disabled)}]")
     
     def encode(self, grid: torch.Tensor) -> torch.Tensor:
         """
@@ -288,33 +341,57 @@ class RLAN(nn.Module):
         """
         B, H, W = input_grid.shape
         
-        # 1. Encode grid
+        # 1. Encode grid - ALWAYS REQUIRED
         features = self.encode(input_grid)  # (B, D, H, W)
         
-        # 2. Encode training context if provided (CRITICAL for ARC!)
+        # 2. Encode training context if provided and enabled
         context = None
-        if train_inputs is not None and train_outputs is not None:
-            context = self.context_encoder(
-                train_inputs, train_outputs, pair_mask
-            )  # (B, D)
-            # Inject context into features via FiLM
-            features = self.context_injector(features, context)
+        if self.use_context_encoder and self.context_encoder is not None:
+            if train_inputs is not None and train_outputs is not None:
+                context = self.context_encoder(
+                    train_inputs, train_outputs, pair_mask
+                )  # (B, D)
+                # Inject context into features via FiLM
+                features = self.context_injector(features, context)
         
-        # 3. Dynamic Saliency Controller - find clue anchors
-        centroids, attention_maps, stop_logits = self.dsc(
-            features, temperature=temperature
-        )  # (B, K, 2), (B, K, H, W), (B, K)
+        # 3. Dynamic Saliency Controller - find clue anchors (if enabled)
+        if self.use_dsc and self.dsc is not None:
+            centroids, attention_maps, stop_logits = self.dsc(
+                features, temperature=temperature
+            )  # (B, K, 2), (B, K, H, W), (B, K)
+        else:
+            # Default: single centered anchor, uniform attention
+            K = self.max_clues
+            centroids = torch.zeros(B, K, 2, device=features.device)
+            centroids[:, :, 0] = H / 2  # row center
+            centroids[:, :, 1] = W / 2  # col center
+            attention_maps = torch.ones(B, K, H, W, device=features.device) / (H * W)
+            stop_logits = torch.zeros(B, K, device=features.device)
         
-        # 4. Multi-Scale Relative Encoding - compute relative coordinates
-        clue_features = self.msre(
-            features, centroids, grid_sizes=None
-        )  # (B, K, D, H, W)
+        # 4. Multi-Scale Relative Encoding - compute relative coordinates (if enabled)
+        if self.use_msre and self.msre is not None:
+            clue_features = self.msre(
+                features, centroids, grid_sizes=None
+            )  # (B, K, D, H, W)
+        else:
+            # Default: just broadcast features across K clues
+            clue_features = features.unsqueeze(1).expand(-1, self.max_clues, -1, -1, -1)
         
-        # 5. Latent Counting Registers - soft counting
-        count_embedding = self.lcr(input_grid, features)  # (B, num_colors, D)
+        # 5. Latent Counting Registers - soft counting (if enabled)
+        if self.use_lcr and self.lcr is not None:
+            count_embedding = self.lcr(input_grid, features)  # (B, num_colors, D)
+        else:
+            # Default: zeros
+            count_embedding = torch.zeros(
+                B, self.num_colors, self.hidden_dim, device=features.device
+            )
         
-        # 6. Symbolic Predicate Heads - binary predicates
-        predicates = self.sph(features, temperature=temperature)  # (B, P)
+        # 6. Symbolic Predicate Heads - binary predicates (if enabled)
+        if self.use_sph and self.sph is not None:
+            predicates = self.sph(features, temperature=temperature)  # (B, P)
+        else:
+            # Default: uniform activations
+            predicates = torch.ones(B, self.num_predicates, device=features.device) * 0.5
         
         # 7. Recursive Solver - generate output
         if return_all_steps or return_intermediates:
@@ -384,16 +461,16 @@ class RLAN(nn.Module):
         return prediction
     
     def count_parameters(self) -> Dict[str, int]:
-        """Count parameters per module."""
+        """Count parameters per module (handles disabled modules)."""
         counts = {
             "encoder": sum(p.numel() for p in self.encoder.parameters()),
             "feature_proj": sum(p.numel() for p in self.feature_proj.parameters()),
-            "context_encoder": sum(p.numel() for p in self.context_encoder.parameters()),
-            "context_injector": sum(p.numel() for p in self.context_injector.parameters()),
-            "dsc": sum(p.numel() for p in self.dsc.parameters()),
-            "msre": sum(p.numel() for p in self.msre.parameters()),
-            "lcr": sum(p.numel() for p in self.lcr.parameters()),
-            "sph": sum(p.numel() for p in self.sph.parameters()),
+            "context_encoder": sum(p.numel() for p in self.context_encoder.parameters()) if self.context_encoder else 0,
+            "context_injector": sum(p.numel() for p in self.context_injector.parameters()) if self.context_injector else 0,
+            "dsc": sum(p.numel() for p in self.dsc.parameters()) if self.dsc else 0,
+            "msre": sum(p.numel() for p in self.msre.parameters()) if self.msre else 0,
+            "lcr": sum(p.numel() for p in self.lcr.parameters()) if self.lcr else 0,
+            "sph": sum(p.numel() for p in self.sph.parameters()) if self.sph else 0,
             "solver": sum(p.numel() for p in self.solver.parameters()),
         }
         counts["total"] = sum(counts.values())
@@ -417,6 +494,12 @@ class RLAN(nn.Module):
                 "num_solver_steps": self.num_solver_steps,
                 "use_act": self.use_act,
                 "max_grid_size": self.max_grid_size,
+                # Save ablation flags
+                "use_context_encoder": self.use_context_encoder,
+                "use_dsc": self.use_dsc,
+                "use_msre": self.use_msre,
+                "use_lcr": self.use_lcr,
+                "use_sph": self.use_sph,
             },
             **extra_data,
         }

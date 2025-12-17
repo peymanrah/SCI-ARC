@@ -266,9 +266,12 @@ def get_temperature(epoch: int, config: dict) -> float:
 
 def create_model(config: dict) -> RLAN:
     """Create RLAN model from config."""
+    from sci_arc.models.rlan import RLANConfig
+    
     model_config = config['model']
     
-    model = RLAN(
+    # Create RLANConfig with all parameters including ablation flags
+    rlan_config = RLANConfig(
         hidden_dim=model_config['hidden_dim'],
         num_colors=model_config['num_colors'],
         num_classes=model_config['num_classes'],
@@ -278,7 +281,20 @@ def create_model(config: dict) -> RLAN:
         num_solver_steps=model_config['num_solver_steps'],
         use_act=model_config.get('use_act', False),
         dropout=model_config['dropout'],
+        dsc_num_heads=model_config.get('dsc_num_heads', 4),
+        lcr_num_heads=model_config.get('lcr_num_heads', 4),
+        msre_encoding_dim=model_config.get('msre_encoding_dim', 32),
+        msre_num_freq=model_config.get('msre_num_freq', 8),
+        lcr_num_freq=model_config.get('lcr_num_freq', 8),
+        # Module ablation flags
+        use_context_encoder=model_config.get('use_context_encoder', True),
+        use_dsc=model_config.get('use_dsc', True),
+        use_msre=model_config.get('use_msre', True),
+        use_lcr=model_config.get('use_lcr', True),
+        use_sph=model_config.get('use_sph', True),
     )
+    
+    model = RLAN(config=rlan_config)
     
     return model
 

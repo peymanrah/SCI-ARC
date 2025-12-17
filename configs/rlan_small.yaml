@@ -31,6 +31,13 @@ model:
   msre_encoding_dim: 32  # Sufficient for relative positions
   msre_num_freq: 8       # 2^0 to 2^7 covers 30x30 grids
   lcr_num_freq: 8        # Covers counts 0-30
+  
+  # Module ablation flags (all enabled by default)
+  use_context_encoder: true
+  use_dsc: true
+  use_msre: true
+  use_lcr: true
+  use_sph: true
 
 training:
   max_epochs: 500  # More epochs for small model to converge

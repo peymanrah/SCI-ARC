@@ -39,6 +39,13 @@ model:
   msre_encoding_dim: 64
   msre_num_freq: 8
   lcr_num_freq: 8
+  
+  # Module ablation flags (all enabled for large model)
+  use_context_encoder: true
+  use_dsc: true
+  use_msre: true
+  use_lcr: true
+  use_sph: true
 
 training:
   max_epochs: 1000
