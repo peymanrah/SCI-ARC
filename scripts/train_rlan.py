@@ -730,10 +730,10 @@ def train_epoch(
                         })
                         
                         if torch.isfinite(step_logits).all():
-                            step_loss = torch.nn.functional.cross_entropy(
-                                step_logits, test_outputs, reduction='mean'
-                            )
-                            # Clamp to prevent inf in display
+                            # Use same loss function as training for consistent diagnostics
+                            # This ensures the diagnostic values match actual training behavior
+                            step_loss = loss_fn.task_loss(step_logits, test_outputs)
+                            # Clamp to prevent extreme values in display
                             step_losses.append(min(step_loss.item(), 100.0))
                         else:
                             # Log warning and use placeholder
