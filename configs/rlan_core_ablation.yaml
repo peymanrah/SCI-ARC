@@ -149,19 +149,22 @@ training:
   # CRITICAL: Higher entropy penalty forces DSC to focus on fewer pixels,
   # which naturally leads to focusing on foreground objects (sparse in ARC)
   #
-  # lambda_sparsity: TWO-SIDED clue usage penalty:
-  #   1. Penalty for using < min_clues (prevents collapse to 0 clues)
-  #   2. Pondering cost per clue used (encourages efficiency)
+  # lambda_sparsity: THREE-COMPONENT clue usage penalty:
+  #   1. min_clue_penalty: Prevents collapse to 0 clues
+  #   2. base_pondering: Cost per clue used (ACT-style)
+  #   3. entropy_pondering: Extra cost for diffuse (bad quality) attention
   #
-  # ponder_weight: Cost per clue used (0.1 = mild, 0.5 = strong)
-  #   - Simple tasks: stop early when pondering cost > benefit
-  #   - Complex tasks: use more clues when benefit > pondering cost
-  #   - Using 1 clue costs 0.1, using 6 clues costs 0.6
+  # ponder_weight: Base cost per clue used (0.1 = mild, 0.5 = strong)
+  # entropy_ponder_weight: Extra cost for high-entropy attention (couples quality to stopping)
+  #   - Sharp attention (low entropy) → small extra cost → can use clue cheaply
+  #   - Diffuse attention (high entropy) → large extra cost → expensive bad clue
+  #   - This forces model to find GOOD clues, not just any clues
   # =================================================================
   lambda_entropy: 0.5      # Strong pressure - force sharp attention on sparse foreground
-  lambda_sparsity: 0.3     # Weight for clue regularization (both min penalty + pondering)
+  lambda_sparsity: 0.3     # Weight for clue regularization
   min_clues: 1.0           # Minimum 1 clue (penalty if fewer)
-  ponder_weight: 0.1       # Cost per clue used (creates gradient to learn WHEN to stop)
+  ponder_weight: 0.1       # Base cost per clue used
+  entropy_ponder_weight: 0.05  # Extra cost for diffuse attention (couples quality to stopping)
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.5  # Stronger intermediate supervision

@@ -143,8 +143,13 @@ class DynamicSaliencyController(nn.Module):
         # Predicts whether to stop after this clue
         # CRITICAL: Initialize with negative bias to default to "continue" not "stop"
         # sigmoid(-2.0) ≈ 0.12, so model starts by using most clues
+        # 
+        # Input: attended_features (D) + attention_entropy (1) = D+1 dimensions
+        # The entropy input creates coupling between attention sharpness and stopping:
+        # - Sharp attention (low entropy) → model can stop (found good anchor)
+        # - Diffuse attention (high entropy) → need more clues (uncertain)
         self.stop_predictor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim + 1, hidden_dim // 2),  # +1 for attention entropy
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
@@ -295,8 +300,24 @@ class DynamicSaliencyController(nn.Module):
             attention_flat = attention.view(B, H * W, 1)
             attended_features = (v * attention_flat).sum(dim=1)  # (B, D)
             
-            # Predict stop probability
-            stop_logit = self.stop_predictor(attended_features).squeeze(-1)  # (B,)
+            # Compute attention entropy for this clue
+            # Low entropy = sharp attention (confident) → can stop
+            # High entropy = diffuse attention (uncertain) → need more clues
+            # This couples attention quality directly to stopping decision!
+            attn_clamped = attention.view(B, -1).clamp(min=1e-10)  # (B, H*W)
+            attn_entropy = -(attn_clamped * torch.log(attn_clamped)).sum(dim=-1, keepdim=True)  # (B, 1)
+            
+            # Normalize entropy to [0, 1] range for stable learning
+            # Max entropy for uniform distribution over H*W pixels = log(H*W)
+            max_entropy = math.log(H * W + 1e-6)
+            attn_entropy_normalized = attn_entropy / max_entropy  # (B, 1)
+            
+            # Concatenate attended features with normalized entropy
+            # The entropy provides a "confidence" signal to the stop predictor
+            stop_input = torch.cat([attended_features, attn_entropy_normalized], dim=-1)  # (B, D+1)
+            
+            # Predict stop probability with entropy-aware input
+            stop_logit = self.stop_predictor(stop_input).squeeze(-1)  # (B,)
             
             # Update cumulative mask (reduce weight of attended regions)
             # Use soft masking to allow gradients to flow

@@ -18,6 +18,7 @@ The combined loss enables stable training while encouraging:
 - Gradual increase in model capacity usage
 """
 
+import math
 from typing import Dict, Optional
 
 import torch
@@ -498,35 +499,29 @@ class EntropyRegularization(nn.Module):
 
 class SparsityRegularization(nn.Module):
     """
-    Clue usage regularization with TWO-SIDED penalty.
+    Clue usage regularization with TWO-SIDED penalty + ENTROPY-WEIGHTED pondering.
     
-    CRITICAL INSIGHT: The model needs to learn WHEN to stop, not just "use at least N".
+    CRITICAL INSIGHT: The model needs to learn WHEN to stop AND find GOOD clues.
     
-    Two-sided penalty:
-    1. Penalty for using fewer than min_clues (prevents collapse to 0 clues)
-    2. Pondering cost for each clue used (encourages efficiency)
+    Three-component penalty:
+    1. min_clue_penalty: Prevents collapse to 0 clues
+    2. pondering_cost: Base cost per clue (encourages efficiency)  
+    3. entropy_pondering: Extra cost for low-quality (high entropy) clues
     
-    The balance between these creates a learning signal:
-    - Simple tasks: stop early (pondering cost > benefit)
-    - Complex tasks: use more clues (benefit > pondering cost)
-    
-    ARC-AGI Analysis:
-    - Simple tasks (fill, extend): 1-2 clues should suffice
-    - Medium tasks (copy, rotate): 2-3 clues needed
-    - Complex tasks (composition): 4-6 clues needed
+    The entropy-weighted component couples attention quality to clue usage:
+    - Sharp attention (low entropy) → small extra cost
+    - Diffuse attention (high entropy) → large extra cost
+    - This pushes model to find GOOD clues, not just any clues
     
     Formula: 
-        L = min_clue_penalty + pondering_cost
-        min_clue_penalty = max(0, min_clues - expected_clues_used) * min_clue_weight
-        pondering_cost = expected_clues_used * ponder_weight
-    
-    With default settings:
-    - Using 0 clues: penalty = 1.0 * 1.0 + 0 * 0.1 = 1.0 (high!)
-    - Using 1 clue:  penalty = 0 + 1 * 0.1 = 0.1 (good)
-    - Using 3 clues: penalty = 0 + 3 * 0.1 = 0.3 (ok)
-    - Using 6 clues: penalty = 0 + 6 * 0.1 = 0.6 (expensive but allowed)
-    
-    The pondering_cost creates gradient to reduce clue usage when task loss is satisfied.
+        L = min_clue_penalty + base_pondering + entropy_pondering
+        base_pondering = expected_clues_used * ponder_weight
+        entropy_pondering = mean_entropy * entropy_ponder_weight
+        
+    Learning dynamics:
+    - Early training: entropy is high, but that's OK (learning to attend)
+    - Mid training: entropy drops, pondering cost dominates (learn when to stop)
+    - Late training: sharp attention, efficient clue usage (task-optimal)
     """
     
     def __init__(
@@ -534,27 +529,35 @@ class SparsityRegularization(nn.Module):
         min_clues: float = 1.0, 
         ponder_weight: float = 0.1,
         min_clue_weight: float = 1.0,
+        entropy_ponder_weight: float = 0.05,  # Extra cost for diffuse attention
         epsilon: float = 1e-6
     ):
         """
         Args:
-            min_clues: Minimum expected number of clues to use (soft target, default 1)
-            ponder_weight: Cost per clue used (ACT-style pondering cost)
+            min_clues: Minimum expected number of clues to use (soft target)
+            ponder_weight: Base cost per clue used (ACT-style)
             min_clue_weight: Weight for minimum clue penalty
+            entropy_ponder_weight: Extra cost for high-entropy (diffuse) attention
             epsilon: Small constant for numerical stability
         """
         super().__init__()
         self.min_clues = min_clues
         self.ponder_weight = ponder_weight
         self.min_clue_weight = min_clue_weight
+        self.entropy_ponder_weight = entropy_ponder_weight
         self.epsilon = epsilon
     
-    def forward(self, stop_logits: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        stop_logits: torch.Tensor,
+        attention_maps: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Compute clue usage regularization loss.
         
         Args:
             stop_logits: Shape (B, K) stop probability logits
+            attention_maps: Shape (B, K, H, W) attention weights (optional)
             
         Returns:
             loss: Scalar regularization loss
@@ -563,21 +566,40 @@ class SparsityRegularization(nn.Module):
         stop_probs = torch.sigmoid(stop_logits)  # (B, K)
         
         # Expected clues used = sum of (1 - stop_prob) across clues
-        # If stop_prob is low (0.1), this clue contributes ~0.9 to the count
-        # If stop_prob is high (0.9), this clue contributes ~0.1
         expected_clues_used = (1 - stop_probs).sum(dim=-1)  # (B,)
         
         # 1. Penalty for using fewer than min_clues (hinge loss)
-        # Strongly penalizes collapsing to 0 clues
         min_clue_penalty = F.relu(self.min_clues - expected_clues_used).mean()
         
-        # 2. Pondering cost: small cost per clue used (ACT-style)
-        # Creates gradient pressure to stop when task loss is satisfied
-        # This is what drives the model to learn WHEN to stop
-        pondering_cost = expected_clues_used.mean()
+        # 2. Base pondering cost: small cost per clue used
+        base_pondering = expected_clues_used.mean() * self.ponder_weight
+        
+        # 3. Entropy-weighted pondering (if attention maps provided)
+        entropy_pondering = torch.tensor(0.0, device=stop_logits.device)
+        if attention_maps is not None and self.entropy_ponder_weight > 0:
+            B, K, H, W = attention_maps.shape
+            
+            # Compute per-clue entropy
+            attn_flat = attention_maps.view(B, K, -1).clamp(min=1e-10)  # (B, K, H*W)
+            per_clue_entropy = -(attn_flat * torch.log(attn_flat)).sum(dim=-1)  # (B, K)
+            
+            # Normalize by max entropy for stable values [0, 1]
+            max_entropy = math.log(H * W + 1e-6)
+            per_clue_entropy_norm = per_clue_entropy / max_entropy  # (B, K)
+            
+            # Weight entropy by clue usage probability
+            # Clues that are "used" (low stop prob) contribute more
+            clue_usage_weight = 1 - stop_probs  # (B, K)
+            weighted_entropy = (per_clue_entropy_norm * clue_usage_weight).sum(dim=-1)  # (B,)
+            
+            entropy_pondering = weighted_entropy.mean() * self.entropy_ponder_weight
         
         # Combined loss
-        total_loss = self.min_clue_weight * min_clue_penalty + self.ponder_weight * pondering_cost
+        total_loss = (
+            self.min_clue_weight * min_clue_penalty 
+            + base_pondering 
+            + entropy_pondering
+        )
         
         return total_loss
 
@@ -726,7 +748,8 @@ class RLANLoss(nn.Module):
         lambda_deep_supervision: float = 0.5,
         lambda_act: float = 0.1,  # Weight for ACT pondering cost
         min_clues: float = 1.0,  # Minimum clues to use (1 for simple, grows for complex)
-        ponder_weight: float = 0.1,  # Cost per clue used (encourages efficiency)
+        ponder_weight: float = 0.1,  # Base cost per clue used
+        entropy_ponder_weight: float = 0.05,  # Extra cost for diffuse attention
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_stablemax', or 'focal'
@@ -736,13 +759,14 @@ class RLANLoss(nn.Module):
             focal_gamma: Focal loss gamma parameter
             focal_alpha: Focal loss alpha parameter
             lambda_entropy: Weight for entropy regularization
-            lambda_sparsity: Weight for minimum clue usage penalty
+            lambda_sparsity: Weight for clue usage regularization
             lambda_predicate: Weight for predicate diversity
             lambda_curriculum: Weight for curriculum penalty
             lambda_deep_supervision: Weight for intermediate step losses
-            lambda_act: Weight for ACT halting loss (pondering cost)
+            lambda_act: Weight for ACT halting loss
             min_clues: Minimum expected clues to use (soft target)
-            ponder_weight: Cost per clue used (encourages stopping when task is solved)
+            ponder_weight: Base cost per clue used (ACT-style)
+            entropy_ponder_weight: Extra cost for high-entropy (diffuse) attention
             max_clues: Maximum number of clues
             use_stablemax: DEPRECATED - use loss_mode instead
             loss_mode: Loss function mode:
@@ -755,6 +779,7 @@ class RLANLoss(nn.Module):
         
         self.loss_mode = loss_mode
         self.ponder_weight = ponder_weight
+        self.entropy_ponder_weight = entropy_ponder_weight
         
         # Select loss function based on mode
         if loss_mode == 'stablemax':
@@ -794,12 +819,13 @@ class RLANLoss(nn.Module):
             min_clues=min_clues,
             ponder_weight=ponder_weight,
             min_clue_weight=1.0,  # Strong penalty for using < min_clues
+            entropy_ponder_weight=entropy_ponder_weight,  # Extra cost for diffuse attention
         )
         self.predicate_diversity = PredicateDiversityLoss()
         self.curriculum_penalty = CurriculumPenalty(max_clues=max_clues)
         
         # Print sparsity config for debugging
-        print(f"  Clue Regularization: min_clues={min_clues}, ponder_weight={ponder_weight}")
+        print(f"  Clue Regularization: min_clues={min_clues}, ponder_weight={ponder_weight}, entropy_weight={entropy_ponder_weight}")
         
         self.lambda_entropy = lambda_entropy
         self.lambda_sparsity = lambda_sparsity
@@ -852,7 +878,8 @@ class RLANLoss(nn.Module):
         
         # Regularization losses
         entropy_loss = self.entropy_reg(attention_maps)
-        sparsity_loss = self.sparsity_reg(stop_logits)
+        # Pass attention_maps to sparsity_reg for entropy-weighted pondering
+        sparsity_loss = self.sparsity_reg(stop_logits, attention_maps)
         predicate_loss = self.predicate_diversity(predicates)
         curriculum_loss = self.curriculum_penalty(stop_logits, epoch, max_epochs)
         
