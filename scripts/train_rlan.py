@@ -985,10 +985,17 @@ def evaluate(
                 dsc_entropy_sum += entropy.item() * batch_size
             
             # DSC usage (from stop_logits)
+            # FIX: Use soft clue count (1 - stop_prob) to match training metric
+            # The hard threshold (< 0.5) was showing 6.0 clues when stop_prob=0.79
             if 'stop_logits' in outputs:
                 stop_probs = torch.sigmoid(outputs['stop_logits'])  # (B, K)
-                usage = (stop_probs < 0.5).float().sum(dim=-1).mean()  # Avg clues used
-                dsc_usage_sum += usage.item() * batch_size
+                # Soft clue count: sum of (1 - stop_prob) across clues
+                soft_usage = (1 - stop_probs).sum(dim=-1).mean()  # Matches training
+                dsc_usage_sum += soft_usage.item() * batch_size
+                # Also track mean stop_prob for debugging
+                if 'eval_stop_prob_sum' not in locals():
+                    eval_stop_prob_sum = 0.0
+                eval_stop_prob_sum += stop_probs.mean().item() * batch_size
             
             # Predicate activations
             if 'predicates' in outputs:
@@ -1009,6 +1016,12 @@ def evaluate(
     colors_used = sum(1 for c in color_predictions if c > 0)
     colors_target = sum(1 for c in color_targets if c > 0)
     
+    # Handle stop_prob tracking (may not be in scope if no stop_logits)
+    try:
+        eval_stop_prob = eval_stop_prob_sum / max(num_eval_samples, 1)
+    except:
+        eval_stop_prob = 0.0
+
     return {
         'pixel_accuracy': pixel_accuracy,
         'task_accuracy': task_accuracy,
@@ -1019,10 +1032,9 @@ def evaluate(
         'colors_target': colors_target,
         'dsc_entropy': dsc_entropy_sum / max(num_eval_samples, 1),
         'dsc_clues_used': dsc_usage_sum / max(num_eval_samples, 1),
+        'eval_stop_prob': eval_stop_prob,
         'predicate_activation': predicate_activation_sum / max(num_eval_samples, 1),
     }
-
-
 def save_checkpoint(
     model: RLAN,
     optimizer: torch.optim.Optimizer,
@@ -1930,10 +1942,20 @@ Config Overrides:
             # Module-specific metrics for debugging
             print(f"  DSC Entropy: {eval_metrics['dsc_entropy']:.4f} (lower=sharper)")
             print(f"  DSC Clues Used: {eval_metrics['dsc_clues_used']:.2f}")
+            eval_stop_prob = eval_metrics.get('eval_stop_prob', 0)
+            if eval_stop_prob > 0:
+                print(f"  Eval Stop Prob: {eval_stop_prob:.3f}")
             print(f"  Predicate Activation: {eval_metrics['predicate_activation']:.4f}")
             
             if ema is not None:
                 print("  (Using EMA weights for evaluation)")
+                # Check for EMA lag - compare training stop_prob vs eval stop_prob
+                train_stop_prob = diagnostics.get('stop_prob_mean', 0) if diagnostics else 0
+                if train_stop_prob > 0 and eval_stop_prob > 0:
+                    ema_diff = abs(train_stop_prob - eval_stop_prob)
+                    if ema_diff > 0.2:
+                        print(f"  [!] EMA LAG DETECTED: train_stop={train_stop_prob:.3f} vs eval_stop={eval_stop_prob:.3f}")
+                        print(f"      EMA decay may be too high (0.999), consider 0.99 or 0.995")
             
             # ============================================================
             # BACKGROUND COLLAPSE DETECTION - CRITICAL FOR DEBUGGING

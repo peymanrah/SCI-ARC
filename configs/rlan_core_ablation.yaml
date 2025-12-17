@@ -215,7 +215,10 @@ training:
   min_lr: 1.0e-6
   
   use_ema: true
-  ema_decay: 0.999
+  # FIX: Reduced from 0.999 to 0.995 to prevent EMA lag
+  # At 0.999, EMA trails ~1000 steps behind training model
+  # At 0.995, EMA trails ~200 steps - better for eval accuracy
+  ema_decay: 0.995
 
 data:
   train_path: "./data/arc-agi/data/training"
