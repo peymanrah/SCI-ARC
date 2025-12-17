@@ -815,6 +815,10 @@ def train_epoch(
             epoch_diagnostics['sparsity_base_pondering'] = losses.get('sparsity_base_pondering', 0.0)
             epoch_diagnostics['sparsity_entropy_pondering'] = losses.get('sparsity_entropy_pondering', 0.0)
             epoch_diagnostics['expected_clues_used'] = losses.get('expected_clues_used', 0.0)
+            # NEW: Per-sample clue penalty mean (verifies per-sample gradient coupling is working)
+            epoch_diagnostics['per_sample_clue_penalty_mean'] = losses.get('per_sample_clue_penalty_mean', 0.0)
+            # NEW: Clues used std from loss function (should match our computed value)
+            epoch_diagnostics['clues_used_std_from_loss'] = losses.get('clues_used_std', 0.0)
             
             # Feature statistics for numerical stability check
             if 'features' in outputs:
@@ -1665,7 +1669,7 @@ Config Overrides:
             stop_prob = diagnostics.get('stop_prob_mean', 0)
             if stop_prob > 0:
                 clues_used = (1 - stop_prob) * all_logits_count if all_logits_count > 0 else 0
-                # NEW: Show variance to verify task-dependent clue count
+                # Show variance to verify task-dependent clue count (enabled by per-sample gradient coupling)
                 clues_std = diagnostics.get('clues_used_std', 0)
                 clues_min = diagnostics.get('clues_used_min', 0)
                 clues_max = diagnostics.get('clues_used_max', 0)
@@ -1673,21 +1677,25 @@ Config Overrides:
                 print(f"  Stop Prob: {stop_prob:.3f} (approx {clues_used:.1f} clues active)")
                 print(f"  Clues Used: mean={clues_used:.2f}, std={clues_std:.2f}, range=[{clues_min:.1f}, {clues_max:.1f}]")
                 print(f"  Clue-Loss Correlation: {clue_loss_corr:+.3f}", end="")
-                # Interpret correlation
+                # Interpret correlation - this is the KEY metric for per-sample coupling
+                # With per-sample gradient coupling, we expect positive correlation:
+                # hard tasks (high loss) should use more clues to improve prediction
                 if clue_loss_corr > 0.3:
-                    print(" (GOOD: harder tasks use more clues)")
+                    print(" (EXCELLENT: per-sample coupling working!)")
                 elif clue_loss_corr > 0.1:
-                    print(" (mild positive - learning)")
+                    print(" (learning - per-sample coupling active)")
                 elif clue_loss_corr < -0.1:
-                    print(" (unexpected negative!)")
+                    print(" (unexpected negative - check gradient flow)")
                 else:
-                    print(" (weak - clue count may not be task-dependent)")
+                    print(" (weak - per-sample coupling may need tuning)")
                 
-                # Check for task-dependent clue count
+                # Check for task-dependent clue count (the goal of per-sample gradient coupling)
                 if clues_std < 0.1:
-                    print(f"    [!] Low variance in clue count - may not be task-dependent!")
+                    print(f"    [!] Low variance - clue count not adapting per-task!")
+                elif clues_std > 0.5:
+                    print(f"    [+] High variance - strong per-task clue adaptation!")
                 elif clues_std > 0.3:
-                    print(f"    Clue count varies by task (good!)")
+                    print(f"    Clue count varies by task (per-sample coupling active)")
             
             # Per-clue entropy breakdown
             per_clue_entropy = diagnostics.get('per_clue_entropy', [])
@@ -1744,13 +1752,22 @@ Config Overrides:
             base_ponder = diagnostics.get('sparsity_base_pondering', 0)
             entropy_ponder = diagnostics.get('sparsity_entropy_pondering', 0)
             expected_clues = diagnostics.get('expected_clues_used', 0)
-            if base_ponder > 0 or entropy_ponder > 0:
-                print(f"  --- Sparsity Loss Breakdown ---")
-                print(f"  Min Clue Penalty: {min_clue_pen:.4f}")
+            per_sample_clue_pen = diagnostics.get('per_sample_clue_penalty_mean', 0)
+            if base_ponder > 0 or entropy_ponder > 0 or per_sample_clue_pen > 0:
+                print(f"  --- Sparsity Loss Breakdown (Per-Sample Coupled) ---")
+                print(f"  Min Clue Penalty: {min_clue_pen:.4f} (per-sample avg)")
+                print(f"  Per-Sample Clue Penalty (scaled): {per_sample_clue_pen:.4f}")
                 print(f"  Base Pondering: {base_ponder:.4f} (clues={expected_clues:.2f})")
                 print(f"  Entropy Pondering: {entropy_ponder:.4f}")
+                # Verify per-sample penalty is correctly scaled (should be ~lambda_sparsity * min_clue_penalty)
                 if min_clue_pen > 0:
-                    print(f"    [!] Using fewer than min_clues!")
+                    expected_scaled = train_cfg['lambda_sparsity'] * min_clue_pen
+                    if abs(per_sample_clue_pen - expected_scaled) < 0.001:
+                        print(f"    [+] Per-sample penalty correctly scaled by λ_sparsity")
+                    else:
+                        print(f"    Expected scaled: {expected_scaled:.4f} (λ={train_cfg['lambda_sparsity']})")
+                if min_clue_pen > 0.1:
+                    print(f"    [!] Using fewer than min_clues - penalty is active!")
             
             # Context encoder diagnostics
             context_mag = diagnostics.get('context_magnitude', None)
