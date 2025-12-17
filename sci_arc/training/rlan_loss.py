@@ -498,33 +498,55 @@ class EntropyRegularization(nn.Module):
 
 class SparsityRegularization(nn.Module):
     """
-    Clue usage regularization (renamed from "sparsity" which was misleading).
+    Clue usage regularization with TWO-SIDED penalty.
     
-    CRITICAL FIX: The old implementation encouraged STOPPING early, which
-    caused the model to not use clues at all (DSC Clues Used → 0.17).
+    CRITICAL INSIGHT: The model needs to learn WHEN to stop, not just "use at least N".
     
-    New behavior:
-    - Penalizes stopping too early (min_clues term)
-    - Allows natural stopping after min_clues are used
-    - Model learns to grow clues when needed for harder tasks
+    Two-sided penalty:
+    1. Penalty for using fewer than min_clues (prevents collapse to 0 clues)
+    2. Pondering cost for each clue used (encourages efficiency)
+    
+    The balance between these creates a learning signal:
+    - Simple tasks: stop early (pondering cost > benefit)
+    - Complex tasks: use more clues (benefit > pondering cost)
     
     ARC-AGI Analysis:
-    - Some tasks need only 1 clue: single object, fill region, extend pattern
-    - Some tasks need 2+ clues: relative positioning, copy/paste, symmetry
-    - min_clues=1 allows simple tasks while attention entropy handles complexity
+    - Simple tasks (fill, extend): 1-2 clues should suffice
+    - Medium tasks (copy, rotate): 2-3 clues needed
+    - Complex tasks (composition): 4-6 clues needed
     
-    Formula: L = max(0, min_clues - expected_clues_used)
-    where expected_clues_used = Σ_k (1 - stop_prob_k)
+    Formula: 
+        L = min_clue_penalty + pondering_cost
+        min_clue_penalty = max(0, min_clues - expected_clues_used) * min_clue_weight
+        pondering_cost = expected_clues_used * ponder_weight
+    
+    With default settings:
+    - Using 0 clues: penalty = 1.0 * 1.0 + 0 * 0.1 = 1.0 (high!)
+    - Using 1 clue:  penalty = 0 + 1 * 0.1 = 0.1 (good)
+    - Using 3 clues: penalty = 0 + 3 * 0.1 = 0.3 (ok)
+    - Using 6 clues: penalty = 0 + 6 * 0.1 = 0.6 (expensive but allowed)
+    
+    The pondering_cost creates gradient to reduce clue usage when task loss is satisfied.
     """
     
-    def __init__(self, min_clues: float = 1.0, epsilon: float = 1e-6):
+    def __init__(
+        self, 
+        min_clues: float = 1.0, 
+        ponder_weight: float = 0.1,
+        min_clue_weight: float = 1.0,
+        epsilon: float = 1e-6
+    ):
         """
         Args:
             min_clues: Minimum expected number of clues to use (soft target, default 1)
+            ponder_weight: Cost per clue used (ACT-style pondering cost)
+            min_clue_weight: Weight for minimum clue penalty
             epsilon: Small constant for numerical stability
         """
         super().__init__()
         self.min_clues = min_clues
+        self.ponder_weight = ponder_weight
+        self.min_clue_weight = min_clue_weight
         self.epsilon = epsilon
     
     def forward(self, stop_logits: torch.Tensor) -> torch.Tensor:
@@ -545,11 +567,19 @@ class SparsityRegularization(nn.Module):
         # If stop_prob is high (0.9), this clue contributes ~0.1
         expected_clues_used = (1 - stop_probs).sum(dim=-1)  # (B,)
         
-        # Penalty for using fewer than min_clues (hinge loss)
-        # No penalty if expected_clues_used >= min_clues
+        # 1. Penalty for using fewer than min_clues (hinge loss)
+        # Strongly penalizes collapsing to 0 clues
         min_clue_penalty = F.relu(self.min_clues - expected_clues_used).mean()
         
-        return min_clue_penalty
+        # 2. Pondering cost: small cost per clue used (ACT-style)
+        # Creates gradient pressure to stop when task loss is satisfied
+        # This is what drives the model to learn WHEN to stop
+        pondering_cost = expected_clues_used.mean()
+        
+        # Combined loss
+        total_loss = self.min_clue_weight * min_clue_penalty + self.ponder_weight * pondering_cost
+        
+        return total_loss
 
 
 class PredicateDiversityLoss(nn.Module):
@@ -674,12 +704,13 @@ class RLANLoss(nn.Module):
     Combines all loss components with configurable weights:
     - Task Loss: StablemaxCrossEntropy (TRM-style) or FocalStablemaxLoss
     - Entropy Regularization: Sharp attention
-    - Sparsity Regularization: Efficient clue usage
+    - Sparsity Regularization: Efficient clue usage (two-sided penalty)
     - Predicate Diversity: Decorrelated predicates
     - Curriculum Penalty: Progressive complexity
     
     Loss Mode Options:
     - 'stablemax': Pure stablemax cross-entropy (TRM uses this)
+    - 'weighted_stablemax': Inverse frequency weighting (BEST for ARC)
     - 'focal_stablemax': Focal loss + stablemax (original RLAN)
     - 'focal': Standard focal loss with softmax
     """
@@ -695,6 +726,7 @@ class RLANLoss(nn.Module):
         lambda_deep_supervision: float = 0.5,
         lambda_act: float = 0.1,  # Weight for ACT pondering cost
         min_clues: float = 1.0,  # Minimum clues to use (1 for simple, grows for complex)
+        ponder_weight: float = 0.1,  # Cost per clue used (encourages efficiency)
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_stablemax', or 'focal'
@@ -704,12 +736,13 @@ class RLANLoss(nn.Module):
             focal_gamma: Focal loss gamma parameter
             focal_alpha: Focal loss alpha parameter
             lambda_entropy: Weight for entropy regularization
-            lambda_sparsity: Weight for minimum clue usage penalty (renamed from sparsity)
+            lambda_sparsity: Weight for minimum clue usage penalty
             lambda_predicate: Weight for predicate diversity
             lambda_curriculum: Weight for curriculum penalty
             lambda_deep_supervision: Weight for intermediate step losses
             lambda_act: Weight for ACT halting loss (pondering cost)
-            min_clues: Minimum expected clues to use (soft target, typically 2-3)
+            min_clues: Minimum expected clues to use (soft target)
+            ponder_weight: Cost per clue used (encourages stopping when task is solved)
             max_clues: Maximum number of clues
             use_stablemax: DEPRECATED - use loss_mode instead
             loss_mode: Loss function mode:
@@ -721,6 +754,7 @@ class RLANLoss(nn.Module):
         super().__init__()
         
         self.loss_mode = loss_mode
+        self.ponder_weight = ponder_weight
         
         # Select loss function based on mode
         if loss_mode == 'stablemax':
@@ -756,9 +790,16 @@ class RLANLoss(nn.Module):
         self.focal_loss = self.task_loss
         
         self.entropy_reg = EntropyRegularization()
-        self.sparsity_reg = SparsityRegularization(min_clues=min_clues)
+        self.sparsity_reg = SparsityRegularization(
+            min_clues=min_clues,
+            ponder_weight=ponder_weight,
+            min_clue_weight=1.0,  # Strong penalty for using < min_clues
+        )
         self.predicate_diversity = PredicateDiversityLoss()
         self.curriculum_penalty = CurriculumPenalty(max_clues=max_clues)
+        
+        # Print sparsity config for debugging
+        print(f"  Clue Regularization: min_clues={min_clues}, ponder_weight={ponder_weight}")
         
         self.lambda_entropy = lambda_entropy
         self.lambda_sparsity = lambda_sparsity

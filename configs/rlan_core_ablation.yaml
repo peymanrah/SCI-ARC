@@ -149,13 +149,19 @@ training:
   # CRITICAL: Higher entropy penalty forces DSC to focus on fewer pixels,
   # which naturally leads to focusing on foreground objects (sparse in ARC)
   #
-  # lambda_sparsity: Now a MINIMUM CLUE USAGE penalty (not sparsity!)
-  # Encourages using at least 2-3 clues for meaningful spatial reasoning.
-  # Without this, the model tends to stop immediately (DSC Clues Used → 0.17)
+  # lambda_sparsity: TWO-SIDED clue usage penalty:
+  #   1. Penalty for using < min_clues (prevents collapse to 0 clues)
+  #   2. Pondering cost per clue used (encourages efficiency)
+  #
+  # ponder_weight: Cost per clue used (0.1 = mild, 0.5 = strong)
+  #   - Simple tasks: stop early when pondering cost > benefit
+  #   - Complex tasks: use more clues when benefit > pondering cost
+  #   - Using 1 clue costs 0.1, using 6 clues costs 0.6
   # =================================================================
   lambda_entropy: 0.5      # Strong pressure - force sharp attention on sparse foreground
-  lambda_sparsity: 0.3     # ENABLED - minimum clue usage penalty
-  min_clues: 1.0           # Minimum 1 clue (some ARC tasks need only 1, model learns to grow)
+  lambda_sparsity: 0.3     # Weight for clue regularization (both min penalty + pondering)
+  min_clues: 1.0           # Minimum 1 clue (penalty if fewer)
+  ponder_weight: 0.1       # Cost per clue used (creates gradient to learn WHEN to stop)
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.5  # Stronger intermediate supervision
