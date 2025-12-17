@@ -1,0 +1,153 @@
+# RLAN MINIMAL Configuration
+# ===========================
+# TRUE MINIMAL ablation - ONLY task loss, nothing else
+# 
+# This tests whether RLAN's ARCHITECTURAL innovations work
+# without being confused by complex training dynamics.
+#
+# PHILOSOPHY:
+# - If the architecture is good, simple training should work
+# - If complex training is required, the architecture may be flawed
+# - TRM achieves 50% with just cross-entropy loss
+#
+# HYPOTHESIS:
+# The training instability seen in epochs 175-180 is caused by
+# conflicting gradient signals from multiple auxiliary losses,
+# NOT by architectural issues.
+#
+# ===========================
+
+model:
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10
+  max_grid_size: 30
+  
+  max_clues: 6
+  num_predicates: 8
+  num_solver_steps: 6
+  
+  use_act: false       # DISABLED - removes ACT complexity
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8
+  
+  # CORE MODULES ONLY
+  use_context_encoder: true   # Required for task signal
+  use_dsc: true               # Core novelty
+  use_msre: true              # Core novelty  
+  use_lcr: false              # Disabled
+  use_sph: false              # Disabled
+  use_learned_pos: false
+
+training:
+  max_epochs: 500
+  
+  batch_size: 64
+  grad_accumulation_steps: 4
+  
+  learning_rate: 1.0e-4
+  weight_decay: 0.1
+  gradient_clip: 5.0
+  
+  # Temperature schedule (still needed for DSC attention)
+  temperature_start: 1.0
+  temperature_end: 0.1
+  
+  # ============================================================
+  # MINIMAL LOSS: Just task loss, like TRM
+  # ============================================================
+  loss_mode: 'stablemax'        # Pure stablemax like TRM
+  
+  # Focal loss params (not used with stablemax)
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  
+  # ============================================================
+  # DISABLE ALL AUXILIARY LOSSES
+  # ============================================================
+  lambda_entropy: 0.0           # OFF - let attention learn naturally
+  lambda_sparsity: 0.0          # OFF - let clue count emerge naturally
+  lambda_predicate: 0.0         # OFF - no SPH
+  lambda_curriculum: 0.0        # OFF - no curriculum
+  lambda_deep_supervision: 0.0  # OFF - only final step matters
+  lambda_act: 0.0               # OFF - no ACT
+  
+  # Clue regularization (all OFF)
+  min_clues: 0.0                # No minimum
+  min_clue_weight: 0.0          # No penalty
+  ponder_weight: 0.0            # No pondering cost
+  entropy_ponder_weight: 0.0    # No entropy pondering
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  scheduler: "onecycle"
+  warmup_epochs: 20
+  min_lr: 1.0e-6
+  
+  use_ema: true
+  ema_decay: 0.995
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  
+  num_workers: 24
+  pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
+  
+  cache_samples: false
+  
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    color_permutation_prob: 0.3  # 30% only - preserve color identity
+    translational: true
+
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+
+logging:
+  log_every: 1
+  save_every: 25
+  eval_every: 5
+  keep_last_n: 5
+  checkpoint_dir: "checkpoints/rlan_minimal"
+  log_to_file: true
+  track_augmentation: true
+  
+  use_wandb: false
+  wandb_project: "rlan-arc"
+  wandb_run_name: null
+
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false
+
+device:
+  use_cuda: true
+  mixed_precision: true
+  dtype: "bfloat16"
+  compile: false

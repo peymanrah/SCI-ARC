@@ -818,6 +818,18 @@ class RLANLoss(nn.Module):
         
         self.loss_mode = loss_mode
         self.ponder_weight = ponder_weight
+        
+        # Check if we're in minimal mode (all lambdas zero)
+        self.minimal_mode = (
+            lambda_entropy == 0.0 and 
+            lambda_sparsity == 0.0 and 
+            lambda_predicate == 0.0 and 
+            lambda_curriculum == 0.0 and 
+            lambda_deep_supervision == 0.0 and 
+            lambda_act == 0.0
+        )
+        if self.minimal_mode:
+            print("  [!] MINIMAL MODE: Only task loss active (TRM-style)")
         self.entropy_ponder_weight = entropy_ponder_weight
         
         # Select loss function based on mode
@@ -911,6 +923,31 @@ class RLANLoss(nn.Module):
                 - deep_supervision_loss: Intermediate step losses (if all_logits provided)
                 - act_loss: ACT halting loss (if act_outputs provided)
         """
+        # FAST PATH: Minimal mode - just compute task loss
+        if self.minimal_mode:
+            task_loss = self.task_loss(logits, targets)
+            zero = torch.tensor(0.0, device=logits.device)
+            return {
+                "total_loss": task_loss,
+                "task_loss": task_loss,
+                "focal_loss": task_loss,  # Backward compatibility
+                "entropy_loss": zero,
+                "sparsity_loss": zero,
+                "predicate_loss": zero,
+                "curriculum_loss": zero,
+                "deep_supervision_loss": zero,
+                "act_loss": zero,
+                "loss_mode": self.loss_mode,
+                "sparsity_min_clue_penalty": 0.0,
+                "sparsity_base_pondering": 0.0,
+                "sparsity_entropy_pondering": 0.0,
+                "expected_clues_used": 0.0,
+                "stop_prob_from_loss": 0.0,
+                "clues_used_std": 0.0,
+                "per_sample_clue_penalty_mean": 0.0,
+            }
+        
+        # FULL PATH: All auxiliary losses
         # Regularization losses
         entropy_loss = self.entropy_reg(attention_maps)
         
