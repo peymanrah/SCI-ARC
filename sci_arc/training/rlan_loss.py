@@ -901,7 +901,14 @@ class RLANLoss(nn.Module):
             ds_losses = []
             num_steps = len(all_logits)
             for t, step_logits in enumerate(all_logits[:-1]):  # Exclude final (already in task_loss)
-                weight = 0.5 ** (num_steps - 1 - t)  # Later steps weighted more
+                # CHANGED: Use uniform weighting instead of exponential
+                # Previous: weight = 0.5 ** (num_steps - 1 - t) gave step 0 only 3% weight
+                # This caused solver degradation: step 0 learned to be good but later steps
+                # had weak incentive to maintain quality, causing drift.
+                # 
+                # With uniform weighting, ALL steps are equally penalized for errors,
+                # encouraging the GRU to maintain or improve quality at each step.
+                weight = 1.0  # Uniform weighting - all steps equally important
                 step_loss = self.task_loss(step_logits, targets)
                 ds_losses.append(weight * step_loss)
             deep_supervision_loss = sum(ds_losses) / len(ds_losses) if ds_losses else torch.tensor(0.0)

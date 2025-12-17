@@ -522,6 +522,9 @@ class RecursiveSolver(nn.Module):
             act_state = self.act_controller.init_state(B, device)
         
         # Iterative refinement
+        # Store initial hidden state for residual connections
+        h_initial = None
+        
         for t in range(self.num_steps):
             # Check if all samples have halted (inference only)
             if self.use_act and not self.training and act_state.halted.all():
@@ -533,6 +536,16 @@ class RecursiveSolver(nn.Module):
             
             # GRU update
             h_new = self.gru(combined, h)
+            
+            # Store initial hidden state for residual connections
+            if t == 0:
+                h_initial = h_new.clone()
+            elif h_initial is not None:
+                # Add residual from initial state to prevent degradation
+                # This helps later steps maintain the quality of step 0
+                # while still allowing refinement
+                # Weighted residual: 0.1 * h_initial + 0.9 * h_new
+                h_new = 0.9 * h_new + 0.1 * h_initial
             
             # Handle ACT updates
             if self.use_act:
