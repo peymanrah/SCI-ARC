@@ -372,15 +372,14 @@ class RecursiveSolver(nn.Module):
         """
         Aggregate features from multiple clues.
         
-        CRITICAL: Uses stop_probs to weight clue contributions WITHOUT normalizing.
-        This creates direct gradient flow from task_loss to stop_predictor, making
-        the clue count a TRUE latent variable learned from target grids.
+        CRITICAL DESIGN: Uses stop_probs to weight clue contributions with a 
+        DETACHED divisor. This ensures:
+        1. STABLE OUTPUT MAGNITUDE regardless of clue count (prevents BG collapse)
+        2. GRADIENT FLOWS through clue_usage weights (enables clue count learning)
         
-        The key insight: if we normalize clue_usage to sum to 1, the output is
-        the same regardless of how many clues are "used" (only relative weights
-        matter). By NOT normalizing, the output magnitude scales with the fraction
-        of clues used, giving the solver information about clue count and providing
-        gradient signal for learning the optimal number of clues per sample.
+        The key insight: We divide by expected_clues.detach() so the forward pass
+        produces stable magnitude, but the backward pass gradient still flows
+        through the clue_usage weights in the numerator.
         
         Args:
             clue_features: Shape (B, K, D, H, W)
@@ -397,14 +396,16 @@ class RecursiveSolver(nn.Module):
         if stop_logits is not None:
             stop_probs = torch.sigmoid(stop_logits)  # (B, K)
             clue_usage = 1 - stop_probs  # (B, K) - higher = more used
-            # DO NOT NORMALIZE! Divide by constant K instead.
-            # This preserves clue count information in the aggregation:
-            # - Using all K clues: output = mean of all clue_features
-            # - Using 1 clue: output = 1/K * that clue's features (smaller magnitude)
-            # The solver learns to handle varying magnitudes based on clue count.
+            
+            # Compute expected clue count for normalization
+            # DETACH so gradient flows through numerator only
+            expected_clues = clue_usage.sum(dim=-1, keepdim=True).detach()  # (B, 1)
+            expected_clues = expected_clues.view(B, 1, 1, 1, 1)  # (B, 1, 1, 1, 1)
+            
             clue_usage = clue_usage.view(B, K, 1, 1, 1)  # (B, K, 1, 1, 1)
         else:
             clue_usage = torch.ones(B, K, 1, 1, 1, device=clue_features.device)
+            expected_clues = torch.tensor(K, device=clue_features.device).view(1, 1, 1, 1, 1)
         
         if attention_maps is not None:
             # Weighted sum using attention maps AND clue usage
@@ -418,8 +419,10 @@ class RecursiveSolver(nn.Module):
             weighted = clue_features * clue_usage
             aggregated = weighted.sum(dim=1)  # (B, D, H, W)
         
-        # Divide by K (constant) to keep magnitude stable across different K values
-        aggregated = aggregated / K
+        # Divide by expected clue count (DETACHED) to stabilize magnitude
+        # This ensures output magnitude is ~constant regardless of clue count
+        # while gradient still flows through clue_usage in the numerator
+        aggregated = aggregated / (expected_clues.squeeze(1) + 1e-6)  # (B, D, H, W)
         
         aggregated = self.clue_aggregator(aggregated)
         
