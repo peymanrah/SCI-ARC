@@ -607,7 +607,20 @@ def train_epoch(
             if (batch_idx + 1) % grad_accumulation_steps == 0:
                 if gradient_clip > 0:
                     scaler.unscale_(optimizer)
+                    
+                    # Compute total grad norm before clipping
+                    total_grad_norm_before = 0.0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            total_grad_norm_before += p.grad.norm().item() ** 2
+                    total_grad_norm_before = total_grad_norm_before ** 0.5
+                    
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                    
+                    # Track if clipping was applied
+                    if batch_idx < grad_accumulation_steps:
+                        epoch_diagnostics['grad_norm_before_clip'] = total_grad_norm_before
+                        epoch_diagnostics['grad_was_clipped'] = total_grad_norm_before > gradient_clip
                 
                 # Capture gradient norms before they're cleared (first accumulation step only)
                 if batch_idx < grad_accumulation_steps:
@@ -652,8 +665,20 @@ def train_epoch(
             loss.backward()
             
             if (batch_idx + 1) % grad_accumulation_steps == 0:
+                # Compute total grad norm before clipping
+                total_grad_norm_before = 0.0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        total_grad_norm_before += p.grad.norm().item() ** 2
+                total_grad_norm_before = total_grad_norm_before ** 0.5
+                
                 if gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                    
+                    # Track if clipping was applied
+                    if batch_idx < grad_accumulation_steps:
+                        epoch_diagnostics['grad_norm_before_clip'] = total_grad_norm_before
+                        epoch_diagnostics['grad_was_clipped'] = total_grad_norm_before > gradient_clip
                 
                 # Capture gradient norms before they're cleared (first accumulation step only)
                 if batch_idx < grad_accumulation_steps:
@@ -770,6 +795,35 @@ def train_epoch(
             epoch_diagnostics['logits_min'] = logits.min().item()
             epoch_diagnostics['logits_has_nan'] = torch.isnan(logits).any().item()
             epoch_diagnostics['logits_has_inf'] = torch.isinf(logits).any().item()
+            
+            # Per-class prediction distribution (CRITICAL for detecting background collapse)
+            with torch.no_grad():
+                preds = logits.argmax(dim=1)  # (B, H, W)
+                pred_counts = [(preds == c).sum().item() for c in range(10)]
+                total_pixels = preds.numel()
+                epoch_diagnostics['pred_class_counts'] = pred_counts
+                epoch_diagnostics['pred_class_pcts'] = [c / total_pixels * 100 for c in pred_counts]
+                
+                # Target distribution for comparison
+                target_counts = [(test_outputs == c).sum().item() for c in range(10)]
+                epoch_diagnostics['target_class_counts'] = target_counts
+                epoch_diagnostics['target_class_pcts'] = [c / total_pixels * 100 for c in target_counts]
+                
+                # Per-class accuracy (which colors are we getting right/wrong?)
+                class_correct = []
+                class_total = []
+                for c in range(10):
+                    mask = test_outputs == c
+                    if mask.sum() > 0:
+                        correct = ((preds == test_outputs) & mask).sum().item()
+                        total = mask.sum().item()
+                        class_correct.append(correct)
+                        class_total.append(total)
+                    else:
+                        class_correct.append(0)
+                        class_total.append(0)
+                epoch_diagnostics['per_class_correct'] = class_correct
+                epoch_diagnostics['per_class_total'] = class_total
             
             # Centroid spread (how diverse are clue locations)
             if 'centroids' in outputs:
@@ -1401,6 +1455,12 @@ Config Overrides:
         
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
         
+        # Current temperature (affects attention sharpness)
+        current_temp = get_temperature(epoch, config)
+        print(f"  Temperature: {current_temp:.4f} (lower=sharper attention)")
+        if current_temp > 1.5:
+            print(f"    [!] Temperature still high - attention may be too diffuse")
+        
         # ================================================================
         # AUGMENTATION DIVERSITY LOGGING (CRITICAL for quality assurance)
         # ================================================================
@@ -1623,6 +1683,60 @@ Config Overrides:
                 print(f"  [CRITICAL] Numerical instability: NaN={has_nan}, Inf={has_inf}")
             if logits_max is not None and (logits_max > 50 or logits_min < -50):
                 print(f"  [WARNING] Extreme logit values: [{logits_min:.1f}, {logits_max:.1f}]")
+            
+            # Gradient clipping diagnostics
+            grad_norm_before = diagnostics.get('grad_norm_before_clip', None)
+            grad_was_clipped = diagnostics.get('grad_was_clipped', False)
+            grad_clip_threshold = config['training']['gradient_clip']
+            if grad_norm_before is not None:
+                print(f"  --- Gradient Clipping ---")
+                print(f"  Grad Norm (before clip): {grad_norm_before:.4f}")
+                if grad_was_clipped:
+                    print(f"    [!] Gradients were clipped! (threshold={grad_clip_threshold})")
+                else:
+                    print(f"    Gradients within bounds")
+                
+                # Severe gradient explosion warning
+                if grad_norm_before > grad_clip_threshold * 10:
+                    print(f"    [CRITICAL] Gradient explosion! {grad_norm_before:.1f}x over clip threshold!")
+            
+            # Per-class prediction distribution (detect which colors model is predicting)
+            pred_pcts = diagnostics.get('pred_class_pcts', [])
+            target_pcts = diagnostics.get('target_class_pcts', [])
+            if pred_pcts and target_pcts:
+                print(f"  --- Per-Class Distribution (Training Batch) ---")
+                # Show compact comparison: [0:bg, 1-9:colors]
+                pred_str = ', '.join(f"{p:.1f}" for p in pred_pcts)
+                tgt_str = ', '.join(f"{t:.1f}" for t in target_pcts)
+                print(f"  Pred %: [{pred_str}]")
+                print(f"  Target %: [{tgt_str}]")
+                
+                # Check for background collapse
+                bg_excess = pred_pcts[0] - target_pcts[0] if len(pred_pcts) > 0 and len(target_pcts) > 0 else 0
+                if bg_excess > 10:
+                    print(f"    [!] Over-predicting background by {bg_excess:.1f}%!")
+                
+                # Check which foreground colors are being missed
+                missed_colors = []
+                for c in range(1, 10):
+                    if c < len(target_pcts) and c < len(pred_pcts):
+                        if target_pcts[c] > 1.0 and pred_pcts[c] < 0.5:  # Target has >1%, pred <0.5%
+                            missed_colors.append(c)
+                if missed_colors:
+                    print(f"    [!] Missing foreground colors: {missed_colors}")
+                
+                # Per-class accuracy breakdown
+                class_correct = diagnostics.get('per_class_correct', [])
+                class_total = diagnostics.get('per_class_total', [])
+                if class_correct and class_total:
+                    class_accs = []
+                    for c in range(10):
+                        if c < len(class_total) and class_total[c] > 0:
+                            acc = class_correct[c] / class_total[c] * 100
+                            class_accs.append(f"{acc:.0f}")
+                        else:
+                            class_accs.append("-")
+                    print(f"  Per-Class Acc %: [{', '.join(class_accs)}]")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:
