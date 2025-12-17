@@ -551,6 +551,7 @@ class SparsityRegularization(nn.Module):
         self, 
         stop_logits: torch.Tensor,
         attention_maps: Optional[torch.Tensor] = None,
+        return_per_sample: bool = False,
     ) -> torch.Tensor:
         """
         Compute clue usage regularization loss.
@@ -558,9 +559,13 @@ class SparsityRegularization(nn.Module):
         Args:
             stop_logits: Shape (B, K) stop probability logits
             attention_maps: Shape (B, K, H, W) attention weights (optional)
+            return_per_sample: If True, return per-sample min_clue_penalty (B,) separately
+                              for adding to per-sample task loss. This enables per-task
+                              clue count learning where hard tasks use more clues.
             
         Returns:
-            loss: Scalar regularization loss
+            If return_per_sample=False: Scalar regularization loss
+            If return_per_sample=True: Tuple of (scalar_loss, per_sample_penalty (B,))
         """
         # Convert to probabilities
         stop_probs = torch.sigmoid(stop_logits)  # (B, K)
@@ -569,7 +574,9 @@ class SparsityRegularization(nn.Module):
         expected_clues_used = (1 - stop_probs).sum(dim=-1)  # (B,)
         
         # 1. Penalty for using fewer than min_clues (hinge loss)
-        min_clue_penalty = F.relu(self.min_clues - expected_clues_used).mean()
+        # Keep per-sample for per-task gradient flow
+        min_clue_penalty_per_sample = F.relu(self.min_clues - expected_clues_used)  # (B,)
+        min_clue_penalty = min_clue_penalty_per_sample.mean()  # Scalar for backward compat
         
         # 2. Base pondering cost: small cost per clue used
         base_pondering = expected_clues_used.mean() * self.ponder_weight
@@ -594,7 +601,8 @@ class SparsityRegularization(nn.Module):
             
             entropy_pondering = weighted_entropy.mean() * self.entropy_ponder_weight
         
-        # Combined loss
+        # Combined loss (excluding per-sample penalty which is returned separately if requested)
+        # base_pondering and entropy_pondering are batch-level regularization
         total_loss = (
             self.min_clue_weight * min_clue_penalty 
             + base_pondering 
@@ -612,6 +620,14 @@ class SparsityRegularization(nn.Module):
             'stop_prob_std': stop_probs.mean(dim=-1).std().item(),  # Std of mean stop_prob per sample
             'clues_used_std': (1 - stop_probs).sum(dim=-1).std().item(),  # Std of clues used per sample
         }
+        
+        # Return per-sample penalty for per-task gradient flow
+        if return_per_sample:
+            # Per-sample penalty weighted by min_clue_weight for adding to task loss
+            per_sample_penalty = self.min_clue_weight * min_clue_penalty_per_sample  # (B,)
+            # Return scalar loss (base + entropy) + per-sample penalty separately
+            scalar_loss = base_pondering + entropy_pondering
+            return scalar_loss, per_sample_penalty
         
         return total_loss
     
@@ -891,13 +907,38 @@ class RLANLoss(nn.Module):
                 - deep_supervision_loss: Intermediate step losses (if all_logits provided)
                 - act_loss: ACT halting loss (if act_outputs provided)
         """
-        # Primary task loss (name reflects actual loss function used)
-        task_loss = self.task_loss(logits, targets)
-        
         # Regularization losses
         entropy_loss = self.entropy_reg(attention_maps)
-        # Pass attention_maps to sparsity_reg for entropy-weighted pondering
-        sparsity_loss = self.sparsity_reg(stop_logits, attention_maps)
+        
+        # Get per-sample clue penalty for per-task gradient flow
+        # This enables task-dependent clue count: hard tasks use more clues
+        sparsity_scalar, per_sample_clue_penalty = self.sparsity_reg(
+            stop_logits, attention_maps, return_per_sample=True
+        )
+        
+        # Compute per-sample task loss to add clue penalty per-sample
+        # This is the key: each sample's clue penalty affects its own gradient
+        B, C, H, W = logits.shape
+        
+        # Temporarily change reduction to get per-pixel loss
+        saved_reduction = self.task_loss.reduction
+        self.task_loss.reduction = "none"
+        per_pixel_task_loss = self.task_loss(logits, targets)  # (B, H, W)
+        self.task_loss.reduction = saved_reduction
+        
+        # Per-sample task loss (mean over spatial dims)
+        per_sample_task_loss = per_pixel_task_loss.mean(dim=(1, 2))  # (B,)
+        
+        # Add per-sample clue penalty to per-sample task loss
+        # Now the gradient of clue penalty flows per-sample!
+        combined_per_sample_loss = per_sample_task_loss + per_sample_clue_penalty  # (B,)
+        
+        # Final task loss is mean of combined per-sample losses
+        task_loss = combined_per_sample_loss.mean()
+        
+        # Sparsity loss is just the scalar components (base_pondering, entropy_pondering)
+        # min_clue_penalty is already in task_loss via per_sample_clue_penalty
+        sparsity_loss = sparsity_scalar
         predicate_loss = self.predicate_diversity(predicates)
         curriculum_loss = self.curriculum_penalty(stop_logits, epoch, max_epochs)
         
@@ -975,6 +1016,10 @@ class RLANLoss(nn.Module):
             "sparsity_entropy_pondering": sparsity_components.get('entropy_pondering', 0.0),
             "expected_clues_used": sparsity_components.get('expected_clues_used', 0.0),
             "stop_prob_from_loss": sparsity_components.get('stop_prob_mean', 0.0),
+            # Per-sample variance diagnostics (verify per-task clue learning)
+            "clues_used_std": sparsity_components.get('clues_used_std', 0.0),
+            # Per-sample penalty mean (should match sparsity_min_clue_penalty)
+            "per_sample_clue_penalty_mean": per_sample_clue_penalty.mean().item(),
         }
 
 
