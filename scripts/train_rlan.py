@@ -152,6 +152,10 @@ def create_train_loader(
     # CRITICAL: Ignore padding in loss (like TRM) to prevent BG mode collapse
     ignore_padding_in_loss = data_cfg.get('ignore_padding_in_loss', True)  # Default True!
     
+    # TRM-STYLE ENCODING: Shift colors +1, add boundary markers (class 0)
+    # This dilutes dominant class (color 0) from ~60% to ~43%, preventing mode collapse
+    use_trm_encoding = data_cfg.get('use_trm_encoding', True)  # Default True!
+    
     train_dataset = ARCDataset(
         data_cfg['train_path'],
         max_size=max_grid_size,
@@ -162,6 +166,7 @@ def create_train_loader(
         curriculum_stage=curriculum_stage,  # Apply curriculum filtering!
         track_augmentation=track_augmentation,  # Enable for diversity logging
         ignore_padding_in_loss=ignore_padding_in_loss,  # Ignore padding (like TRM)
+        use_trm_encoding=use_trm_encoding,  # TRM-style color shift + boundary markers
     )
     
     batch_size = train_cfg['batch_size']
@@ -888,22 +893,26 @@ def train_epoch(
             epoch_diagnostics['logits_has_inf'] = torch.isinf(logits).any().item()
             
             # Per-class prediction distribution (CRITICAL for detecting background collapse)
+            # With TRM encoding: class 0=boundary, classes 1-10=colors 0-9
             with torch.no_grad():
                 preds = logits.argmax(dim=1)  # (B, H, W)
-                pred_counts = [(preds == c).sum().item() for c in range(10)]
+                num_classes = logits.shape[1]  # 11 with TRM encoding, 10 without
+                pred_counts = [(preds == c).sum().item() for c in range(num_classes)]
                 total_pixels = preds.numel()
                 epoch_diagnostics['pred_class_counts'] = pred_counts
                 epoch_diagnostics['pred_class_pcts'] = [c / total_pixels * 100 for c in pred_counts]
                 
                 # Target distribution for comparison
-                target_counts = [(test_outputs == c).sum().item() for c in range(10)]
+                # Note: targets may have -100 for padding (ignored in loss)
+                valid_mask = test_outputs >= 0  # Exclude -100 padding
+                target_counts = [(test_outputs == c).sum().item() for c in range(num_classes)]
                 epoch_diagnostics['target_class_counts'] = target_counts
                 epoch_diagnostics['target_class_pcts'] = [c / total_pixels * 100 for c in target_counts]
                 
                 # Per-class accuracy (which colors are we getting right/wrong?)
                 class_correct = []
                 class_total = []
-                for c in range(10):
+                for c in range(num_classes):
                     mask = test_outputs == c
                     if mask.sum() > 0:
                         correct = ((preds == test_outputs) & mask).sum().item()
@@ -917,16 +926,18 @@ def train_epoch(
                 epoch_diagnostics['per_class_total'] = class_total
                 
                 # NEW: Color confusion matrix for diagnosing color prediction issues
+                # With TRM encoding: class 0=boundary, class 1=color 0 (black)
                 # Check: when model predicts FG, which color does it tend to predict?
-                fg_mask = test_outputs != 0  # All foreground targets
+                fg_class_start = 2 if num_classes == 11 else 1  # Skip boundary and black
+                fg_mask = test_outputs >= fg_class_start  # Foreground = colors 1-9
                 if fg_mask.sum() > 0:
                     # What colors is the model predicting for FG targets?
                     fg_preds = preds[fg_mask]
-                    fg_pred_dist = [(fg_preds == c).sum().item() for c in range(10)]
+                    fg_pred_dist = [(fg_preds == c).sum().item() for c in range(num_classes)]
                     epoch_diagnostics['fg_pred_color_dist'] = fg_pred_dist
                     
                     # Mode color prediction (which color does model prefer?)
-                    mode_color = max(range(10), key=lambda c: fg_pred_dist[c])
+                    mode_color = max(range(num_classes), key=lambda c: fg_pred_dist[c])
                     epoch_diagnostics['fg_pred_mode_color'] = mode_color
                     epoch_diagnostics['fg_pred_mode_pct'] = fg_pred_dist[mode_color] / fg_mask.sum().item() * 100
             

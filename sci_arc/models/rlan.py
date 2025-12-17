@@ -274,7 +274,7 @@ class RLAN(nn.Module):
             use_act=self.use_act,  # Enable Adaptive Computation Time
             use_lcr=self.use_lcr,  # Skip count injection if LCR disabled
             use_sph=self.use_sph,  # Skip predicate gating if SPH disabled
-            use_feedback=config.use_solver_feedback,  # Disabled by default (argmax breaks gradients)
+            use_feedback=config.use_solver_feedback if config else False,  # Disabled by default (argmax breaks gradients)
         )
         
         # Print module configuration

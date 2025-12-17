@@ -71,6 +71,11 @@ class ARCDataset(Dataset):
     # -100 is the standard PyTorch ignore_index value
     PADDING_IGNORE_VALUE = -100
     
+    # TRM-style encoding: shift colors by +1, use class 0 as boundary marker
+    # This dilutes the dominant class (color 0/black) from ~60% to ~43%
+    # preventing mode collapse while providing structural grid size info
+    USE_TRM_ENCODING = True  # Enable TRM-style color shift + boundary markers
+    
     def __init__(
         self,
         data_path: str,
@@ -82,6 +87,7 @@ class ARCDataset(Dataset):
         curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
         track_augmentation: bool = True,  # Track augmentation stats for debugging
         ignore_padding_in_loss: bool = True,  # NEW: Use -1 for padding in targets
+        use_trm_encoding: bool = True,  # NEW: TRM-style color shift + boundary markers
     ):
         """
         Initialize ARCDataset.
@@ -97,8 +103,11 @@ class ARCDataset(Dataset):
             translational_augment: Whether to apply random positional offset (TRM-style)
             curriculum_stage: Curriculum learning stage (0=all, 1=easy, 2=+medium, 3=+hard)
             track_augmentation: Whether to return augmentation metadata for logging
-            ignore_padding_in_loss: If True, use -1 as padding value for target grids
+            ignore_padding_in_loss: If True, use -100 as padding value for target grids
                                     so loss ignores padding pixels (like TRM)
+            use_trm_encoding: If True, shift colors by +1 (0-9 -> 1-10) and add boundary
+                              markers (class 0) at grid edges. This balances class distribution
+                              and prevents mode collapse to color 0.
         """
         self.data_path = Path(data_path)
         self.max_size = max_size
@@ -109,6 +118,7 @@ class ARCDataset(Dataset):
         self.curriculum_stage = curriculum_stage
         self.track_augmentation = track_augmentation
         self.ignore_padding_in_loss = ignore_padding_in_loss
+        self.use_trm_encoding = use_trm_encoding
         
         # Load tasks
         self.tasks = self._load_tasks()
@@ -244,34 +254,73 @@ class ARCDataset(Dataset):
         """
         Pad grid to max_size x max_size with optional translational offset.
         
+        TRM-style encoding (when use_trm_encoding=True):
+        1. Shift colors by +1: colors 0-9 → classes 1-10
+        2. Add boundary markers (class 0) at grid edges:
+           - Place class 0 at position (row, col) where row=H or col=W
+           - This marks the actual grid boundaries within the padded canvas
+        3. Fill remaining padding with PADDING_IGNORE_VALUE (-100)
+        
+        This approach (matching TRM) prevents mode collapse because:
+        - Without boundary: Color 0 (black) is ~60% of valid pixels → easy local minimum
+        - With boundary: Boundary is ~28%, Color 0 diluted to ~43% → balanced learning
+        
         Args:
-            grid: Input grid of shape (H, W)
+            grid: Input grid of shape (H, W) with values 0-9
             offset: Optional (row_offset, col_offset) for translational augmentation
-            is_target: If True and ignore_padding_in_loss is enabled, use -1 as padding
-                       so that loss function ignores padding pixels (like TRM)
+            is_target: If True and ignore_padding_in_loss is enabled, use -100 as padding
+                       so that loss function ignores padding pixels
         
         Returns:
             Padded grid of shape (max_size, max_size)
+            - With TRM encoding: values 0 (boundary), 1-10 (colors), -100 (padding)
+            - Without TRM encoding: values 0-9 (colors), -100 or 0 (padding)
         """
         h, w = grid.shape
         if h >= self.max_size and w >= self.max_size:
-            return grid[:self.max_size, :self.max_size]
+            result = grid[:self.max_size, :self.max_size].copy()
+            if self.use_trm_encoding:
+                # Shift colors by +1 even for truncated grids
+                result = result + 1
+            return result
         
-        # Use -1 as padding for target grids (ignored in loss), 0 for input grids
+        # Determine padding value
         pad_value = self.PADDING_IGNORE_VALUE if (is_target and self.ignore_padding_in_loss) else 0
         
-        # Need int64 for -1 values (uint8 can't hold -1)
-        dtype = np.int64 if pad_value < 0 else grid.dtype
+        # Need int64 for -100 values (uint8 can't hold negative numbers)
+        dtype = np.int64 if pad_value < 0 else np.int32
         padded = np.full((self.max_size, self.max_size), pad_value, dtype=dtype)
         
-        # Copy actual content
-        if offset is not None:
-            r_off, c_off = offset
-            padded[r_off:r_off+min(h, self.max_size), c_off:c_off+min(w, self.max_size)] = \
-                grid[:min(h, self.max_size), :min(w, self.max_size)]
+        # Calculate offset
+        r_off, c_off = offset if offset is not None else (0, 0)
+        
+        # Apply TRM-style encoding
+        if self.use_trm_encoding:
+            # Step 1: Shift colors by +1 (colors 0-9 → classes 1-10)
+            shifted_grid = grid.astype(np.int32) + 1
+            
+            # Step 2: Copy shifted content to padded canvas
+            h_copy = min(h, self.max_size - r_off)
+            w_copy = min(w, self.max_size - c_off)
+            padded[r_off:r_off+h_copy, c_off:c_off+w_copy] = shifted_grid[:h_copy, :w_copy]
+            
+            # Step 3: Add boundary markers (class 0) at grid edges
+            # Like TRM: EOS at positions where row=H or col=W (marking end of grid)
+            # Place boundary at the row just after the grid content (row H)
+            if r_off + h < self.max_size:
+                # Boundary row: spans the width of the grid content
+                padded[r_off + h, c_off:c_off + w_copy] = 0  # Boundary marker
+            
+            # Place boundary at the column just after the grid content (col W)
+            if c_off + w < self.max_size:
+                # Boundary column: spans the height of the grid content + boundary row
+                end_row = min(r_off + h + 1, self.max_size)
+                padded[r_off:end_row, c_off + w] = 0  # Boundary marker
         else:
-            padded[:min(h, self.max_size), :min(w, self.max_size)] = \
-                grid[:min(h, self.max_size), :min(w, self.max_size)]
+            # Original behavior: no color shift, no boundary markers
+            h_copy = min(h, self.max_size - r_off)
+            w_copy = min(w, self.max_size - c_off)
+            padded[r_off:r_off+h_copy, c_off:c_off+w_copy] = grid[:h_copy, :w_copy]
         
         return padded
     
