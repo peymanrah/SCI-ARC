@@ -154,8 +154,8 @@ class DynamicSaliencyController(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
         )
-        # Initialize the final layer with negative bias
-        self._init_stop_predictor_bias(init_bias=-2.0)
+        # Initialize with proper entropy coupling and less aggressive bias
+        self._init_stop_predictor_for_entropy_coupling(init_bias=-1.0)
         
         # Layer norm for stability
         self.query_norm = nn.LayerNorm(hidden_dim)
@@ -167,30 +167,55 @@ class DynamicSaliencyController(nn.Module):
         # Coordinate grids (will be registered as buffers)
         self._init_coord_grids(30)  # Max ARC size
     
-    def _init_stop_predictor_bias(self, init_bias: float = -2.0):
+    def _init_stop_predictor_for_entropy_coupling(self, init_bias: float = -1.0):
         """
-        Initialize stop predictor with negative bias to encourage clue usage.
+        Initialize stop predictor with proper entropy coupling.
         
-        With sigmoid(-2.0) ≈ 0.12, model defaults to low stop probability,
-        meaning it will use clues rather than immediately stopping.
-        This is critical because without explicit task-loss gradient flow
-        through stop_logits, the model tends to collapse to "stop immediately".
+        The stop predictor receives [attended_features (D), entropy (1)].
+        We want entropy to have strong influence on stopping:
+        - Low entropy (sharp attention) → higher stop probability
+        - High entropy (diffuse attention) → lower stop probability
+        
+        Key insight: entropy is normalized to [0,1] and negated, so:
+        - Good focus: entropy_norm ≈ -0.8 to -1.0 (sharp → should stop)
+        - Poor focus: entropy_norm ≈ -0.2 to -0.4 (diffuse → continue)
+        
+        The weight on entropy should be ~1-2 to have meaningful impact on logit.
         
         Args:
-            init_bias: Initial bias value. Negative = default to continue.
-                -2.0 → sigmoid ≈ 0.12 (use most clues)
-                -1.0 → sigmoid ≈ 0.27
-                 0.0 → sigmoid = 0.50 (50/50)
-                +2.0 → sigmoid ≈ 0.88 (stop early)
+            init_bias: Initial bias value. Less negative = easier to learn to stop.
+                -1.0 → sigmoid ≈ 0.27 (reasonable starting point)
+                -2.0 → sigmoid ≈ 0.12 (too hard to overcome)
         """
-        # Find the last Linear layer in stop_predictor
-        for module in reversed(list(self.stop_predictor.modules())):
-            if isinstance(module, nn.Linear):
-                # Use small weights so output is dominated by bias initially
-                # but can still learn from gradients
-                nn.init.normal_(module.weight, mean=0.0, std=0.01)
-                nn.init.constant_(module.bias, init_bias)
-                break
+        layers = [m for m in self.stop_predictor.modules() if isinstance(m, nn.Linear)]
+        
+        if len(layers) >= 2:
+            first_layer, last_layer = layers[0], layers[-1]
+            
+            # First layer: Give entropy input (last dimension) strong weight
+            # This creates real coupling between attention quality and stopping
+            in_features = first_layer.in_features
+            hidden_dim = in_features - 1  # All but last dim is attended_features
+            
+            # Initialize with kaiming for feature part, stronger for entropy
+            nn.init.kaiming_normal_(first_layer.weight[:, :hidden_dim], mode='fan_in')
+            # Entropy weight: stronger initialization (std ≈ 1.5)
+            # Positive weight: low entropy (negative after negation) → higher activation
+            nn.init.normal_(first_layer.weight[:, hidden_dim:], mean=1.5, std=0.5)
+            nn.init.zeros_(first_layer.bias)
+            
+            # Last layer: reasonable initialization with less aggressive bias
+            nn.init.normal_(last_layer.weight, mean=0.0, std=0.1)  # 10x larger than before
+            nn.init.constant_(last_layer.bias, init_bias)
+        elif len(layers) == 1:
+            # Single layer case
+            layer = layers[0]
+            in_features = layer.in_features
+            hidden_dim = in_features - 1
+            
+            nn.init.kaiming_normal_(layer.weight[:, :hidden_dim], mode='fan_in')
+            nn.init.normal_(layer.weight[:, hidden_dim:], mean=1.5, std=0.5)
+            nn.init.constant_(layer.bias, init_bias)
     
     def _init_coord_grids(self, max_size: int):
         """Initialize coordinate grids for centroid computation."""
