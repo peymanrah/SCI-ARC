@@ -10,14 +10,13 @@
 # - If complex training is required, the architecture may be flawed
 # - TRM achieves 50% with just cross-entropy loss
 #
-# KEY INSIGHT (from TRM comparison):
-# TRM ignores padding pixels in loss computation. Our grids are
-# padded to 30x30, but the actual content is much smaller. Without
-# ignoring padding, 80-90% of pixels are padding (0), causing mode
-# collapse to background-only predictions.
+# KEY INSIGHT (from epochs 3-11 analysis):
+# Even with padding ignored, class 0 (black) is ~4-8x more common
+# than individual FG colors within actual grid content. Pure
+# stablemax causes collapse to all-class-0 predictions.
 #
-# FIX: Use ignore_padding_in_loss=true in data config, and now
-# we can use pure stablemax like TRM.
+# We use weighted_stablemax to give rare FG classes stronger
+# gradients. This is still "minimal" (just task loss).
 #
 # ===========================
 
@@ -65,15 +64,25 @@ training:
   temperature_end: 0.1
   
   # ============================================================
-  # MINIMAL LOSS: Just task loss, like TRM
+  # MINIMAL LOSS: Task loss with class weighting
   # ============================================================
-  # Now that we ignore padding in loss (like TRM), we can use
-  # pure stablemax cross-entropy. The actual grid content has
-  # a more balanced class distribution.
+  # Even with padding ignored, class 0 (black) is ~4-8x more
+  # common than individual FG colors in actual grid content.
+  # 
+  # Target distribution example: [7.8%, 1.4%, 1.2%, 1.0%, ...]
+  # Class 0 dominates, causing mode collapse with pure stablemax.
+  #
+  # weighted_stablemax uses inverse frequency weighting:
+  # - Rare FG colors get stronger gradients
+  # - Still "minimal" (just task loss, no auxiliary losses)
   # ============================================================
-  loss_mode: 'stablemax'          # Pure stablemax like TRM
+  loss_mode: 'weighted_stablemax'  # Inverse frequency weighting
   
-  # Focal loss params (not used with stablemax)
+  # BG/FG weight caps (tune for ARC class distribution)
+  bg_weight_cap: 1.0               # Cap BG weight (it's still common)
+  fg_weight_cap: 10.0              # Allow strong FG gradients
+  
+  # Focal loss params (not used with weighted_stablemax)
   focal_gamma: 2.0
   focal_alpha: 0.75
   
