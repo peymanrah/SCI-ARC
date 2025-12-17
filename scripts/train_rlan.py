@@ -901,8 +901,14 @@ def evaluate(
     model: RLAN,
     dataloader: DataLoader,
     device: torch.device,
+    temperature: float = 0.5,  # Use training temperature, not hardcoded 0.1!
 ) -> Dict[str, float]:
-    """Evaluate model on validation set with detailed metrics for debugging."""
+    """
+    Evaluate model on validation set with detailed metrics for debugging.
+    
+    CRITICAL: temperature should match or be close to training temperature!
+    Using temp=0.1 when training at temp=0.85 causes distribution shift.
+    """
     model.eval()
     
     total_correct = 0
@@ -932,13 +938,14 @@ def evaluate(
             train_outputs = batch['output_grids'].to(device)
             pair_mask = batch['grid_masks'].to(device)
             
-            # Predict with low temperature (sharp) and context, return intermediates
+            # Predict with SAME temperature as training to avoid distribution shift
+            # CRITICAL FIX: Previously used hardcoded 0.1, causing train-eval mismatch
             outputs = model(
                 test_inputs,
                 train_inputs=train_inputs,
                 train_outputs=train_outputs,
                 pair_mask=pair_mask,
-                temperature=0.1,
+                temperature=temperature,
                 return_intermediates=True,
             )
             
@@ -1917,6 +1924,10 @@ Config Overrides:
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:
+            # Compute current training temperature for eval
+            # CRITICAL: Use same temperature as training to avoid distribution shift!
+            eval_temp = get_temperature(epoch, config)
+            
             # Use EMA model for evaluation if available
             if ema is not None:
                 eval_model = ema.ema_copy(model)
@@ -1924,11 +1935,11 @@ Config Overrides:
             else:
                 eval_model = model
             
-            eval_metrics = evaluate(eval_model, eval_loader, device)
+            eval_metrics = evaluate(eval_model, eval_loader, device, temperature=eval_temp)
             
             # DIAGNOSTIC: Also eval training model to detect EMA lag
             if ema is not None:
-                train_model_metrics = evaluate(model, eval_loader, device)
+                train_model_metrics = evaluate(model, eval_loader, device, temperature=eval_temp)
                 train_non_bg = train_model_metrics['non_bg_accuracy']
                 ema_non_bg = eval_metrics['non_bg_accuracy']
                 if train_non_bg > ema_non_bg + 0.1:  # Training model significantly better
@@ -1949,6 +1960,7 @@ Config Overrides:
             if eval_stop_prob > 0:
                 print(f"  Eval Stop Prob: {eval_stop_prob:.3f}")
             print(f"  Predicate Activation: {eval_metrics['predicate_activation']:.4f}")
+            print(f"  Eval Temperature: {eval_temp:.3f} (matched to training)")
             
             if ema is not None:
                 print("  (Using EMA weights for evaluation)")

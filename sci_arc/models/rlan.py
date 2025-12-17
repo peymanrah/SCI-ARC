@@ -470,6 +470,7 @@ class RLAN(nn.Module):
         input_grid: torch.Tensor,
         train_inputs: Optional[torch.Tensor] = None,
         train_outputs: Optional[torch.Tensor] = None,
+        temperature: float = 0.1,
     ) -> torch.Tensor:
         """
         Make a prediction (argmax of logits).
@@ -478,6 +479,7 @@ class RLAN(nn.Module):
             input_grid: Shape (B, H, W) input grid
             train_inputs: Optional (B, N, H, W) training inputs for context
             train_outputs: Optional (B, N, H, W) training outputs for context
+            temperature: Softmax temperature (should match training end temp)
             
         Returns:
             prediction: Shape (B, H, W) predicted grid
@@ -488,7 +490,7 @@ class RLAN(nn.Module):
                 input_grid,
                 train_inputs=train_inputs,
                 train_outputs=train_outputs,
-                temperature=0.1
+                temperature=temperature
             )
             prediction = logits.argmax(dim=1)
         return prediction

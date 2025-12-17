@@ -115,6 +115,7 @@ def predict_with_tta(
     model: RLAN,
     input_grid: torch.Tensor,
     num_transforms: int = 8,
+    temperature: float = 0.1,
 ) -> torch.Tensor:
     """
     Predict with Test-Time Augmentation using dihedral transforms.
@@ -130,7 +131,7 @@ def predict_with_tta(
         
         # Get prediction
         with torch.no_grad():
-            logits = model(transformed, temperature=0.1)
+            logits = model(transformed, temperature=temperature)
             pred = logits.argmax(dim=1)
         
         # Inverse transform prediction
@@ -251,6 +252,7 @@ def analyze_attention_patterns(
     dataloader: DataLoader,
     device: torch.device,
     num_samples: int = 10,
+    temperature: float = 0.1,
 ) -> Dict[str, Any]:
     """Analyze attention patterns for interpretability."""
     model.eval()
@@ -272,7 +274,7 @@ def analyze_attention_patterns(
         
         with torch.no_grad():
             try:
-                outputs = model(input_grids, temperature=0.1, return_intermediates=True)
+                outputs = model(input_grids, temperature=temperature, return_intermediates=True)
                 
                 if 'attention_maps' not in outputs:
                     break
@@ -326,11 +328,15 @@ def evaluate_model(
     output_dir: Optional[Path] = None,
     detailed_output: bool = False,
     visualize: bool = False,
+    temperature: float = 0.1,
 ) -> Dict[str, Any]:
     """
     Evaluate model with comprehensive metrics.
     
     Returns results matching CISL's evaluate.py output format.
+    
+    Args:
+        temperature: Softmax temperature (should match training end temperature)
     """
     model.eval()
     
@@ -354,9 +360,9 @@ def evaluate_model(
         
         with torch.no_grad():
             if use_tta:
-                predictions = predict_with_tta(model, test_inputs)
+                predictions = predict_with_tta(model, test_inputs, temperature=temperature)
             else:
-                logits = model(test_inputs, temperature=0.1)
+                logits = model(test_inputs, temperature=temperature)
                 predictions = logits.argmax(dim=1)
         
         # Process each sample
@@ -535,6 +541,8 @@ def main():
                         help='Device to use (cuda/cpu)')
     parser.add_argument('--batch-size', type=int, default=16,
                         help='Batch size for evaluation')
+    parser.add_argument('--temperature', type=float, default=0.1,
+                        help='Temperature for softmax (lower = sharper, use same as training end)')
     args = parser.parse_args()
     
     # Create output directory
@@ -608,6 +616,7 @@ def main():
         details_dir = None
     
     # Run evaluation
+    print(f"\nUsing temperature: {args.temperature}")
     results = evaluate_model(
         model=model,
         dataloader=dataloader,
@@ -616,6 +625,7 @@ def main():
         output_dir=output_dir,
         detailed_output=args.detailed_output,
         visualize=args.visualize,
+        temperature=args.temperature,
     )
     
     # Print results
@@ -659,7 +669,7 @@ def main():
         print("Attention Pattern Analysis")
         print("=" * 60)
         
-        analysis = analyze_attention_patterns(model, dataloader, device)
+        analysis = analyze_attention_patterns(model, dataloader, device, temperature=args.temperature)
         
         print(f"Average Active Clues: {analysis['avg_active_clues']:.2f}")
         print(f"Average Attention Entropy: {analysis['avg_attention_entropy']:.4f}")
