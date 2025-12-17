@@ -353,6 +353,11 @@ class DynamicSaliencyController(nn.Module):
             # Predict stop probability with entropy-aware input
             stop_logit = self.stop_predictor(stop_input).squeeze(-1)  # (B,)
             
+            # CLAMP stop_logits to prevent sigmoid saturation
+            # sigmoid(5) = 0.993, sigmoid(-5) = 0.007
+            # This ensures gradients can still flow even with strong preferences
+            stop_logit = stop_logit.clamp(min=-5.0, max=5.0)
+            
             # Update cumulative mask (reduce weight of attended regions)
             # Use soft masking to allow gradients to flow
             mask_update = 1.0 - 0.9 * attention.detach()
