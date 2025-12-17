@@ -156,10 +156,14 @@ class DynamicSaliencyController(nn.Module):
         )
         # Initialize with proper entropy coupling and less aggressive bias
         # CRITICAL: init_bias controls starting clue count
-        # -1.0 -> sigmoid=0.27 -> ~3.6 clues (collapsed too fast)
-        # -2.0 -> sigmoid=0.12 -> ~4.4 clues (more conservative start)
-        # -2.5 -> sigmoid=0.08 -> ~4.6 clues (even more conservative)
-        self._init_stop_predictor_for_entropy_coupling(init_bias=-2.5)
+        # -1.0 -> sigmoid=0.27 -> ~4.4 clues, good gradient flow
+        # -2.5 -> sigmoid=0.08 -> ~5.5 clues, BUT sigmoid gradient vanishes!
+        # 
+        # FIX: Changed from -2.5 to -1.0 to prevent gradient vanishing
+        # The sigmoid gradient at x: sig(x)*(1-sig(x))
+        # At -2.5: 0.076 * 0.924 = 0.07 (weak)
+        # At -1.0: 0.27 * 0.73 = 0.20 (3x stronger!)
+        self._init_stop_predictor_for_entropy_coupling(init_bias=-1.0)
         
         # Layer norm for stability
         self.query_norm = nn.LayerNorm(hidden_dim)

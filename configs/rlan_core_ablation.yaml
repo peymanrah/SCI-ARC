@@ -173,8 +173,9 @@ training:
   #
   # FIX: Reduced from 0.5/0.3 - too aggressive early, causing clue collapse
   # Let the model learn to use clues FIRST, then add regularization
+  # FIX2: Further reduced entropy from 0.1 to 0.01 - was 30% of total loss!
   # =================================================================
-  lambda_entropy: 0.1      # REDUCED - allow exploration before forcing sharp attention
+  lambda_entropy: 0.01     # REDUCED AGAIN - was dominating task loss
   lambda_sparsity: 0.1     # REDUCED - don't penalize clue usage too early
   
   # =================================================================
@@ -207,7 +208,7 @@ training:
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.5  # Stronger intermediate supervision
-  lambda_act: 0.1          # ACT halting loss (teaches when to stop refining)
+  lambda_act: 0.0          # DISABLED - was contributing 41% of loss, conflicting with task learning
   
   use_stablemax: true
   

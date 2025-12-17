@@ -1926,6 +1926,15 @@ Config Overrides:
             
             eval_metrics = evaluate(eval_model, eval_loader, device)
             
+            # DIAGNOSTIC: Also eval training model to detect EMA lag
+            if ema is not None:
+                train_model_metrics = evaluate(model, eval_loader, device)
+                train_non_bg = train_model_metrics['non_bg_accuracy']
+                ema_non_bg = eval_metrics['non_bg_accuracy']
+                if train_non_bg > ema_non_bg + 0.1:  # Training model significantly better
+                    print(f"\n  [!] EMA LAG: Training model Non-BG={train_non_bg:.1%} vs EMA Non-BG={ema_non_bg:.1%}")
+                    print(f"      Training model is learning but EMA hasn't caught up yet")
+            
             # Core metrics
             print(f"  Pixel Accuracy: {eval_metrics['pixel_accuracy']:.4f}")
             print(f"  Task Accuracy: {eval_metrics['task_accuracy']:.4f}")
