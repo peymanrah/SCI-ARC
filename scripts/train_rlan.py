@@ -1798,17 +1798,19 @@ Config Overrides:
                         else:
                             return "↓" if diff < 0 else "↑"
                     
-                    # Stop prob: should INCREASE (model learning when to stop)
+                    # Stop prob: trend matters, not absolute value (task-dependent latent variable)
                     sp = learning_trajectory['stop_prob']
-                    print(f"  Stop Prob:   {sp[-1]:.3f} {trend_arrow(sp, higher_is_better=True)} (init=0.27, target~0.5-0.7)")
+                    print(f"  Stop Prob:   {sp[-1]:.3f} {trend_arrow(sp, higher_is_better=True)} (init=0.27, task-dependent)")
                     
-                    # Expected clues: should DECREASE from ~4.4 to task-optimal (1-3)
+                    # Expected clues: LATENT VARIABLE - no fixed target!
+                    # Each sample needs different clue counts based on task complexity
+                    # Should vary with data, not converge to fixed value
                     ec = learning_trajectory['expected_clues']
-                    print(f"  Exp. Clues:  {ec[-1]:.2f} {trend_arrow(ec, higher_is_better=False)} (init~4.4, target=1-3)")
+                    print(f"  Exp. Clues:  {ec[-1]:.2f} (latent variable, task-dependent)")
                     
                     # Attention entropy: should DECREASE (sharper attention)
                     ae = learning_trajectory['attention_entropy']
-                    print(f"  Attn Entropy: {ae[-1]:.2f} {trend_arrow(ae, higher_is_better=False)} (max=6.8, target<3.0)")
+                    print(f"  Attn Entropy: {ae[-1]:.2f} {trend_arrow(ae, higher_is_better=False)} (max=6.8, sharper=better)")
                     
                     # Task loss: should DECREASE
                     tl = learning_trajectory['task_loss']
@@ -1816,7 +1818,7 @@ Config Overrides:
                     
                     # Best step: should be LATER steps (4-5 for 6-step solver)
                     bs = learning_trajectory['best_step']
-                    print(f"  Best Step:   {bs[-1]} (target=5 for 6-step solver)")
+                    print(f"  Best Step:   {bs[-1]} (later=better refinement)")
                     
                     # FG coverage: should approach 100% of target
                     fg = learning_trajectory['fg_coverage']

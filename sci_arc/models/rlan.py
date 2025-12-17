@@ -408,6 +408,9 @@ class RLAN(nn.Module):
             predicates = torch.zeros(B, self.num_predicates, device=features.device)
         
         # 7. Recursive Solver - generate output
+        # CRITICAL: Pass stop_logits to solver for clue aggregation weighting
+        # This creates gradient flow: task_loss -> stop_probs -> stop_predictor
+        # Making clue count a TRUE latent variable learned from target grids
         act_outputs = None
         if return_all_steps or return_intermediates:
             solver_output = self.solver(
@@ -416,6 +419,7 @@ class RLAN(nn.Module):
                 predicates=predicates,
                 input_grid=input_grid,
                 attention_maps=attention_maps,
+                stop_logits=stop_logits,  # For latent clue count learning
                 return_all_steps=True,
                 return_act_outputs=return_intermediates and self.use_act,
             )
@@ -432,6 +436,7 @@ class RLAN(nn.Module):
                 predicates=predicates,
                 input_grid=input_grid,
                 attention_maps=attention_maps,
+                stop_logits=stop_logits,  # For latent clue count learning
                 return_all_steps=False,
             )
             all_logits = None

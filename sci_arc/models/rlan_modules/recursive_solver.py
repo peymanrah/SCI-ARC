@@ -323,27 +323,47 @@ class RecursiveSolver(nn.Module):
         self,
         clue_features: torch.Tensor,
         attention_maps: Optional[torch.Tensor] = None,
+        stop_logits: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Aggregate features from multiple clues.
         
+        CRITICAL: Uses stop_probs to weight clue contributions, creating
+        direct gradient flow from task_loss to stop_predictor. This makes
+        the clue count a TRUE latent variable learned from target grids.
+        
         Args:
             clue_features: Shape (B, K, D, H, W)
             attention_maps: Optional (B, K, H, W) attention weights
+            stop_logits: Optional (B, K) stop probability logits
             
         Returns:
             aggregated: Shape (B, D, H, W)
         """
         B, K, D, H, W = clue_features.shape
         
+        # Compute clue usage weights from stop_logits
+        # (1 - stop_prob) = probability of using this clue
+        if stop_logits is not None:
+            stop_probs = torch.sigmoid(stop_logits)  # (B, K)
+            clue_usage = 1 - stop_probs  # (B, K) - higher = more used
+            # Normalize to sum to 1 for stable aggregation
+            clue_usage = clue_usage / (clue_usage.sum(dim=-1, keepdim=True) + 1e-6)
+            clue_usage = clue_usage.view(B, K, 1, 1, 1)  # (B, K, 1, 1, 1)
+        else:
+            clue_usage = torch.ones(B, K, 1, 1, 1, device=clue_features.device) / K
+        
         if attention_maps is not None:
-            # Weighted sum using attention maps
-            weights = attention_maps.unsqueeze(2)  # (B, K, 1, H, W)
-            weighted = clue_features * weights
+            # Weighted sum using attention maps AND clue usage
+            attn_weights = attention_maps.unsqueeze(2)  # (B, K, 1, H, W)
+            # Combine attention (spatial) with clue usage (per-clue weight)
+            combined_weights = attn_weights * clue_usage  # (B, K, 1, H, W)
+            weighted = clue_features * combined_weights
             aggregated = weighted.sum(dim=1)  # (B, D, H, W)
         else:
-            # Simple mean
-            aggregated = clue_features.mean(dim=1)  # (B, D, H, W)
+            # Weighted mean by clue usage only
+            weighted = clue_features * clue_usage
+            aggregated = weighted.sum(dim=1)  # (B, D, H, W)
         
         aggregated = self.clue_aggregator(aggregated)
         
@@ -408,6 +428,7 @@ class RecursiveSolver(nn.Module):
         predicates: torch.Tensor,
         input_grid: torch.Tensor,
         attention_maps: Optional[torch.Tensor] = None,
+        stop_logits: Optional[torch.Tensor] = None,
         return_all_steps: bool = False,
         return_act_outputs: bool = False,
     ) -> torch.Tensor:
@@ -420,6 +441,9 @@ class RecursiveSolver(nn.Module):
             predicates: Shape (B, P) from SPH (ignored if use_sph=False)
             input_grid: Shape (B, H, W) original input grid
             attention_maps: Optional (B, K, H, W) clue attention maps
+            stop_logits: Optional (B, K) stop probability logits from DSC
+                        Used to weight clue contributions - creates gradient flow
+                        from task_loss to stop_predictor for latent clue count learning
             return_all_steps: If True, return predictions at all steps
             return_act_outputs: If True, also return ACT outputs for loss computation
             
@@ -434,8 +458,10 @@ class RecursiveSolver(nn.Module):
         B, K, D, H, W = clue_features.shape
         device = clue_features.device
         
-        # Aggregate clue features
-        aggregated = self._aggregate_clues(clue_features, attention_maps)  # (B, D, H, W)
+        # Aggregate clue features using attention AND stop_probs
+        # This creates gradient flow: task_loss -> logits -> aggregated -> stop_probs -> stop_predictor
+        # Making clue count a TRUE latent variable learned from target grids
+        aggregated = self._aggregate_clues(clue_features, attention_maps, stop_logits)  # (B, D, H, W)
         
         # Inject count information (skipped if use_lcr=False)
         aggregated = self._inject_counts(aggregated, count_embedding)
