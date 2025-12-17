@@ -661,7 +661,115 @@ The solver learns to work with varying input magnitudes, and task loss gradient 
 - Mid training: Model correlates clue count with task difficulty
 - Late training: Stable per-task clue counts with positive loss correlation
 
-#### 9.2.6 Sparsity Loss (Distinct Clues)
+#### 9.2.6 Per-Sample Gradient Coupling for Task-Adaptive Clue Learning
+
+**The Problem with Batch-Averaged Clue Penalties**:
+
+The standard approach computes clue penalties as batch averages:
+
+$$\mathcal{L}_{total} = \underbrace{\frac{1}{B} \sum_{i=1}^{B} \ell_{task}^{(i)}}_{\text{batch-averaged task loss}} + \lambda \underbrace{\frac{1}{B} \sum_{i=1}^{B} \ell_{clue}^{(i)}}_{\text{batch-averaged clue penalty}}$$
+
+where $\ell_{task}^{(i)}$ is the per-sample task loss and $\ell_{clue}^{(i)} = w \cdot \text{ReLU}(N_{min} - \mathbb{E}[N_{clues}^{(i)}])$ is the per-sample clue penalty.
+
+The gradient with respect to stop logits for sample $i$ is:
+
+$$\frac{\partial \mathcal{L}_{total}}{\partial s^{(i)}} = \frac{1}{B} \frac{\partial \ell_{task}^{(i)}}{\partial s^{(i)}} + \frac{\lambda}{B} \frac{\partial \ell_{clue}^{(i)}}{\partial s^{(i)}}$$
+
+These two gradient terms are **computed independently** and summed. The optimizer sees them as separate signals—there is no coupling between "how hard is this task?" and "how many clues should this task use?"
+
+**The Per-Sample Coupling Solution**:
+
+We reformulate the loss to couple task loss and clue penalty at the per-sample level:
+
+$$\mathcal{L}_{total} = \frac{1}{B} \sum_{i=1}^{B} \underbrace{\left( \ell_{task}^{(i)} + \lambda \cdot \ell_{clue}^{(i)} \right)}_{\text{per-sample combined loss}} + \lambda \cdot \mathcal{L}_{ponder+entropy}$$
+
+**Mathematical Equivalence**: The forward pass value is identical:
+
+$$\frac{1}{B} \sum_{i} \left( \ell_{task}^{(i)} + \lambda \ell_{clue}^{(i)} \right) = \frac{1}{B} \sum_{i} \ell_{task}^{(i)} + \frac{\lambda}{B} \sum_{i} \ell_{clue}^{(i)}$$
+
+**Gradient Difference**: While forward values are equivalent, the computation graph structure differs:
+
+*Old (Decoupled):*
+```
+task_loss → mean() → scalar ─┐
+                              ├─→ total_loss → backward
+clue_penalty → mean() → scalar ─┘
+```
+
+*New (Coupled):*
+```
+task_loss[i] + clue_penalty[i] → combined[i] ──┐
+task_loss[j] + clue_penalty[j] → combined[j] ──┼─→ mean() → total_loss → backward  
+task_loss[k] + clue_penalty[k] → combined[k] ──┘
+```
+
+In the coupled formulation, the optimizer updates each sample's stop predictor based on **both** its task difficulty and its clue usage in a unified backward pass.
+
+**Why This Enables Per-Task Clue Learning**:
+
+Consider two samples in the same batch:
+
+| Sample | Task Type | Task Loss | Clue Penalty | Combined Loss |
+|--------|-----------|-----------|--------------|---------------|
+| A | Easy (single object) | 0.1 | 0.0 (using 2 clues) | 0.1 |
+| B | Hard (multiple objects) | 0.8 | 0.5 (using 1 clue) | 1.3 |
+
+In the **coupled** formulation:
+- Sample B has a larger combined loss, so it receives stronger gradient updates
+- The gradient to $s^{(B)}$ includes **both** "prediction is wrong" AND "using too few clues"
+- The model learns: "For hard tasks like B, use more clues"
+
+In the **decoupled** formulation:
+- Each sample gets $1/B$ of both gradients equally
+- No connection between "this task is hard" and "this task needs more clues"
+
+**Gradient Flow Analysis**:
+
+For the coupled formulation, the gradient to stop logits $s^{(i)}$ is:
+
+$$\frac{\partial \mathcal{L}}{\partial s^{(i)}} = \frac{1}{B} \cdot \frac{\partial}{\partial s^{(i)}} \left( \ell_{task}^{(i)} + \lambda \ell_{clue}^{(i)} \right)$$
+
+Expanding:
+$$= \frac{1}{B} \left( \underbrace{\frac{\partial \ell_{task}^{(i)}}{\partial \text{agg}^{(i)}} \cdot \frac{\partial \text{agg}^{(i)}}{\partial s^{(i)}}}_{\text{task signal via clue\_usage}} + \lambda w \cdot \underbrace{\frac{\partial \text{ReLU}(N_{min} - N^{(i)})}{\partial s^{(i)}}}_{\text{clue count signal}} \right)$$
+
+Both terms are **sample-specific**. The stop predictor for sample $i$ receives gradient that is:
+1. Proportional to how much the task loss would improve with different clue weighting
+2. Proportional to whether this sample needs more clues to meet $N_{min}$
+
+**Implementation**:
+
+```python
+# Get per-pixel task loss without reduction
+per_pixel_loss = task_loss_fn(logits, targets, reduction="none")  # (B, H, W)
+per_sample_task_loss = per_pixel_loss.mean(dim=(1, 2))  # (B,)
+
+# Get per-sample clue penalty
+per_sample_clue_penalty = λ * w * ReLU(N_min - expected_clues[i])  # (B,)
+
+# Couple them at per-sample level
+combined = per_sample_task_loss + per_sample_clue_penalty  # (B,)
+total_task_loss = combined.mean()  # Now backward couples both signals per-sample
+```
+
+**Training Metrics for Per-Task Clue Learning**:
+
+| Metric | Healthy Value | Indicates |
+|--------|---------------|-----------|
+| `clues_used_std` | > 0.5 | Clue count varies across samples |
+| `per_sample_clue_penalty_mean` | ≈ `λ * sparsity_min_clue_penalty` | Scaling is correct |
+| `task_loss_clue_correlation` | > 0.3 | Hard tasks use more clues |
+
+**Theoretical Justification**:
+
+This reformulation is analogous to the difference between:
+- **Independent optimization**: Optimize $\min_\theta f(\theta) + g(\theta)$ where $f$ and $g$ are computed separately
+- **Joint optimization**: Optimize $\min_\theta h(\theta)$ where $h = f + g$ with shared intermediate computations
+
+When $f$ and $g$ share intermediate variables (like stop logits affecting both task loss and clue penalty), the joint formulation captures **interaction effects** that the independent formulation misses.
+
+In our case, the interaction is: "If my task loss is high AND my clue count is low, I should increase clue usage more aggressively than if only one of these is true."
+
+#### 9.2.7 Sparsity Loss (Distinct Clues)
 
 Encourages clues to be spatially distinct:
 
@@ -669,7 +777,7 @@ $$\mathcal{L}_{sparsity} = \sum_{t} \|M_t\|_1 + \sum_{t \neq t'} \max(0, \text{C
 
 The second term penalizes clues that overlap too much.
 
-#### 9.2.7 Predicate Diversity Loss
+#### 9.2.8 Predicate Diversity Loss
 
 Prevents predicates from collapsing to trivial values:
 
@@ -679,7 +787,7 @@ Where $H(p_k) = -p_k \log(p_k) - (1-p_k) \log(1-p_k)$.
 
 **Effect**: Pushes predicates away from 0.5 (uninformative) toward decisive 0 or 1.
 
-#### 9.2.7 Curriculum Loss (Occam's Razor)
+#### 9.2.9 Curriculum Loss (Occam's Razor)
 
 Penalizes using more clues than necessary:
 
