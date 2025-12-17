@@ -304,6 +304,11 @@ class RecursiveSolver(nn.Module):
             nn.Conv2d(hidden_dim, num_classes, 1),
         )
         
+        # Initialize output head to combat background collapse
+        # Problem: Model defaults to predicting background (class 0) which is 90% of pixels
+        # Solution: Give foreground classes a slight positive bias to encourage exploration
+        self._init_output_head_for_balanced_predictions()
+        
         # ACT Controller (optional)
         if use_act:
             try:
@@ -318,6 +323,38 @@ class RecursiveSolver(nn.Module):
                 self.use_act = False
         
         self.dropout = nn.Dropout(dropout)
+    
+    def _init_output_head_for_balanced_predictions(self):
+        """
+        Initialize output head to prevent background collapse.
+        
+        The problem: With 90% background pixels, the model learns to predict
+        background everywhere as a "safe" default. Even with weighted loss,
+        the initial random predictions favor background due to class imbalance.
+        
+        Solution: Initialize the final layer bias to give foreground classes
+        a small advantage, encouraging the model to explore foreground predictions
+        early in training.
+        
+        This is similar to how object detection models initialize the classification
+        head with a prior probability for the positive class.
+        """
+        # Get the final Conv2d layer in output_head
+        final_layer = None
+        for module in self.output_head.modules():
+            if isinstance(module, nn.Conv2d) and module.out_channels == self.num_classes:
+                final_layer = module
+        
+        if final_layer is not None and final_layer.bias is not None:
+            # Initialize bias:
+            # - Class 0 (background): slight negative bias
+            # - Classes 1-9 (foreground): slight positive bias
+            # This creates initial predictions closer to uniform rather than all-background
+            with torch.no_grad():
+                # Background bias: -0.5 → P(bg) ≈ 38% with uniform other logits
+                # Foreground bias: +0.5 → P(fg) ≈ 62% total for all fg classes
+                final_layer.bias[0] = -0.5  # Background slightly discouraged
+                final_layer.bias[1:] = 0.5 / (self.num_classes - 1)  # Foreground slightly encouraged
     
     def _aggregate_clues(
         self,

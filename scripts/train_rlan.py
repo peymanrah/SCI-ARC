@@ -1388,10 +1388,12 @@ Config Overrides:
     
     # Learning trajectory tracker for epoch-by-epoch trend analysis
     # Stores key metrics to verify learning is progressing correctly
+    # NOTE: Clue count is a LATENT VARIABLE - no fixed target!
+    # Each sample learns its own optimal count based on task complexity.
     learning_trajectory = {
         'epochs': [],
-        'stop_prob': [],           # Stop predictor learning (should increase from ~0.27)
-        'expected_clues': [],      # Clue count (should stabilize around 1-3)
+        'stop_prob': [],           # Stop predictor output (task-dependent, no fixed target)
+        'expected_clues': [],      # Clue count (LATENT - varies by sample complexity)
         'attention_entropy': [],   # Attention sharpness (should decrease)
         'task_loss': [],           # Main loss (should decrease)
         'best_step': [],           # Best refinement step (should be later steps)
