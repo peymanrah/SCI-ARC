@@ -195,10 +195,14 @@ class FocalStablemaxLoss(nn.Module):
         target_probs = probs.gather(1, targets_valid.unsqueeze(1)).squeeze(1)
         target_probs = target_probs.clamp(min=1e-7, max=1.0 - 1e-7)
         
-        # Focal weight
+        # Focal weight: down-weight easy examples (high confidence)
+        # gamma=2.0 means: p=0.9 (easy) -> weight=0.01, p=0.5 (hard) -> weight=0.25
         focal_weight = (1 - target_probs) ** self.gamma
         
-        # Alpha weight
+        # Alpha weight: CRITICAL for anti-background-collapse
+        # Background (class 0) should have LOW weight, foreground (1-9) should have HIGH weight
+        # With alpha=0.75: background=0.25, foreground=0.75 (3x more weight on foreground)
+        # This forces the model to care more about getting foreground pixels right
         is_background = (targets_valid == 0).float()
         alpha_weight = is_background * (1 - self.alpha) + (1 - is_background) * self.alpha
         

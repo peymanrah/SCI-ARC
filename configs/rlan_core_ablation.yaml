@@ -118,11 +118,15 @@ training:
   temperature_start: 1.0   # Sharp from start for debugging DSC
   temperature_end: 0.1
   
-  # TRM-style loss (pure stablemax, no focal)
-  loss_mode: 'stablemax'
+  # FOCAL_STABLEMAX: Critical for anti-background-collapse
+  # ARC grids are ~85% background, so pure CE leads to predicting all-background.
+  # Focal loss down-weights easy (background) predictions, alpha weights foreground more.
+  loss_mode: 'focal_stablemax'
   
+  # focal_gamma=2.0: Hard examples (low confidence) get 25x more weight than easy ones
+  # focal_alpha=0.75: Foreground pixels get 3x more weight than background
   focal_gamma: 2.0
-  focal_alpha: 0.25
+  focal_alpha: 0.75  # HIGH alpha = MORE weight on foreground (was 0.25, which inverted!)
   
   # Auxiliary loss weights
   # =================================================================
@@ -130,12 +134,15 @@ training:
   #   - Higher = stronger pressure for sharp attention
   #   - 0.1 is mild, 0.5 is strong
   #   - Increase if DSC entropy stays high (>4.0) after epoch 25
+  #
+  # CRITICAL: Higher entropy penalty forces DSC to focus on fewer pixels,
+  # which naturally leads to focusing on foreground objects (sparse in ARC)
   # =================================================================
-  lambda_entropy: 0.2      # Increased from 0.1 for stronger DSC pressure
+  lambda_entropy: 0.5      # Strong pressure - force sharp attention on sparse foreground
   lambda_sparsity: 0.0     # Disabled - don't penalize clue usage
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
-  lambda_deep_supervision: 0.3  # Helps intermediate steps learn
+  lambda_deep_supervision: 0.5  # Stronger intermediate supervision
   lambda_act: 0.1          # ACT halting loss (teaches when to stop refining)
   
   use_stablemax: true
