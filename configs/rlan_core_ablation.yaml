@@ -175,15 +175,28 @@ training:
   lambda_sparsity: 0.3     # Weight for clue regularization
   
   # =================================================================
-  # CLUE COUNT TUNING (prevent collapse to 1 clue)
+  # CLUE COUNT AS LATENT VARIABLE (learned from task loss)
   # =================================================================
-  # Previous values caused collapse: ponder_weight=0.2 pushed too hard
-  # New values allow task-dependent clue count to emerge
+  # CRITICAL FIX: Previously, clue_usage was normalized to sum to 1,
+  # which killed all gradient signal about HOW MANY clues to use.
+  # Now, we aggregate WITHOUT normalizing (divide by constant K),
+  # so the output magnitude varies with clue count, giving the solver
+  # direct signal about clue count.
+  #
+  # With this fix:
+  # - Task loss gradient flows to stop_probs based on clue usefulness
+  # - Easy tasks naturally learn to use fewer clues (e.g., 1-2)
+  # - Hard tasks naturally learn to use more clues (e.g., 4-5)
+  # - No artificial min_clues needed!
+  #
+  # Regularization provides mild efficiency pressure:
+  # - ponder_weight: small cost per clue (encourages parsimony)
+  # - entropy_ponder_weight: cost for diffuse attention (quality control)
   # =================================================================
-  min_clues: 2.5           # Minimum 2-3 clues (stronger floor)
-  min_clue_weight: 5.0     # 5x stronger penalty for using fewer than min_clues
-  ponder_weight: 0.02      # 10x WEAKER than before (0.2 -> 0.02)
-  entropy_ponder_weight: 0.02  # 5x WEAKER (0.1 -> 0.02) - sharp attention shouldn't force stopping
+  min_clues: 0.0           # No minimum - task loss drives clue count
+  min_clue_weight: 0.0     # Disabled - trust task loss
+  ponder_weight: 0.01      # Very mild efficiency pressure
+  entropy_ponder_weight: 0.01  # Mild quality pressure
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.5  # Stronger intermediate supervision

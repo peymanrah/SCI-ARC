@@ -372,9 +372,15 @@ class RecursiveSolver(nn.Module):
         """
         Aggregate features from multiple clues.
         
-        CRITICAL: Uses stop_probs to weight clue contributions, creating
-        direct gradient flow from task_loss to stop_predictor. This makes
+        CRITICAL: Uses stop_probs to weight clue contributions WITHOUT normalizing.
+        This creates direct gradient flow from task_loss to stop_predictor, making
         the clue count a TRUE latent variable learned from target grids.
+        
+        The key insight: if we normalize clue_usage to sum to 1, the output is
+        the same regardless of how many clues are "used" (only relative weights
+        matter). By NOT normalizing, the output magnitude scales with the fraction
+        of clues used, giving the solver information about clue count and providing
+        gradient signal for learning the optimal number of clues per sample.
         
         Args:
             clue_features: Shape (B, K, D, H, W)
@@ -391,11 +397,14 @@ class RecursiveSolver(nn.Module):
         if stop_logits is not None:
             stop_probs = torch.sigmoid(stop_logits)  # (B, K)
             clue_usage = 1 - stop_probs  # (B, K) - higher = more used
-            # Normalize to sum to 1 for stable aggregation
-            clue_usage = clue_usage / (clue_usage.sum(dim=-1, keepdim=True) + 1e-6)
+            # DO NOT NORMALIZE! Divide by constant K instead.
+            # This preserves clue count information in the aggregation:
+            # - Using all K clues: output = mean of all clue_features
+            # - Using 1 clue: output = 1/K * that clue's features (smaller magnitude)
+            # The solver learns to handle varying magnitudes based on clue count.
             clue_usage = clue_usage.view(B, K, 1, 1, 1)  # (B, K, 1, 1, 1)
         else:
-            clue_usage = torch.ones(B, K, 1, 1, 1, device=clue_features.device) / K
+            clue_usage = torch.ones(B, K, 1, 1, 1, device=clue_features.device)
         
         if attention_maps is not None:
             # Weighted sum using attention maps AND clue usage
@@ -408,6 +417,9 @@ class RecursiveSolver(nn.Module):
             # Weighted mean by clue usage only
             weighted = clue_features * clue_usage
             aggregated = weighted.sum(dim=1)  # (B, D, H, W)
+        
+        # Divide by K (constant) to keep magnitude stable across different K values
+        aggregated = aggregated / K
         
         aggregated = self.clue_aggregator(aggregated)
         
