@@ -1386,6 +1386,18 @@ Config Overrides:
     collapse_warnings = 0
     max_collapse_warnings = 5  # Stop after this many consecutive warnings
     
+    # Learning trajectory tracker for epoch-by-epoch trend analysis
+    # Stores key metrics to verify learning is progressing correctly
+    learning_trajectory = {
+        'epochs': [],
+        'stop_prob': [],           # Stop predictor learning (should increase from ~0.27)
+        'expected_clues': [],      # Clue count (should stabilize around 1-3)
+        'attention_entropy': [],   # Attention sharpness (should decrease)
+        'task_loss': [],           # Main loss (should decrease)
+        'best_step': [],           # Best refinement step (should be later steps)
+        'fg_coverage': [],         # Foreground prediction (should approach target)
+    }
+    
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
         
@@ -1737,6 +1749,98 @@ Config Overrides:
                         else:
                             class_accs.append("-")
                     print(f"  Per-Class Acc %: [{', '.join(class_accs)}]")
+            
+            # ================================================================
+            # UPDATE LEARNING TRAJECTORY - Track key metrics epoch-by-epoch
+            # ================================================================
+            # Extract key metrics for trajectory tracking
+            stop_prob = diagnostics.get('stop_prob_mean', 0.27)
+            expected_clues = diagnostics.get('expected_clues_used', 0)
+            per_clue_entropy = diagnostics.get('per_clue_entropy', [])
+            mean_entropy = sum(per_clue_entropy) / len(per_clue_entropy) if per_clue_entropy else 0
+            per_step_loss = diagnostics.get('per_step_loss', [])
+            pred_pcts = diagnostics.get('pred_class_pcts', [])
+            target_pcts = diagnostics.get('target_class_pcts', [])
+            
+            # Find best step
+            valid_losses = [(i, l) for i, l in enumerate(per_step_loss) if l < 100 and l == l]
+            best_step = min(valid_losses, key=lambda x: x[1])[0] if valid_losses else -1
+            
+            # Foreground coverage (sum of non-bg predictions)
+            fg_pred = sum(pred_pcts[1:]) if len(pred_pcts) > 1 else 0
+            fg_target = sum(target_pcts[1:]) if len(target_pcts) > 1 else 10  # Default ~10%
+            
+            # Store in trajectory
+            learning_trajectory['epochs'].append(epoch + 1)
+            learning_trajectory['stop_prob'].append(stop_prob)
+            learning_trajectory['expected_clues'].append(expected_clues)
+            learning_trajectory['attention_entropy'].append(mean_entropy)
+            learning_trajectory['task_loss'].append(task_loss_val)
+            learning_trajectory['best_step'].append(best_step)
+            learning_trajectory['fg_coverage'].append(fg_pred / max(fg_target, 1) * 100)
+            
+            # Print learning trajectory summary every 5 epochs (or first 10)
+            if (epoch + 1) <= 10 or (epoch + 1) % 5 == 0:
+                print(f"\n  {'='*50}")
+                print(f"  LEARNING TRAJECTORY (Epoch {epoch + 1})")
+                print(f"  {'='*50}")
+                n = len(learning_trajectory['epochs'])
+                if n >= 2:
+                    # Show trend for each metric
+                    def trend_arrow(values, higher_is_better=False):
+                        if len(values) < 2:
+                            return "→"
+                        diff = values[-1] - values[-2]
+                        if abs(diff) < 0.01:
+                            return "→"
+                        if higher_is_better:
+                            return "↑" if diff > 0 else "↓"
+                        else:
+                            return "↓" if diff < 0 else "↑"
+                    
+                    # Stop prob: should INCREASE (model learning when to stop)
+                    sp = learning_trajectory['stop_prob']
+                    print(f"  Stop Prob:   {sp[-1]:.3f} {trend_arrow(sp, higher_is_better=True)} (init=0.27, target~0.5-0.7)")
+                    
+                    # Expected clues: should DECREASE from ~4.4 to task-optimal (1-3)
+                    ec = learning_trajectory['expected_clues']
+                    print(f"  Exp. Clues:  {ec[-1]:.2f} {trend_arrow(ec, higher_is_better=False)} (init~4.4, target=1-3)")
+                    
+                    # Attention entropy: should DECREASE (sharper attention)
+                    ae = learning_trajectory['attention_entropy']
+                    print(f"  Attn Entropy: {ae[-1]:.2f} {trend_arrow(ae, higher_is_better=False)} (max=6.8, target<3.0)")
+                    
+                    # Task loss: should DECREASE
+                    tl = learning_trajectory['task_loss']
+                    print(f"  Task Loss:   {tl[-1]:.4f} {trend_arrow(tl, higher_is_better=False)}")
+                    
+                    # Best step: should be LATER steps (4-5 for 6-step solver)
+                    bs = learning_trajectory['best_step']
+                    print(f"  Best Step:   {bs[-1]} (target=5 for 6-step solver)")
+                    
+                    # FG coverage: should approach 100% of target
+                    fg = learning_trajectory['fg_coverage']
+                    print(f"  FG Coverage: {fg[-1]:.1f}% of target {trend_arrow(fg, higher_is_better=True)}")
+                    
+                    # Check for healthy learning patterns
+                    if n >= 3:
+                        sp_improving = sp[-1] > sp[0] + 0.05
+                        ae_improving = ae[-1] < ae[0] - 0.2
+                        tl_improving = tl[-1] < tl[0] * 0.9
+                        
+                        issues = []
+                        if not sp_improving and n > 5:
+                            issues.append("stop_prob not increasing")
+                        if not ae_improving and n > 5:
+                            issues.append("attention not sharpening")
+                        if not tl_improving and n > 5:
+                            issues.append("task_loss not decreasing")
+                        
+                        if issues:
+                            print(f"  [!] Potential issues: {', '.join(issues)}")
+                        elif n > 5:
+                            print(f"  ✓ Learning trajectory looks healthy!")
+                print(f"  {'='*50}")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:
