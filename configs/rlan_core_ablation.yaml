@@ -206,9 +206,11 @@ training:
   # min_clues: Minimum expected clues (soft target)
   # min_clue_weight: Strength of penalty for using fewer clues
   #
-  # With 6 max clues, we want at least 2-3 to be used.
+  # With per-sample gradient coupling, the model learns per-task clue counts.
+  # min_clues=1 allows simple tasks to use 1 clue while complex tasks use more.
+  # The per-sample penalty ensures each task gets appropriate pressure.
   # =================================================================
-  min_clues: 2.0           # At least 2 clues should be active
+  min_clues: 1.0           # Allow simple tasks to use just 1 clue
   min_clue_weight: 1.0     # Moderate penalty for using fewer than min
   ponder_weight: 0.0       # No cost per clue (let model use as many as needed)
   entropy_ponder_weight: 0.0  # No extra cost for diffuse attention
