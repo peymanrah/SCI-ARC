@@ -916,6 +916,12 @@ class RLANLoss(nn.Module):
             stop_logits, attention_maps, return_per_sample=True
         )
         
+        # Scale per-sample penalty by lambda_sparsity to maintain backward compatibility
+        # Before: total_loss += lambda_sparsity * (min_clue_weight * penalty + base + entropy)
+        # After:  total_loss += (lambda_sparsity * min_clue_weight * penalty) + lambda_sparsity * (base + entropy)
+        # The per_sample_clue_penalty already includes min_clue_weight, so just scale by lambda_sparsity
+        per_sample_clue_penalty_scaled = self.lambda_sparsity * per_sample_clue_penalty
+        
         # Compute per-sample task loss to add clue penalty per-sample
         # This is the key: each sample's clue penalty affects its own gradient
         B, C, H, W = logits.shape
@@ -931,13 +937,13 @@ class RLANLoss(nn.Module):
         
         # Add per-sample clue penalty to per-sample task loss
         # Now the gradient of clue penalty flows per-sample!
-        combined_per_sample_loss = per_sample_task_loss + per_sample_clue_penalty  # (B,)
+        combined_per_sample_loss = per_sample_task_loss + per_sample_clue_penalty_scaled  # (B,)
         
         # Final task loss is mean of combined per-sample losses
         task_loss = combined_per_sample_loss.mean()
         
         # Sparsity loss is just the scalar components (base_pondering, entropy_pondering)
-        # min_clue_penalty is already in task_loss via per_sample_clue_penalty
+        # min_clue_penalty is already in task_loss via per_sample_clue_penalty_scaled
         sparsity_loss = sparsity_scalar
         predicate_loss = self.predicate_diversity(predicates)
         curriculum_loss = self.curriculum_penalty(stop_logits, epoch, max_epochs)
@@ -1018,8 +1024,8 @@ class RLANLoss(nn.Module):
             "stop_prob_from_loss": sparsity_components.get('stop_prob_mean', 0.0),
             # Per-sample variance diagnostics (verify per-task clue learning)
             "clues_used_std": sparsity_components.get('clues_used_std', 0.0),
-            # Per-sample penalty mean (should match sparsity_min_clue_penalty)
-            "per_sample_clue_penalty_mean": per_sample_clue_penalty.mean().item(),
+            # Per-sample penalty mean (scaled by lambda_sparsity, should match old behavior)
+            "per_sample_clue_penalty_mean": per_sample_clue_penalty_scaled.mean().item(),
         }
 
 
