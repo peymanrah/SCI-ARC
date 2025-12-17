@@ -763,9 +763,10 @@ class RLANLoss(nn.Module):
         lambda_curriculum: float = 0.1,
         lambda_deep_supervision: float = 0.5,
         lambda_act: float = 0.1,  # Weight for ACT pondering cost
-        min_clues: float = 1.0,  # Minimum clues to use (1 for simple, grows for complex)
-        ponder_weight: float = 0.1,  # Base cost per clue used
-        entropy_ponder_weight: float = 0.05,  # Extra cost for diffuse attention
+        min_clues: float = 2.5,  # Minimum clues to use (increased from 1.0)
+        min_clue_weight: float = 5.0,  # Strong penalty for using fewer than min_clues
+        ponder_weight: float = 0.02,  # Base cost per clue (REDUCED from 0.1)
+        entropy_ponder_weight: float = 0.02,  # Extra cost for diffuse attention (REDUCED)
         max_clues: int = 5,
         use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_stablemax', or 'focal'
@@ -780,9 +781,10 @@ class RLANLoss(nn.Module):
             lambda_curriculum: Weight for curriculum penalty
             lambda_deep_supervision: Weight for intermediate step losses
             lambda_act: Weight for ACT halting loss
-            min_clues: Minimum expected clues to use (soft target)
-            ponder_weight: Base cost per clue used (ACT-style)
-            entropy_ponder_weight: Extra cost for high-entropy (diffuse) attention
+            min_clues: Minimum expected clues to use (soft target, default=2.5)
+            min_clue_weight: Penalty weight for using fewer than min_clues (default=5.0)
+            ponder_weight: Base cost per clue used (ACT-style, default=0.02)
+            entropy_ponder_weight: Extra cost for high-entropy attention (default=0.02)
             max_clues: Maximum number of clues
             use_stablemax: DEPRECATED - use loss_mode instead
             loss_mode: Loss function mode:
@@ -834,14 +836,14 @@ class RLANLoss(nn.Module):
         self.sparsity_reg = SparsityRegularization(
             min_clues=min_clues,
             ponder_weight=ponder_weight,
-            min_clue_weight=1.0,  # Strong penalty for using < min_clues
+            min_clue_weight=min_clue_weight,  # From config (strong penalty for < min_clues)
             entropy_ponder_weight=entropy_ponder_weight,  # Extra cost for diffuse attention
         )
         self.predicate_diversity = PredicateDiversityLoss()
         self.curriculum_penalty = CurriculumPenalty(max_clues=max_clues)
         
         # Print sparsity config for debugging
-        print(f"  Clue Regularization: min_clues={min_clues}, ponder_weight={ponder_weight}, entropy_weight={entropy_ponder_weight}")
+        print(f"  Clue Regularization: min_clues={min_clues}, min_clue_weight={min_clue_weight}, ponder_weight={ponder_weight}, entropy_weight={entropy_ponder_weight}")
         
         self.lambda_entropy = lambda_entropy
         self.lambda_sparsity = lambda_sparsity

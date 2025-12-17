@@ -155,7 +155,11 @@ class DynamicSaliencyController(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
         )
         # Initialize with proper entropy coupling and less aggressive bias
-        self._init_stop_predictor_for_entropy_coupling(init_bias=-1.0)
+        # CRITICAL: init_bias controls starting clue count
+        # -1.0 -> sigmoid=0.27 -> ~3.6 clues (collapsed too fast)
+        # -2.0 -> sigmoid=0.12 -> ~4.4 clues (more conservative start)
+        # -2.5 -> sigmoid=0.08 -> ~4.6 clues (even more conservative)
+        self._init_stop_predictor_for_entropy_coupling(init_bias=-2.5)
         
         # Layer norm for stability
         self.query_norm = nn.LayerNorm(hidden_dim)

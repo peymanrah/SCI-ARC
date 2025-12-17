@@ -173,9 +173,17 @@ training:
   # =================================================================
   lambda_entropy: 0.5      # Strong pressure - force sharp attention on sparse foreground
   lambda_sparsity: 0.3     # Weight for clue regularization
-  min_clues: 1.0           # Minimum 1 clue (penalty if fewer)
-  ponder_weight: 0.2       # Base cost per clue used (increased for stronger gradient)
-  entropy_ponder_weight: 0.1  # Extra cost for diffuse attention (couples quality to stopping)
+  
+  # =================================================================
+  # CLUE COUNT TUNING (prevent collapse to 1 clue)
+  # =================================================================
+  # Previous values caused collapse: ponder_weight=0.2 pushed too hard
+  # New values allow task-dependent clue count to emerge
+  # =================================================================
+  min_clues: 2.5           # Minimum 2-3 clues (stronger floor)
+  min_clue_weight: 5.0     # 5x stronger penalty for using fewer than min_clues
+  ponder_weight: 0.02      # 10x WEAKER than before (0.2 -> 0.02)
+  entropy_ponder_weight: 0.02  # 5x WEAKER (0.1 -> 0.02) - sharp attention shouldn't force stopping
   lambda_predicate: 0.0    # Disabled - no SPH in this ablation
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.5  # Stronger intermediate supervision

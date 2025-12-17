@@ -314,9 +314,10 @@ def create_loss(config: dict) -> RLANLoss:
         lambda_curriculum=train_config['lambda_curriculum'],
         lambda_deep_supervision=train_config['lambda_deep_supervision'],
         lambda_act=train_config.get('lambda_act', 0.1),  # ACT halting loss weight
-        min_clues=train_config.get('min_clues', 1.0),  # Minimum clues to use
-        ponder_weight=train_config.get('ponder_weight', 0.1),  # Base cost per clue
-        entropy_ponder_weight=train_config.get('entropy_ponder_weight', 0.05),  # Extra cost for diffuse attention
+        min_clues=train_config.get('min_clues', 2.5),  # Minimum clues to use (increased default)
+        min_clue_weight=train_config.get('min_clue_weight', 5.0),  # Strong penalty for fewer clues
+        ponder_weight=train_config.get('ponder_weight', 0.02),  # Base cost per clue (REDUCED from 0.1)
+        entropy_ponder_weight=train_config.get('entropy_ponder_weight', 0.02),  # Extra cost for diffuse attention (REDUCED)
         max_clues=model_config['max_clues'],
         use_stablemax=train_config.get('use_stablemax', True),
         loss_mode=train_config.get('loss_mode', 'focal_stablemax'),  # TRM uses 'stablemax'
