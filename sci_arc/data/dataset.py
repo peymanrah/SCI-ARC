@@ -62,6 +62,7 @@ class ARCDataset(Dataset):
         max_size: int = 30,
         augment: bool = True,
         color_permutation: bool = False,
+        curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
     ):
         """
         Initialize ARCDataset.
@@ -71,14 +72,21 @@ class ARCDataset(Dataset):
             max_size: Maximum grid size (grids are padded to this size)
             augment: Whether to apply dihedral augmentation (rotation, flip, transpose)
             color_permutation: Whether to apply random color permutation (9! possibilities)
+            curriculum_stage: Curriculum learning stage (0=all, 1=easy, 2=+medium, 3=+hard)
         """
         self.data_path = Path(data_path)
         self.max_size = max_size
         self.augment = augment
         self.color_permutation = color_permutation
+        self.curriculum_stage = curriculum_stage
         
         # Load tasks
         self.tasks = self._load_tasks()
+        
+        # Apply curriculum filtering if enabled
+        if curriculum_stage > 0:
+            self.tasks = self._filter_by_difficulty(curriculum_stage)
+        
         print(f"Loaded {len(self.tasks)} tasks from {data_path}")
     
     def _load_tasks(self) -> List[Dict]:
@@ -252,6 +260,48 @@ class ARCDataset(Dataset):
     ) -> Tuple:
         """Backward compatibility: alias for _augment_dihedral."""
         return self._augment_dihedral(train_inputs, train_outputs, test_input, test_output)
+
+    def _filter_by_difficulty(self, stage: int) -> List[Dict]:
+        """
+        Filter tasks by difficulty for curriculum learning.
+        
+        Difficulty heuristics based on grid size and number of training examples:
+        - Stage 1 (easy): small grids (≤10×10) AND 3+ training examples
+        - Stage 2 (+medium): medium grids (≤20×20) AND 2+ training examples
+        - Stage 3 (+hard): all remaining tasks
+        
+        Args:
+            stage: 1=easy only, 2=easy+medium, 3=all (same as 0)
+        
+        Returns:
+            Filtered list of tasks
+        """
+        def task_difficulty(task: Dict) -> int:
+            """Estimate task difficulty based on grid size and pairs."""
+            train_pairs = task.get('train', [])
+            if not train_pairs:
+                return 3  # Unknown = hard
+            
+            # Find max grid dimension across all train pairs
+            max_size = 0
+            for pair in train_pairs:
+                inp = np.array(pair['input'])
+                out = np.array(pair['output'])
+                max_size = max(max_size, inp.shape[0], inp.shape[1])
+                max_size = max(max_size, out.shape[0], out.shape[1])
+            
+            num_pairs = len(train_pairs)
+            
+            # Difficulty classification
+            if max_size <= 10 and num_pairs >= 3:
+                return 1  # Easy
+            elif max_size <= 20 and num_pairs >= 2:
+                return 2  # Medium
+            else:
+                return 3  # Hard
+        
+        # Filter tasks where difficulty <= stage
+        return [t for t in self.tasks if task_difficulty(t) <= stage]
 
 
 # ============================================================================

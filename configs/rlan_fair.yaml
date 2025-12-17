@@ -25,7 +25,7 @@ model:
   type: "rlan"
   hidden_dim: 256   # Main capacity driver (~7.8M total params)
   num_colors: 10
-  num_classes: 11   # 10 colors + background
+  num_classes: 10   # ARC colors 0-9 (0=black/background, 1-9=colors)
   max_grid_size: 30
   
   # Task-specific (NOT capacity-dependent) - fixed across configs
@@ -79,13 +79,18 @@ training:
   temperature_end: 0.1
   
   # Loss weights - focal loss dominates
+  # NOTE: lambda_sparsity was too high (0.005) causing DSC clues to collapse to 0
+  # Reduced to 0.001 to allow model to use spatial anchors
   focal_gamma: 2.0
   focal_alpha: 0.25
   lambda_entropy: 0.01
-  lambda_sparsity: 0.005
+  lambda_sparsity: 0.001   # REDUCED: was 0.005, caused DSC collapse
   lambda_predicate: 0.001
   lambda_curriculum: 0.01
   lambda_deep_supervision: 0.3
+  
+  # TRM numerical stability technique
+  use_stablemax: true
   
   # =============================================================
   # 3-STAGE CURRICULUM LEARNING (easy → medium → hard → all)
@@ -103,8 +108,10 @@ training:
     - 600   # Stage 3 (epochs 300-599): + hard tasks
             # Stage 4 (epochs 600+): all data mixed
   
-  # Optimizer & Scheduler
+  # Optimizer & Scheduler (TRM settings)
   optimizer: "adamw"
+  beta1: 0.9      # Adam momentum (standard)
+  beta2: 0.95     # TRM uses 0.95 instead of default 0.999 for stability
   scheduler: "onecycle"
   warmup_epochs: 20
   min_lr: 1.0e-6

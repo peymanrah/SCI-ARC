@@ -25,7 +25,7 @@ import time
 import random
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from functools import partial
 
 import numpy as np
@@ -91,6 +91,86 @@ def set_seed(seed: int, deterministic: bool = False):
         torch.backends.cudnn.benchmark = False
     else:
         torch.backends.cudnn.benchmark = True
+
+
+def get_curriculum_stage(epoch: int, curriculum_stages: List[int]) -> int:
+    """
+    Determine curriculum stage based on current epoch.
+    
+    Args:
+        epoch: Current training epoch (0-indexed)
+        curriculum_stages: List of epoch thresholds [stage1_end, stage2_end, stage3_end]
+            e.g., [100, 300, 600] means:
+            - epochs 0-99: stage 1 (easy only)
+            - epochs 100-299: stage 2 (easy + medium)
+            - epochs 300-599: stage 3 (easy + medium + hard)
+            - epochs 600+: stage 0 (all data, no filtering)
+    
+    Returns:
+        Curriculum stage (1=easy, 2=medium, 3=hard, 0=all)
+    """
+    if not curriculum_stages:
+        return 0  # No curriculum, use all data
+    
+    for stage_idx, threshold in enumerate(curriculum_stages):
+        if epoch < threshold:
+            return stage_idx + 1  # stages are 1-indexed
+    
+    return 0  # Beyond all thresholds, use all data
+
+
+def create_train_loader(
+    config: dict,
+    curriculum_stage: int = 0,
+    max_grid_size: int = 30,
+) -> DataLoader:
+    """
+    Create training dataloader with optional curriculum filtering.
+    
+    Args:
+        config: Full configuration dict
+        curriculum_stage: Curriculum stage (0=all, 1=easy, 2=medium, 3=hard)
+        max_grid_size: Maximum grid size for padding
+    
+    Returns:
+        DataLoader for training
+    """
+    data_cfg = config['data']
+    train_cfg = config['training']
+    
+    augment_cfg = data_cfg.get('augmentation', {})
+    augment_enabled = augment_cfg.get('enabled', True)
+    color_permutation = augment_cfg.get('color_permutation', False)
+    
+    train_dataset = ARCDataset(
+        data_cfg['train_path'],
+        max_size=max_grid_size,
+        augment=augment_enabled,
+        color_permutation=color_permutation,
+        curriculum_stage=curriculum_stage,  # Apply curriculum filtering!
+    )
+    
+    batch_size = train_cfg['batch_size']
+    num_workers = data_cfg.get('num_workers', 0)
+    pin_memory = data_cfg.get('pin_memory', True)
+    prefetch_factor = data_cfg.get('prefetch_factor', 2) if num_workers > 0 else None
+    persistent_workers = data_cfg.get('persistent_workers', False) and num_workers > 0
+    
+    collate_fn = partial(collate_sci_arc, max_grid_size=max_grid_size)
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        collate_fn=collate_fn,
+        drop_last=True,
+    )
+    
+    return train_loader
 
 
 def find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
@@ -211,6 +291,7 @@ def create_loss(config: dict) -> RLANLoss:
         lambda_curriculum=train_config['lambda_curriculum'],
         lambda_deep_supervision=train_config['lambda_deep_supervision'],
         max_clues=model_config['max_clues'],
+        use_stablemax=train_config.get('use_stablemax', True),  # TRM technique
     )
     
     return loss_fn
@@ -242,9 +323,14 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
         {'params': no_decay_params, 'weight_decay': 0.0},
     ]
     
+    # Get optimizer betas (TRM uses beta2=0.95 instead of default 0.999)
+    beta1 = train_config.get('beta1', 0.9)
+    beta2 = train_config.get('beta2', 0.95)  # TRM default, more stable for recursive models
+    
     optimizer = torch.optim.AdamW(
         param_groups,
         lr=train_config['learning_rate'],
+        betas=(beta1, beta2),
     )
     
     # Create scheduler based on config
@@ -454,8 +540,8 @@ def evaluate(
     # Additional metrics for debugging
     total_non_bg_correct = 0
     total_non_bg_pixels = 0
-    color_predictions = [0] * 11  # Count predictions per color
-    color_targets = [0] * 11
+    color_predictions = [0] * 10  # Count predictions per color (0-9)
+    color_targets = [0] * 10
     
     # Module-specific debugging metrics
     dsc_entropy_sum = 0.0
@@ -498,8 +584,8 @@ def evaluate(
                 total_non_bg_correct += non_bg_correct.sum().item()
                 total_non_bg_pixels += non_bg_mask.sum().item()
             
-            # Color distribution tracking
-            for c in range(11):
+            # Color distribution tracking (ARC colors 0-9)
+            for c in range(10):
                 color_predictions[c] += (predictions == c).sum().item()
                 color_targets[c] += (test_outputs == c).sum().item()
             
@@ -735,13 +821,33 @@ Config Overrides:
     print(f"Cache samples: {data_cfg.get('cache_samples', False)}")
     print(f"Augmentation: dihedral={augment_enabled}, color_perm={color_permutation}")
     
-    train_dataset = ARCDataset(
-        data_cfg['train_path'],
-        max_size=max_grid_size,
-        augment=augment_enabled,
-        color_permutation=color_permutation,
+    # ================================================================
+    # CURRICULUM LEARNING SETUP
+    # ================================================================
+    train_cfg = config['training']
+    use_curriculum = train_cfg.get('use_curriculum', False)
+    curriculum_stages = train_cfg.get('curriculum_stages', [100, 300, 600])
+    
+    if use_curriculum:
+        print(f"\nCurriculum learning ENABLED:")
+        print(f"  Stage 1 (easy): epochs 0-{curriculum_stages[0]-1}")
+        print(f"  Stage 2 (+medium): epochs {curriculum_stages[0]}-{curriculum_stages[1]-1}")
+        print(f"  Stage 3 (+hard): epochs {curriculum_stages[1]}-{curriculum_stages[2]-1}")
+        print(f"  Stage 4 (all): epochs {curriculum_stages[2]}+")
+        # Start at stage 1 (easy tasks only)
+        current_curriculum_stage = 1
+    else:
+        print("\nCurriculum learning DISABLED (using all data)")
+        current_curriculum_stage = 0  # 0 means all data
+    
+    # Create initial train loader (with curriculum stage if enabled)
+    train_loader = create_train_loader(
+        config, 
+        curriculum_stage=current_curriculum_stage,
+        max_grid_size=max_grid_size,
     )
     
+    # Eval dataset (no curriculum filtering - always full eval)
     eval_dataset = ARCDataset(
         data_cfg['eval_path'],
         max_size=max_grid_size,
@@ -749,13 +855,11 @@ Config Overrides:
         color_permutation=False,
     )
     
-    # Create data loaders with collate function
-    batch_size = config['training']['batch_size']
-    eval_batch_size = config['training'].get('eval_batch_size', batch_size)
+    # Create eval loader
+    batch_size = train_cfg['batch_size']
+    eval_batch_size = train_cfg.get('eval_batch_size', batch_size)
     num_workers = data_cfg.get('num_workers', 0)
     pin_memory = data_cfg.get('pin_memory', True)
-    prefetch_factor = data_cfg.get('prefetch_factor', 2) if num_workers > 0 else None
-    persistent_workers = data_cfg.get('persistent_workers', False) and num_workers > 0
     
     collate_fn = partial(collate_sci_arc, max_grid_size=max_grid_size)
     
@@ -764,18 +868,6 @@ Config Overrides:
     color_perms = 362880 if color_permutation else 1  # 9! or 1
     total_augmentations = dihedral_transforms * color_perms
     print(f"Augmentation diversity: {dihedral_transforms} dihedral × {color_perms} color = {total_augmentations:,} per task")
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        prefetch_factor=prefetch_factor,
-        persistent_workers=persistent_workers,
-        collate_fn=collate_fn,
-        drop_last=True,  # Drop incomplete batches for consistent training
-    )
     
     eval_loader = DataLoader(
         eval_dataset,
@@ -786,7 +878,7 @@ Config Overrides:
         collate_fn=collate_fn,
     )
     
-    print(f"Train samples: {len(train_dataset)}, batches: {len(train_loader)}")
+    print(f"Train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
     print(f"Eval samples: {len(eval_dataset)}, batches: {len(eval_loader)}")
     
     # Create optimizer and scheduler (needs loader length for OneCycle)
@@ -852,6 +944,25 @@ Config Overrides:
         print(f"\nEpoch {epoch + 1}/{max_epochs}")
         print("-" * 40)
         
+        # ================================================================
+        # CURRICULUM STAGE CHECK - Recreate dataloader if stage changes
+        # ================================================================
+        if use_curriculum:
+            new_stage = get_curriculum_stage(epoch, curriculum_stages)
+            if new_stage != current_curriculum_stage:
+                stage_names = {0: "ALL DATA", 1: "EASY", 2: "EASY+MEDIUM", 3: "EASY+MEDIUM+HARD"}
+                print(f"\n" + "=" * 60)
+                print(f"  CURRICULUM STAGE TRANSITION: {stage_names.get(current_curriculum_stage, '?')} -> {stage_names.get(new_stage, '?')}")
+                print(f"=" * 60)
+                
+                current_curriculum_stage = new_stage
+                train_loader = create_train_loader(
+                    config,
+                    curriculum_stage=current_curriculum_stage,
+                    max_grid_size=max_grid_size,
+                )
+                print(f"  New train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
+        
         # Train
         train_losses, global_step = train_epoch(
             model, train_loader, loss_fn, optimizer, device,
@@ -863,6 +974,12 @@ Config Overrides:
         
         epoch_time = time.time() - epoch_start
         
+        # Log curriculum stage if enabled
+        stage_str = ""
+        if use_curriculum:
+            stage_names = {0: "all", 1: "easy", 2: "+medium", 3: "+hard"}
+            stage_str = f", Curriculum: {stage_names.get(current_curriculum_stage, '?')}"
+        
         print(f"Epoch {epoch + 1} Summary:")
         print(f"  Train Loss: {train_losses['total_loss']:.4f}")
         print(f"  Focal Loss: {train_losses['focal_loss']:.4f}")
@@ -870,7 +987,7 @@ Config Overrides:
         print(f"  Sparsity Loss: {train_losses.get('sparsity_loss', 0):.4f}")
         print(f"  Predicate Loss: {train_losses.get('predicate_loss', 0):.4f}")
         print(f"  Curriculum Loss: {train_losses.get('curriculum_loss', 0):.4f}")
-        print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}")
+        print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:

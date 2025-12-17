@@ -12,7 +12,7 @@ model:
   type: "rlan"
   hidden_dim: 128
   num_colors: 10
-  num_classes: 11  # 10 colors + background
+  num_classes: 10   # ARC colors 0-9 (0=black/background, 1-9=colors)
   max_grid_size: 30
   
   # Task-specific (NOT capacity-dependent)
@@ -58,13 +58,17 @@ training:
   temperature_end: 0.1
   
   # Loss weights
+  # NOTE: lambda_sparsity reduced to prevent DSC collapse
   focal_gamma: 2.0
   focal_alpha: 0.25
-  lambda_entropy: 0.1
-  lambda_sparsity: 0.05
-  lambda_predicate: 0.01
-  lambda_curriculum: 0.1
-  lambda_deep_supervision: 0.5
+  lambda_entropy: 0.01     # REDUCED from 0.1 to match fair config
+  lambda_sparsity: 0.001   # REDUCED from 0.05 to prevent DSC collapse
+  lambda_predicate: 0.001  # REDUCED from 0.01 to match fair config
+  lambda_curriculum: 0.01  # REDUCED from 0.1 to match fair config
+  lambda_deep_supervision: 0.3  # REDUCED from 0.5 to match fair config
+  
+  # TRM numerical stability technique
+  use_stablemax: true
   
   # =============================================================
   # 3-STAGE CURRICULUM LEARNING (easy → medium → hard → all)
@@ -82,8 +86,10 @@ training:
     - 300   # Stage 3 (epochs 150-299): + hard tasks
             # Stage 4 (epochs 300+): all data mixed
   
-  # Optimizer and scheduler
+  # Optimizer and scheduler (TRM settings)
   optimizer: "adamw"
+  beta1: 0.9      # Adam momentum (standard)
+  beta2: 0.95     # TRM uses 0.95 instead of default 0.999 for stability
   scheduler: "onecycle"  # onecycle > cosine for ARC
   warmup_epochs: 10
   min_lr: 1.0e-6

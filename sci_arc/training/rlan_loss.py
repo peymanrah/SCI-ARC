@@ -535,7 +535,7 @@ class RLANLoss(nn.Module):
     Combined loss for RLAN training.
     
     Combines all loss components with configurable weights:
-    - Focal Loss: Primary task loss
+    - Focal Loss: Primary task loss (with optional stablemax from TRM)
     - Entropy Regularization: Sharp attention
     - Sparsity Regularization: Efficient clue usage
     - Predicate Diversity: Decorrelated predicates
@@ -552,6 +552,7 @@ class RLANLoss(nn.Module):
         lambda_curriculum: float = 0.1,
         lambda_deep_supervision: float = 0.5,
         max_clues: int = 5,
+        use_stablemax: bool = True,  # TRM uses stablemax for numerical stability
     ):
         """
         Args:
@@ -563,10 +564,16 @@ class RLANLoss(nn.Module):
             lambda_curriculum: Weight for curriculum penalty
             lambda_deep_supervision: Weight for intermediate step losses
             max_clues: Maximum number of clues
+            use_stablemax: If True, use FocalStablemaxLoss (TRM technique)
         """
         super().__init__()
         
-        self.focal_loss = FocalLoss(gamma=focal_gamma, alpha=focal_alpha)
+        # Use stablemax for better numerical stability (TRM technique)
+        if use_stablemax:
+            self.focal_loss = FocalStablemaxLoss(gamma=focal_gamma, alpha=focal_alpha)
+        else:
+            self.focal_loss = FocalLoss(gamma=focal_gamma, alpha=focal_alpha)
+        
         self.entropy_reg = EntropyRegularization()
         self.sparsity_reg = SparsityRegularization()
         self.predicate_diversity = PredicateDiversityLoss()
