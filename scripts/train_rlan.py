@@ -1554,6 +1554,9 @@ Config Overrides:
         active_aux.append('entropy')
     if train_cfg.get('lambda_sparsity', 0) > 0:
         print(f"  lambda_sparsity={train_cfg['lambda_sparsity']} (clue efficiency)")
+        print(f"    min_clues={train_cfg.get('min_clues', 2.5)} (min clues before penalty)")
+        print(f"    min_clue_weight={train_cfg.get('min_clue_weight', 5.0)} (penalty strength)")
+        print(f"    ponder_weight={train_cfg.get('ponder_weight', 0.02)} (cost per clue)")
         active_aux.append('sparsity')
     if train_cfg.get('lambda_predicate', 0) > 0:
         print(f"  lambda_predicate={train_cfg['lambda_predicate']} (predicate diversity)")
