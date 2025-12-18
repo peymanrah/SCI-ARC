@@ -127,7 +127,7 @@ def create_train_loader(
     max_grid_size: int = 30,
 ) -> DataLoader:
     """
-    Create training dataloader with optional curriculum filtering.
+    Create training dataloader with optional curriculum filtering and caching.
     
     Args:
         config: Full configuration dict
@@ -136,6 +136,15 @@ def create_train_loader(
     
     Returns:
         DataLoader for training
+        
+    CACHING BEHAVIOR:
+        When cache_samples=True (from config), the dataset pre-generates
+        a fixed set of augmented samples. This allows the model to see the
+        SAME samples every epoch, which is CRITICAL for learning hard tasks
+        that need >100 epochs of training on the same data.
+        
+        After training with cached samples, you can resume training with
+        cache_samples=False to expose the model to infinite diversity.
     """
     data_cfg = config['data']
     train_cfg = config['training']
@@ -152,6 +161,24 @@ def create_train_loader(
     # CRITICAL: Ignore padding in loss to prevent BG mode collapse
     ignore_padding_in_loss = data_cfg.get('ignore_padding_in_loss', True)  # Default True!
     
+    # CACHING CONFIGURATION
+    # When cache_samples=True, pre-generate fixed samples for memorization training
+    cache_samples = data_cfg.get('cache_samples', False)
+    num_cached_samples = data_cfg.get('num_cached_samples', 32000)
+    cache_path = data_cfg.get('cache_path', None)
+    
+    if cache_samples:
+        print(f"\n{'='*60}")
+        print("CACHED SAMPLES MODE ENABLED")
+        print(f"{'='*60}")
+        print(f"  Samples will be pre-generated and reused each epoch")
+        print(f"  This allows model to learn from repeated exposure")
+        print(f"  (Required for hard tasks needing >100 epochs)")
+        print(f"  num_cached_samples: {num_cached_samples}")
+        if cache_path:
+            print(f"  cache_path: {cache_path}")
+        print(f"{'='*60}\n")
+    
     train_dataset = ARCDataset(
         data_cfg['train_path'],
         max_size=max_grid_size,
@@ -162,6 +189,9 @@ def create_train_loader(
         curriculum_stage=curriculum_stage,  # Apply curriculum filtering!
         track_augmentation=track_augmentation,  # Enable for diversity logging
         ignore_padding_in_loss=ignore_padding_in_loss,  # Ignore padding in loss
+        cache_samples=cache_samples,  # Enable caching for memorization
+        num_cached_samples=num_cached_samples,  # Number of cached samples
+        cache_path=cache_path,  # Optional path to save/load cache
     )
     
     batch_size = train_cfg['batch_size']
@@ -494,6 +524,9 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
             div_factor=25.0,  # initial_lr = max_lr / 25
             final_div_factor=1000.0,  # final_lr = max_lr / 1000
         )
+    elif scheduler_type == 'none' or scheduler_type is None:
+        # No scheduler - constant learning rate (most stable)
+        scheduler = None
     else:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
@@ -1276,6 +1309,10 @@ def evaluate(
         'fg_accuracy': fg_accuracy,
         'bg_accuracy': bg_accuracy,
         
+        # EXACT MATCH counts for clear progress tracking
+        'correct_tasks': correct_tasks,
+        'total_tasks': total_tasks,
+        
         # Class distribution ratios (over valid pixels)
         'bg_ratio_pred': bg_ratio_pred,
         'bg_ratio_target': bg_ratio_target,
@@ -1315,7 +1352,7 @@ def save_checkpoint(
         'global_step': global_step,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
         'losses': losses,
         'best_accuracy': best_accuracy,
         'config': config,
@@ -1329,17 +1366,56 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler,
     path: str,
+    reset_optimizer: bool = False,
+    reset_scheduler: bool = False,
 ) -> tuple:
-    """Load training checkpoint. Returns (start_epoch, global_step, best_accuracy)."""
+    """
+    Load training checkpoint.
+    
+    Args:
+        model: Model to load weights into
+        optimizer: Optimizer to load state into
+        scheduler: Scheduler to load state into
+        path: Path to checkpoint file
+        reset_optimizer: If True, don't load optimizer state (fresh start)
+                        Use this when fine-tuning with different LR
+        reset_scheduler: If True, don't load scheduler state
+                        Use this when changing scheduler type
+    
+    Returns:
+        (start_epoch, global_step, best_accuracy)
+        If reset_optimizer=True, returns (0, 0, best_accuracy) to start fresh
+    """
     checkpoint = torch.load(path, map_location='cpu')
     
+    # Always load model weights
     model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     
     epoch = checkpoint['epoch']
     global_step = checkpoint.get('global_step', 0)
     best_accuracy = checkpoint.get('best_accuracy', 0.0)
+    
+    if reset_optimizer:
+        print(f"Loaded model weights from {path} (epoch {epoch})")
+        print(f"  Optimizer state RESET (fresh optimizer for fine-tuning)")
+        if reset_scheduler:
+            print(f"  Scheduler state RESET")
+        return 0, 0, best_accuracy  # Start from epoch 0
+    
+    # Load optimizer state
+    try:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    except Exception as e:
+        print(f"Warning: Could not load optimizer state: {e}")
+        print(f"  Continuing with fresh optimizer")
+    
+    # Load scheduler state
+    if not reset_scheduler and scheduler is not None and checkpoint.get('scheduler_state_dict') is not None:
+        try:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        except Exception as e:
+            print(f"Warning: Could not load scheduler state: {e}")
+            print(f"  Continuing with fresh scheduler")
     
     print(f"Loaded checkpoint from {path} (epoch {epoch})")
     
@@ -1382,6 +1458,8 @@ Config Overrides:
                         help='Path to checkpoint to resume from (use "auto" for latest)')
     parser.add_argument('--no-resume', action='store_true',
                         help='Start fresh even if checkpoints exist')
+    parser.add_argument('--reset-optimizer', action='store_true',
+                        help='Reset optimizer/scheduler when resuming (use for fine-tuning with new LR)')
     parser.add_argument('--device', type=str, default=None,
                         help='Device to use (cuda/cpu)')
     parser.add_argument('overrides', nargs='*',
@@ -1705,9 +1783,12 @@ Config Overrides:
     best_task_accuracy = 0.0
     
     if resume_path:
+        reset_optimizer = getattr(args, 'reset_optimizer', False)
         start_epoch, global_step, best_task_accuracy = load_checkpoint(
-            model, optimizer, scheduler, resume_path
+            model, optimizer, scheduler, resume_path, reset_optimizer=reset_optimizer
         )
+        if reset_optimizer:
+            print(f"Optimizer/scheduler reset for fine-tuning (starting fresh from checkpoint weights)")
     
     # Initialize EMA for stable evaluation
     use_ema = config.get('training', {}).get('use_ema', True)
@@ -1776,8 +1857,9 @@ Config Overrides:
             epoch, config, scaler, global_step, ema
         )
         
-        # Update scheduler
-        scheduler.step()
+        # Update scheduler (if using one)
+        if scheduler is not None:
+            scheduler.step()
         
         epoch_time = time.time() - epoch_start
         
@@ -2313,9 +2395,11 @@ Config Overrides:
             
             # Core metrics (all computed over VALID pixels only, excluding padding)
             # 10-class encoding: class 0=black (BG), classes 1-9=colors (FG)
+            correct_tasks = eval_metrics.get('correct_tasks', 0)
+            total_tasks = eval_metrics.get('total_tasks', 1)
             print(f"  --- Evaluation Metrics (Valid Pixels Only) ---")
+            print(f"  ★ EXACT MATCH: {correct_tasks}/{total_tasks} tasks ({eval_metrics['task_accuracy']*100:.1f}%)")
             print(f"  Pixel Accuracy: {eval_metrics['pixel_accuracy']:.4f}")
-            print(f"  Task Accuracy: {eval_metrics['task_accuracy']:.4f}")
             print(f"  FG Accuracy (colors 1-9): {eval_metrics['fg_accuracy']:.4f}")
             print(f"  BG Accuracy (black): {eval_metrics['bg_accuracy']:.4f}")
             
@@ -2438,12 +2522,14 @@ Config Overrides:
             # Save best model
             if eval_metrics['task_accuracy'] > best_task_accuracy:
                 best_task_accuracy = eval_metrics['task_accuracy']
+                best_correct = eval_metrics.get('correct_tasks', 0)
+                best_total = eval_metrics.get('total_tasks', 1)
                 best_path = checkpoint_dir / "best.pt"
                 save_checkpoint(
                     model, optimizer, scheduler, epoch, global_step,
                     train_losses, best_task_accuracy, config, str(best_path)
                 )
-                print(f"  New best task accuracy: {best_task_accuracy:.4f}")
+                print(f"  ★★★ NEW BEST: {best_correct}/{best_total} exact matches ({best_task_accuracy*100:.1f}%) ★★★")
         
         # Save periodic checkpoint
         if (epoch + 1) % save_every == 0:

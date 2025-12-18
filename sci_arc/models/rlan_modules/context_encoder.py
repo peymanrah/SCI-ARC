@@ -28,6 +28,11 @@ class PairEncoder(nn.Module):
     Encode a single input-output pair to capture the transformation.
     
     Uses difference-based encoding: what changed from input to output?
+    
+    IMPORTANT: Uses same embedding structure as GridEncoder to ensure
+    consistent color representation across the model:
+    - color_embed: hidden_dim // 2 (same as GridEncoder)
+    - pos_embed: hidden_dim // 2, combined to hidden_dim
     """
     
     def __init__(
@@ -41,11 +46,19 @@ class PairEncoder(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_colors = num_colors
         
-        # Color embedding
-        self.color_embed = nn.Embedding(num_colors + 1, hidden_dim)  # +1 for padding
+        # Color embedding - MATCH GridEncoder: hidden_dim // 2
+        # This ensures consistent color representation across model
+        self.color_embed = nn.Embedding(num_colors + 1, hidden_dim // 2)  # +1 for padding
         
-        # Positional encoding
-        self.pos_embed = nn.Parameter(torch.randn(1, max_size, max_size, hidden_dim) * 0.02)
+        # Positional encoding - MATCH GridEncoder: hidden_dim // 2
+        # Combined with color to get full hidden_dim
+        self.pos_embed = nn.Parameter(torch.randn(1, max_size, max_size, hidden_dim // 2) * 0.02)
+        
+        # Project combined color+pos to hidden_dim (matching GridEncoder's proj layer)
+        self.embed_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+        )
         
         # Encode input
         self.input_encoder = nn.Sequential(
@@ -99,13 +112,20 @@ class PairEncoder(nn.Module):
         """
         B, H, W = input_grid.shape
         
-        # Embed colors: (B, H, W, D)
-        input_embed = self.color_embed(input_grid.clamp(0, self.num_colors))
-        output_embed = self.color_embed(output_grid.clamp(0, self.num_colors))
+        # Embed colors: (B, H, W, D//2) - matching GridEncoder
+        input_color = self.color_embed(input_grid.clamp(0, self.num_colors))
+        output_color = self.color_embed(output_grid.clamp(0, self.num_colors))
         
-        # Add positional encoding
-        input_embed = input_embed + self.pos_embed[:, :H, :W, :]
-        output_embed = output_embed + self.pos_embed[:, :H, :W, :]
+        # Get positional encoding: (B, H, W, D//2)
+        pos = self.pos_embed[:, :H, :W, :].expand(B, -1, -1, -1)
+        
+        # Combine color + position: (B, H, W, D) - same as GridEncoder
+        input_embed = torch.cat([input_color, pos], dim=-1)
+        output_embed = torch.cat([output_color, pos], dim=-1)
+        
+        # Project combined embeddings (matching GridEncoder's proj+norm)
+        input_embed = self.embed_proj(input_embed)
+        output_embed = self.embed_proj(output_embed)
         
         # Convert to channel-first: (B, D, H, W)
         input_embed = input_embed.permute(0, 3, 1, 2)

@@ -1,0 +1,192 @@
+# RLAN STABLE Configuration
+# ==========================
+# Production-ready configuration validated by ablation testing
+# 
+# HARDWARE TARGET: RTX 3090 (24GB VRAM), 24 CPU cores, 128GB RAM
+#
+# USE THIS CONFIG WHEN:
+# - Training new models from scratch
+# - Production training runs
+# - Establishing baseline performance
+#
+# ABLATION VALIDATION (Dec 2025):
+# - Achieves 100% exact match on simple ARC tasks in 2-5 epochs
+# - Grid expansion tasks (3x3→9x9) reach 100% in ~130 epochs
+# - Clue regularization validated: faster convergence, stable training
+# - No NaN issues with proper padding (ignore_index=-100)
+#
+# SAMPLE COUNT (TRM comparison):
+# - TRM: 1000x pre-generated augmentation = 800,000 samples
+# - RLAN Phase 1: 400,000 cached (500 per task)
+# - RLAN Phase 2: INFINITE on-the-fly augmentation
+#
+# KEY PRINCIPLES:
+# 1. No scheduler - constant learning rate (most stable)
+# 2. Clue regularization ENABLED (prevents clue collapse)
+# 3. Core modules: ContextEncoder, DSC, MSRE
+# 4. Light auxiliary losses (entropy, sparsity, predicate)
+# 5. max_grid_size=30 (official ARC-AGI maximum)
+#
+# TRAINING WORKFLOW:
+# Phase 1: Train with cache_samples=true until convergence (memorization)
+# Phase 2: Resume with cache_samples=false for diversity (generalization)
+#
+# ==========================
+
+model:
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10  # colors 0-9
+  max_grid_size: 30
+  
+  max_clues: 6
+  num_predicates: 32  # More predicates for diversity
+  num_solver_steps: 6
+  
+  use_act: false       # DISABLED
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4     # Not used
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8      # Not used
+  
+  # CORE MODULES ONLY (ablation validated)
+  use_context_encoder: true   # REQUIRED - learns task from demos
+  use_dsc: true               # REQUIRED - dynamic spatial cluing
+  use_msre: true              # REQUIRED - multi-scale relative encoding
+  use_lcr: false              # DISABLED - not needed for learning
+  use_sph: false              # DISABLED - not needed for learning
+  use_learned_pos: false      # DISABLED - sinusoidal works better
+
+training:
+  max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
+  
+  batch_size: 32   # RTX 3090 24GB VRAM can handle this with bfloat16
+  grad_accumulation_steps: 1  # No accumulation needed with batch 32
+  
+  learning_rate: 5.0e-4  # Works well in ablation
+  weight_decay: 0.01     # Light regularization
+  gradient_clip: 1.0     # Conservative
+  
+  # NO per-module LR boosting (ablation showed it can cause NaN)
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  
+  # Temperature for DSC attention
+  temperature_start: 1.0
+  temperature_end: 0.5    # Don't go below 0.5
+  
+  # LOSS (validated by ablation)
+  loss_mode: 'weighted_stablemax'
+  bg_weight_cap: 2.0
+  fg_weight_cap: 5.0
+  
+  # Focal params (not used with weighted_stablemax)
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  
+  # AUXILIARY LOSSES (minimized for stability)
+  lambda_entropy: 0.01          # Light attention sharpness
+  lambda_sparsity: 0.5          # Required for clue regularization
+  lambda_predicate: 0.01        # Light predicate diversity
+  lambda_curriculum: 0.0        # OFF
+  lambda_deep_supervision: 0.0  # OFF - not needed with weighted_stablemax
+  lambda_act: 0.0               # OFF
+  
+  # Clue regularization (ENABLED - validated stable Dec 2025)
+  # Helps model learn appropriate clue count per task
+  min_clues: 2.5
+  min_clue_weight: 5.0       # Prevents collapse to 0 clues
+  ponder_weight: 0.02        # Small cost per clue (encourages efficiency)
+  entropy_ponder_weight: 0.02  # Encourages sharp attention
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  # NO SCHEDULER - constant LR (most stable)
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 5.0e-4  # Same as learning_rate
+  
+  use_ema: true
+  ema_decay: 0.999
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  
+  # CRITICAL: Ignore padding in loss
+  ignore_padding_in_loss: true
+  
+  num_workers: 8       # 8 workers is optimal (too many = CPU overhead)
+  pin_memory: true
+  prefetch_factor: 4   # Increased for faster data loading
+  persistent_workers: true
+  
+  # ==========================================================================
+  # TWO-PHASE TRAINING STRATEGY
+  # ==========================================================================
+  # Phase 1 (cache_samples=true):  Memorization with cached data
+  # Phase 2 (cache_samples=false): Generalization with infinite augmentation
+  #
+  # TRM uses 1000x pre-generated augmentation = 800,000 samples
+  # We use on-the-fly augmentation = INFINITE unique samples
+  #
+  # For Phase 1: Use cache to stabilize learning (model sees same data)
+  # For Phase 2: Set cache_samples=false and resume training
+  # ==========================================================================
+  
+  cache_samples: true
+  num_cached_samples: 400000  # 500 per task (closer to TRM's 1000x)
+  cache_path: "./cache/rlan_stable_400k.pkl"  # Save/load for persistence
+  
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    color_permutation_prob: 0.3
+    translational: true
+
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+
+logging:
+  log_every: 1
+  save_every: 10
+  eval_every: 5
+  keep_last_n: 3
+  checkpoint_dir: "checkpoints/rlan_stable"
+  log_to_file: true
+  track_augmentation: false  # Reduce logging
+  
+  use_wandb: false
+  wandb_project: "rlan-arc"
+  wandb_run_name: null
+
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false
+
+device:
+  use_cuda: true
+  mixed_precision: true
+  dtype: "bfloat16"
+  compile: false
