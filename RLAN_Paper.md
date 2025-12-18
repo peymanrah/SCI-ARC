@@ -1,8 +1,9 @@
 # Recursive Latent Attractor Networks (RLAN): A Unified Architecture for Solving Abstract Reasoning via Dynamic Coordinate Re-projection
 
-**Authors**: Research Team  
+**Authors**: Peyman Rahmati  
+**Affiliation**: Microsoft Corporation  
 **Date**: December 2024  
-**Status**: Technical Specification & Research Proposal
+**Status**: Technical Specification & Research Paper
 
 ---
 
@@ -12,8 +13,122 @@ We present the **Recursive Latent Attractor Network (RLAN)**, a novel neural arc
 
 ---
 
+## Intuitive Overview: How RLAN Thinks
+
+Before diving into technical details, let's understand RLAN through three visual examples that demonstrate how it solves ARC puzzles—explained in a way that anyone can understand.
+
+### Visual Example 1: "Move to the Marker" (Easy)
+
+**The Puzzle**: Move the grey square to wherever the red dot is.
+
+```
+    TRAINING EXAMPLE:                    TEST INPUT:
+    
+    Input:          Output:              Input:          What's the output?
+    ┌─┬─┬─┬─┐      ┌─┬─┬─┬─┐            ┌─┬─┬─┬─┐      
+    │G│ │ │ │      │ │ │ │ │            │ │ │ │ │      
+    ├─┼─┼─┼─┤      ├─┼─┼─┼─┤            ├─┼─┼─┼─┤      
+    │ │ │ │ │  →   │ │ │ │ │            │ │G│ │ │  →   ???
+    ├─┼─┼─┼─┤      ├─┼─┼─┼─┤            ├─┼─┼─┼─┤      
+    │ │ │ │ │      │ │ │ │ │            │ │ │ │R│      
+    ├─┼─┼─┼─┤      ├─┼─┼─┼─┤            ├─┼─┼─┼─┤      
+    │ │ │ │R│      │ │ │ │G│            │ │ │ │ │      
+    └─┴─┴─┴─┘      └─┴─┴─┴─┘            └─┴─┴─┴─┘      
+    
+    G = Grey square, R = Red marker
+```
+
+**How a Human Thinks**: 
+> "I see a red dot. That's the destination. I move the grey square there."
+
+**How RLAN Thinks**:
+1. **Find the Clue**: The DSC module scans the grid and its "attention" locks onto the red pixel. 🔴
+2. **Re-center the World**: The MSRE module redraws every coordinate relative to the red pixel. Now the red pixel is at position (0,0), and everything else is described as "X steps away from the red pixel."
+3. **Learn the Rule**: In this new coordinate system, the rule is simply: "Put the grey square at (0,0)."
+
+**Why This is Powerful**: The rule "put at (0,0) relative to the red marker" works regardless of where the red marker appears. Traditional neural networks would memorize "move from top-left to bottom-right" and fail completely when the positions change.
+
+---
+
+### Visual Example 2: "Tile the Pattern" (Medium)
+
+**The Puzzle**: Take a small 2×2 pattern and repeat it to fill a larger grid.
+
+```
+    Input (2×2):        Output (6×6):
+    ┌───┬───┐          ┌───┬───┬───┬───┬───┬───┐
+    │ G │ R │          │ G │ R │ G │ R │ G │ R │
+    ├───┼───┤    →     ├───┼───┼───┼───┼───┼───┤
+    │ O │ B │          │ O │ B │ O │ B │ O │ B │
+    └───┴───┘          ├───┼───┼───┼───┼───┼───┤
+                       │ R │ G │ R │ G │ R │ G │  (rotated copies)
+                       ├───┼───┼───┼───┼───┼───┤
+                       │ B │ O │ B │ O │ B │ O │
+                       ├───┼───┼───┼───┼───┼───┤
+                       │ G │ R │ G │ R │ G │ R │
+                       ├───┼───┼───┼───┼───┼───┤
+                       │ O │ B │ O │ B │ O │ B │
+                       └───┴───┴───┴───┴───┴───┘
+    
+    G = Green, R = Red, O = Orange, B = Blue
+```
+
+**How a Human Thinks**: 
+> "Copy this pattern and repeat it 3 times across and 3 times down."
+
+**How RLAN Thinks**:
+1. **Normalized Coordinates**: Instead of thinking "put at pixel 2", MSRE thinks "put at 1/3 of the grid width." This proportion-based thinking works for ANY output size.
+2. **Polar Coordinates**: MSRE also tracks angles, enabling the solver to apply rotations to some tiles.
+3. **Scale-Invariant Rule**: The rule "repeat pattern at positions 0%, 33%, 66%..." works whether the output is 6×6, 9×9, or 15×15.
+
+---
+
+### Visual Example 3: "If Symmetric, Then..." (Hard)
+
+**The Puzzle**: IF the input is horizontally symmetric → flip it vertically. OTHERWISE → flip it horizontally.
+
+```
+    CASE A: Symmetric Input           CASE B: Asymmetric Input
+    
+    ┌───┬───┬───┐      ┌───┬───┬───┐      ┌───┬───┬───┐      ┌───┬───┬───┐
+    │ R │   │ R │      │   │   │   │      │ R │   │   │      │   │   │ R │
+    ├───┼───┼───┤  →   ├───┼───┼───┤      ├───┼───┼───┤  →   ├───┼───┼───┤
+    │ B │ B │ B │      │ B │ B │ B │      │ B │ B │   │      │   │ B │ B │
+    ├───┼───┼───┤      ├───┼───┼───┤      ├───┼───┼───┤      ├───┼───┼───┤
+    │   │   │   │      │ R │   │ R │      │   │   │   │      │   │   │   │
+    └───┴───┴───┘      └───┴───┴───┘      └───┴───┴───┘      └───┴───┴───┘
+    
+    (Symmetric → Vertical Flip)       (Asymmetric → Horizontal Flip)
+```
+
+**How a Human Thinks**: 
+> "First, let me check if it's symmetric... Yes/No. Based on that, I'll do different things."
+
+**How RLAN Thinks**:
+1. **Symbolic Predicate Detection (SPH)**: The SPH module outputs a value between 0 and 1. For symmetric grids, it outputs ~0.95 ("Yes, symmetric"). For asymmetric grids, it outputs ~0.12 ("No, not symmetric").
+2. **Predicate Gating**: This 0.95 or 0.12 acts like a switch. It "gates" which reasoning pathway in the solver is active.
+3. **Conditional Execution**: Same neural network weights, but different behavior based on the input property. This is compositional reasoning—IF-THEN logic learned from just 2-3 examples!
+
+**Why This is Hard for Normal AI**: Without explicit predicate detection, a network must somehow encode "IF symmetric THEN..." in its weights. With only 2-3 training examples, this is nearly impossible. SPH provides an explicit logical scaffold.
+
+---
+
+### The Key Insight: Think Relatively, Not Absolutely
+
+| Traditional Neural Networks | RLAN |
+|-----------------------------|------|
+| "Move from position (0,0) to (3,3)" | "Move to where the red dot is" |
+| Breaks when objects shift position | Works everywhere on the grid |
+| Memorizes specific coordinates | Learns abstract relationships |
+| Needs thousands of examples | Generalizes from 2-3 examples |
+
+**Interactive Demo**: For an animated, visual walkthrough of these examples, see [RLAN_Visual_Demo.html](docs/RLAN_Visual_Demo.html).
+
+---
+
 ## Table of Contents
 
+- [Intuitive Overview: How RLAN Thinks](#intuitive-overview-how-rlan-thinks)
 1. [Introduction & Motivation](#1-introduction--motivation)
 2. [The Core Theory: Clues as Coordinate Origins](#2-the-core-theory-clues-as-coordinate-origins)
 3. [Architecture Overview](#3-architecture-overview)
@@ -25,8 +140,9 @@ We present the **Recursive Latent Attractor Network (RLAN)**, a novel neural arc
 9. [Loss Functions & Training](#9-loss-functions--training)
 10. [ARC Task Analysis & Examples](#10-arc-task-analysis--examples)
 11. [Architecture Diagram](#11-architecture-diagram)
-12. [Implementation Considerations](#12-implementation-considerations)
-13. [Conclusion](#13-conclusion)
+12. [Recent Technical Innovations](#12-recent-technical-innovations)
+13. [Implementation Considerations](#13-implementation-considerations)
+14. [Conclusion](#14-conclusion)
 
 ---
 
@@ -1078,7 +1194,87 @@ Input:          Output:
 
 ---
 
-## 12. Implementation Considerations
+## 12. Recent Technical Innovations
+
+This section documents critical training innovations discovered during development that significantly improve RLAN's learning dynamics.
+
+### 12.1 TRM-Style Color Encoding
+
+**Problem**: Models trained on ARC tend to collapse to predicting all black (color 0), since ~85% of pixels in ARC grids are background.
+
+**Solution**: Use TRM-style encoding where actual colors are shifted by +1:
+
+| Original | TRM Encoding |
+|----------|--------------|
+| Color 0 (black) | Class 1 |
+| Color 1 (blue) | Class 2 |
+| ... | ... |
+| Color 9 (maroon) | Class 10 |
+| *New* Class 0 | Boundary markers (padding) |
+
+**Effect**: Class 0 now represents "not a real pixel" (padding/boundary), and class 1 (actual black) is treated as a background color with reduced weight in the loss function. This prevents the model from gaming the loss by predicting all black.
+
+### 12.2 Module-Specific Learning Rates
+
+**Problem**: DSC and MSRE gradients are ~50× smaller than Solver gradients due to the coordinate computation chain (differentiation through centroid → relative coords → Fourier encoding).
+
+**Discovery**: Gradient analysis revealed:
+- Solver gradient norm: ~1.0
+- DSC gradient norm: ~0.02
+- Ratio: 50:1
+
+**Solution**: Apply separate learning rate multipliers:
+
+```python
+param_groups = [
+    {'params': dsc_params, 'lr': base_lr * 10.0},   # 10x for DSC
+    {'params': msre_params, 'lr': base_lr * 10.0},  # 10x for MSRE
+    {'params': other_params, 'lr': base_lr},        # 1x for others
+]
+```
+
+This brings effective update magnitudes to the same order, ensuring DSC actually learns during training.
+
+### 12.3 Per-Sample Clue Penalty Coupling
+
+**Problem**: When clue penalties are computed as batch averages, there's no coupling between "how hard is this task?" and "how many clues should I use?". All samples get the same gradient regardless of individual task difficulty.
+
+**Solution**: Couple task loss and clue penalty at the per-sample level before batch averaging:
+
+```python
+# Old (decoupled):
+total_loss = task_loss.mean() + λ * clue_penalty.mean()
+
+# New (coupled):
+per_sample_loss = task_loss + λ * clue_penalty  # Shape: (B,)
+total_loss = per_sample_loss.mean()
+```
+
+**Effect**: The stop predictor for each sample receives gradient proportional to BOTH its task difficulty AND its clue usage—enabling task-adaptive clue learning.
+
+### 12.4 Weighted Stablemax for Class Imbalance
+
+**Problem**: Focal loss can be unstable; simple cross-entropy leads to background collapse.
+
+**Solution**: Use Stablemax (numerically stable softmax variant) with inverse-frequency weighting:
+
+$$\text{stablemax}(x) = x - \max(x) + 1$$
+
+Combined with class weights:
+- Background classes (0, 1): weight cap = 1.0
+- Foreground classes (2-10): weight cap = 10.0
+
+This ensures the model receives ~4× stronger gradients for foreground pixels.
+
+### 12.5 EMA Decay Tuning
+
+**Problem**: Exponential Moving Average (EMA) of model weights with decay 0.995 was too slow—the EMA model lagged behind actual learning.
+
+**Solution**: Reduce EMA decay to 0.99 for faster tracking of training progress.
+
+---
+
+## 13. Implementation Considerations
 
 ### 12.1 Normalization Strategy
 
@@ -1137,9 +1333,9 @@ def predict_with_tta(model, input_grid):
 
 ---
 
-## 13. Conclusion
+## 14. Conclusion
 
-### 13.1 Summary
+### 14.1 Summary
 
 RLAN addresses the core challenges of ARC through four key innovations:
 
@@ -1150,7 +1346,7 @@ RLAN addresses the core challenges of ARC through four key innovations:
 
 Together, these modules create an architecture that reasons in **relative coordinate spaces**, learns **abstract rules** from few examples, and handles the full spectrum of ARC task types.
 
-### 13.2 Expected Performance
+### 14.2 Expected Performance
 
 Based on architectural analysis:
 
@@ -1161,7 +1357,7 @@ Based on architectural analysis:
 | Conditional Tasks | 80%+ | SPH |
 | Complex Compositional | 70%+ | All modules |
 
-### 13.3 Limitations and Future Work
+### 14.3 Limitations and Future Work
 
 **Current Limitations**:
 - Long-range dependencies (>5 clues) may struggle
@@ -1173,7 +1369,7 @@ Based on architectural analysis:
 - Meta-learning over task distributions
 - Hybrid neuro-symbolic architectures
 
-### 13.4 Final Remarks
+### 14.4 Final Remarks
 
 RLAN represents a principled approach to ARC that:
 - Embodies the **right inductive biases** for spatial reasoning

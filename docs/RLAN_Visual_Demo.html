@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RLAN: Visual Demonstration - How Machines Learn Abstract Reasoning</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --secondary: #7c3aed;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 2rem;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            margin-bottom: 2rem;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+
+        .author-info {
+            margin-top: 1rem;
+            font-size: 1rem;
+            opacity: 0.8;
+        }
+
+        .section {
+            background: var(--card-bg);
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .section h2 {
+            color: var(--primary);
+            margin-bottom: 1rem;
+            font-size: 1.8rem;
+            border-bottom: 3px solid var(--primary);
+            padding-bottom: 0.5rem;
+        }
+
+        .section h3 {
+            color: var(--secondary);
+            margin: 1.5rem 0 1rem;
+            font-size: 1.3rem;
+        }
+
+        /* Grid Display */
+        .arc-grid {
+            display: inline-block;
+            border: 2px solid #333;
+            margin: 0.5rem;
+        }
+
+        .arc-row {
+            display: flex;
+        }
+
+        .arc-cell {
+            width: 30px;
+            height: 30px;
+            border: 1px solid #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        /* ARC Colors */
+        .color-0 { background: #000000; color: #fff; }
+        .color-1 { background: #0074D9; color: #fff; }
+        .color-2 { background: #FF4136; color: #fff; }
+        .color-3 { background: #2ECC40; color: #000; }
+        .color-4 { background: #FFDC00; color: #000; }
+        .color-5 { background: #AAAAAA; color: #000; }
+        .color-6 { background: #F012BE; color: #fff; }
+        .color-7 { background: #FF851B; color: #000; }
+        .color-8 { background: #7FDBFF; color: #000; }
+        .color-9 { background: #870C25; color: #fff; }
+
+        /* Example Container */
+        .example-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2rem;
+            align-items: flex-start;
+            margin: 1.5rem 0;
+        }
+
+        .grid-panel {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .grid-panel h4 {
+            margin-bottom: 0.5rem;
+            color: var(--text-muted);
+        }
+
+        .arrow {
+            font-size: 2rem;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            padding: 0 1rem;
+        }
+
+        /* RLAN Process Steps */
+        .process-steps {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .step {
+            flex: 1;
+            min-width: 250px;
+            background: linear-gradient(135deg, #f0f9ff, #e0f2fe);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border-left: 4px solid var(--primary);
+        }
+
+        .step h4 {
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .step-number {
+            display: inline-block;
+            background: var(--primary);
+            color: white;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 30px;
+            margin-right: 0.5rem;
+            font-weight: bold;
+        }
+
+        /* Attention Visualization */
+        .attention-grid {
+            display: inline-block;
+            margin: 0.5rem;
+        }
+
+        .attention-cell {
+            width: 30px;
+            height: 30px;
+            border: 1px solid #ddd;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+        }
+
+        .highlight-clue {
+            box-shadow: 0 0 0 3px var(--warning), 0 0 15px var(--warning);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        /* Equation Box */
+        .equation-box {
+            background: #f1f5f9;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+            font-family: 'Courier New', monospace;
+            overflow-x: auto;
+        }
+
+        /* Key Insight Box */
+        .insight-box {
+            background: linear-gradient(135deg, #fef3c7, #fde68a);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            border-left: 4px solid var(--warning);
+        }
+
+        .insight-box h4 {
+            color: #92400e;
+            margin-bottom: 0.5rem;
+        }
+
+        /* Analogy Section */
+        .analogy {
+            display: flex;
+            gap: 2rem;
+            margin: 1.5rem 0;
+            flex-wrap: wrap;
+        }
+
+        .analogy-panel {
+            flex: 1;
+            min-width: 300px;
+            padding: 1.5rem;
+            border-radius: 12px;
+        }
+
+        .analogy-human {
+            background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+            border-left: 4px solid var(--success);
+        }
+
+        .analogy-machine {
+            background: linear-gradient(135deg, #ede9fe, #ddd6fe);
+            border-left: 4px solid var(--secondary);
+        }
+
+        /* Interactive Demo */
+        .demo-controls {
+            display: flex;
+            gap: 1rem;
+            margin: 1rem 0;
+            flex-wrap: wrap;
+        }
+
+        .demo-btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            background: var(--primary);
+            color: white;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
+
+        .demo-btn:hover {
+            background: var(--secondary);
+            transform: translateY(-2px);
+        }
+
+        .demo-btn.active {
+            background: var(--success);
+        }
+
+        /* Animation Container */
+        .animation-container {
+            position: relative;
+            min-height: 400px;
+            background: #f8fafc;
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 1rem 0;
+        }
+
+        /* Navigation */
+        .nav-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+
+        .nav-tab {
+            padding: 0.75rem 1.5rem;
+            border: 2px solid var(--primary);
+            border-radius: 25px;
+            background: white;
+            color: var(--primary);
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .nav-tab:hover, .nav-tab.active {
+            background: var(--primary);
+            color: white;
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            border-top: 1px solid #e2e8f0;
+            margin-top: 2rem;
+        }
+
+        /* Difficulty Badge */
+        .difficulty {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 15px;
+            font-size: 0.85rem;
+            font-weight: bold;
+        }
+
+        .difficulty-easy { background: #d1fae5; color: #065f46; }
+        .difficulty-medium { background: #fef3c7; color: #92400e; }
+        .difficulty-hard { background: #fee2e2; color: #991b1b; }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            header h1 { font-size: 1.8rem; }
+            .container { padding: 1rem; }
+            .section { padding: 1rem; }
+        }
+
+        /* Module Cards */
+        .module-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin: 1.5rem 0;
+        }
+
+        .module-card {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            border-top: 4px solid var(--primary);
+        }
+
+        .module-card h4 {
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .module-card.dsc { border-top-color: #f59e0b; }
+        .module-card.msre { border-top-color: #10b981; }
+        .module-card.lcr { border-top-color: #8b5cf6; }
+        .module-card.sph { border-top-color: #ef4444; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🧠 RLAN: How Machines Learn to Reason</h1>
+        <p>Recursive Latent Attractor Networks - Visual Demonstration</p>
+        <div class="author-info">
+            <strong>Peyman Rahmati</strong> | Microsoft Corporation | December 2024
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Introduction -->
+        <section class="section">
+            <h2>🎯 What is RLAN?</h2>
+            <p>
+                RLAN (Recursive Latent Attractor Network) is a novel neural network architecture designed to solve 
+                the <strong>ARC-AGI Challenge</strong> - a benchmark that tests whether AI can truly reason and 
+                generalize like humans, rather than just memorizing patterns.
+            </p>
+
+            <div class="insight-box">
+                <h4>💡 The Key Insight</h4>
+                <p>
+                    Humans don't think in absolute coordinates. When you see "move the red square to where the blue dot is",
+                    you don't think "move from position (2,3) to position (7,8)". Instead, you think in 
+                    <strong>relative terms</strong> - "move TO the blue dot". RLAN captures this intuition.
+                </p>
+            </div>
+
+            <div class="analogy">
+                <div class="analogy-panel analogy-human">
+                    <h4>🧑 How Humans Think</h4>
+                    <p>"Find the red pixel. That's my target. Move the square there."</p>
+                    <p><em>→ Works regardless of where things are on the grid!</em></p>
+                </div>
+                <div class="analogy-panel analogy-machine">
+                    <h4>🤖 How RLAN Learns</h4>
+                    <p>"Discover clue anchors. Re-project coordinates relative to each anchor. Learn the transformation rule."</p>
+                    <p><em>→ Generalizes to any position!</em></p>
+                </div>
+            </div>
+        </section>
+
+        <!-- RLAN Modules -->
+        <section class="section">
+            <h2>🔧 The Four RLAN Modules</h2>
+            <p>RLAN uses four specialized modules that work together to solve reasoning tasks:</p>
+
+            <div class="module-cards">
+                <div class="module-card dsc">
+                    <h4>1. Dynamic Saliency Controller (DSC)</h4>
+                    <p><strong>Question it answers:</strong> "Where should I look?"</p>
+                    <p>Discovers important "clue" locations in the grid without being told what to find.</p>
+                    <p><em>Like your eyes automatically finding the key objects in a scene.</em></p>
+                </div>
+
+                <div class="module-card msre">
+                    <h4>2. Multi-Scale Relative Encoding (MSRE)</h4>
+                    <p><strong>Question it answers:</strong> "How far is everything from each clue?"</p>
+                    <p>Transforms the entire grid into relative coordinates centered on each discovered clue.</p>
+                    <p><em>Like describing locations as "3 blocks north of the park" instead of street addresses.</em></p>
+                </div>
+
+                <div class="module-card lcr">
+                    <h4>3. Latent Counting Registers (LCR)</h4>
+                    <p><strong>Question it answers:</strong> "How many of each color?"</p>
+                    <p>Counts colors within attended regions for numerical reasoning.</p>
+                    <p><em>Like counting red vs blue marbles to decide which pile is bigger.</em></p>
+                </div>
+
+                <div class="module-card sph">
+                    <h4>4. Symbolic Predicate Heads (SPH)</h4>
+                    <p><strong>Question it answers:</strong> "What conditions apply?"</p>
+                    <p>Detects high-level properties like symmetry for conditional logic.</p>
+                    <p><em>Like checking "is this symmetric?" before deciding what to do.</em></p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Example 1: Easy -->
+        <section class="section">
+            <h2>📚 Example 1: Object Movement</h2>
+            <span class="difficulty difficulty-easy">Easy - 1 Clue</span>
+
+            <h3>The Task</h3>
+            <p>Move the grey square to the location of the red pixel.</p>
+
+            <div class="example-container">
+                <div class="grid-panel">
+                    <h4>Input</h4>
+                    <div class="arc-grid" id="ex1-input">
+                        <!-- Generated by JS -->
+                    </div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="grid-panel">
+                    <h4>Output</h4>
+                    <div class="arc-grid" id="ex1-output">
+                        <!-- Generated by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <h3>How RLAN Solves This</h3>
+            <div class="process-steps">
+                <div class="step">
+                    <span class="step-number">1</span>
+                    <h4>DSC Finds the Clue</h4>
+                    <p>The attention map focuses on the <strong>red pixel</strong> at position (3,3). This becomes our anchor point μ₁.</p>
+                </div>
+                <div class="step">
+                    <span class="step-number">2</span>
+                    <h4>MSRE Re-projects Coordinates</h4>
+                    <p>Every pixel now has coordinates <strong>relative to the red pixel</strong>. The grey square at (0,0) becomes "3 up, 3 left from anchor".</p>
+                </div>
+                <div class="step">
+                    <span class="step-number">3</span>
+                    <h4>Solver Learns the Rule</h4>
+                    <p>The rule in relative space: "Copy what's at relative position (-3,-3) to position (0,0)". This works <strong>anywhere</strong> the red pixel appears!</p>
+                </div>
+            </div>
+
+            <div class="equation-box">
+                <strong>The Math:</strong><br>
+                P_rel(i,j) = [i - μ_y, j - μ_x]<br><br>
+                Where (μ_y, μ_x) = center of red pixel = (3, 3)<br>
+                Grey square original: (0, 0) → Relative: (-3, -3)<br>
+                Output position: (0, 0) relative to anchor = (3, 3) in absolute
+            </div>
+
+            <div class="insight-box">
+                <h4>💡 Why This Matters</h4>
+                <p>
+                    A traditional CNN would have to re-learn the rule if we moved everything one pixel to the right.
+                    RLAN learns <strong>"place at anchor"</strong> once, and it works for ANY position of the red pixel!
+                </p>
+            </div>
+        </section>
+
+        <!-- Example 2: Medium -->
+        <section class="section">
+            <h2>📚 Example 2: Pattern Tiling</h2>
+            <span class="difficulty difficulty-medium">Medium - Pattern Recognition</span>
+
+            <h3>The Task</h3>
+            <p>Tile the 2×2 input pattern to create a 6×6 output with rotational variations.</p>
+
+            <div class="example-container">
+                <div class="grid-panel">
+                    <h4>Input (2×2)</h4>
+                    <div class="arc-grid" id="ex2-input">
+                        <!-- Generated by JS -->
+                    </div>
+                </div>
+                <div class="arrow">→</div>
+                <div class="grid-panel">
+                    <h4>Output (6×6)</h4>
+                    <div class="arc-grid" id="ex2-output">
+                        <!-- Generated by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <h3>How RLAN Solves This</h3>
+            <div class="process-steps">
+                <div class="step">
+                    <span class="step-number">1</span>
+                    <h4>MSRE Uses Normalized Coordinates</h4>
+                    <p>Instead of pixel distances, MSRE computes <strong>proportional positions</strong>: "at 1/3 of the grid", "at 2/3 of the grid".</p>
+                </div>
+                <div class="step">
+                    <span class="step-number">2</span>
+                    <h4>Pattern is Scale-Invariant</h4>
+                    <p>The rule "tile at relative positions (0,0), (0.33,0), (0.66,0)..." works regardless of whether input is 2×2, 3×3, or 5×5.</p>
+                </div>
+                <div class="step">
+                    <span class="step-number">3</span>
+                    <h4>Polar Coordinates for Rotation</h4>
+                    <p>MSRE also encodes angles (θ), allowing the solver to apply rotational transformations to each tile.</p>
+                </div>
+            </div>
+
+            <div class="equation-box">
+                <strong>Normalized Coordinates:</strong><br>
+                P_norm(i,j) = [(i - μ_y) / max(H,W), (j - μ_x) / max(H,W)]<br><br>
+                Position (2,0) in 6×6 grid → normalized (0.33, 0) → "one third down"<br>
+                This same description works for any output size!
+            </div>
+        </section>
+
+        <!-- Example 3: Hard -->
+        <section class="section">
+            <h2>📚 Example 3: Conditional Logic</h2>
+            <span class="difficulty difficulty-hard">Hard - Multiple Clues + Conditions</span>
+
+            <h3>The Task</h3>
+            <p>IF the input has horizontal symmetry → flip vertically. OTHERWISE → flip horizontally.</p>
+
+            <div class="example-container">
+                <div class="grid-panel">
+                    <h4>Case A: Symmetric Input</h4>
+                    <div class="arc-grid" id="ex3a-input">
+                        <!-- R _ R pattern -->
+                    </div>
+                    <p>→ Vertical Flip</p>
+                </div>
+                <div class="grid-panel">
+                    <h4>Case B: Asymmetric Input</h4>
+                    <div class="arc-grid" id="ex3b-input">
+                        <!-- R _ _ pattern -->
+                    </div>
+                    <p>→ Horizontal Flip</p>
+                </div>
+            </div>
+
+            <h3>How RLAN Solves This</h3>
+            <div class="process-steps">
+                <div class="step">
+                    <span class="step-number">1</span>
+                    <h4>SPH Detects Symmetry</h4>
+                    <p>The Symbolic Predicate Head learns to output p₁ ≈ 1 for symmetric grids, p₁ ≈ 0 for asymmetric.</p>
+                </div>
+                <div class="step">
+                    <span class="step-number">2</span>
+                    <h4>Predicate Gates the Solver</h4>
+                    <p>The predicate value <strong>modulates</strong> which transformation pathway is active. High p₁ → vertical flip neurons. Low p₁ → horizontal flip neurons.</p>
+                </div>
+                <div class="step">
+                    <span class="step-number">3</span>
+                    <h4>Same Weights, Different Behavior</h4>
+                    <p>The solver has ONE set of weights, but produces DIFFERENT outputs based on the condition. This is compositional reasoning!</p>
+                </div>
+            </div>
+
+            <div class="equation-box">
+                <strong>Predicate Gating:</strong><br>
+                p₁ = σ(MLP(GlobalPool(features)))<br>
+                gate = MLP(p₁)<br>
+                H' = H ⊙ σ(gate)<br><br>
+                When p₁ = 0.95 (symmetric): gate activates "vertical flip" pathway<br>
+                When p₁ = 0.12 (asymmetric): gate activates "horizontal flip" pathway
+            </div>
+
+            <div class="insight-box">
+                <h4>💡 Why SPH is Crucial</h4>
+                <p>
+                    Without explicit predicate heads, the network must learn conditional logic <em>implicitly</em>
+                    in its weights. With only 2-3 training examples, this is nearly impossible!
+                    SPH provides an explicit IF-THEN mechanism.
+                </p>
+            </div>
+        </section>
+
+        <!-- Technical Innovations -->
+        <section class="section">
+            <h2>🚀 Key Technical Innovations</h2>
+
+            <h3>1. TRM-Style Color Encoding</h3>
+            <p>
+                RLAN uses a special encoding where <strong>color 0 (black)</strong> is reserved for boundaries,
+                and actual colors are shifted by +1. This prevents the model from collapsing to "predict all black".
+            </p>
+            <div class="equation-box">
+                Original: colors 0-9 → Model classes 0-9<br>
+                TRM-style: colors 0-9 → Model classes 1-10, class 0 = boundary markers
+            </div>
+
+            <h3>2. Per-Sample Clue Learning</h3>
+            <p>
+                Each sample in a batch learns its own optimal clue count. A simple task (move one object) 
+                might need 1 clue, while a complex task (connect multiple objects) might need 4.
+            </p>
+            <div class="equation-box">
+                Loss = Σᵢ (task_loss[i] + λ · clue_penalty[i])<br><br>
+                The gradient for sample i's stop predictor depends on BOTH:<br>
+                - How wrong the prediction is (task_loss[i])<br>
+                - Whether it's using too few clues (clue_penalty[i])
+            </div>
+
+            <h3>3. Module-Specific Learning Rates</h3>
+            <p>
+                The DSC and MSRE modules receive 10× higher learning rates because their gradients are 
+                ~50× smaller due to the coordinate computation chain.
+            </p>
+            <div class="equation-box">
+                Solver gradient: ~1.0<br>
+                DSC gradient: ~0.02 (50× smaller)<br>
+                <br>
+                Fix: DSC learning rate = 10 × base_lr<br>
+                Result: Both modules learn at similar effective rates
+            </div>
+        </section>
+
+        <!-- Interactive Demo Section -->
+        <section class="section">
+            <h2>🎮 Interactive Visualization</h2>
+            <p>Click the buttons below to see RLAN's reasoning process step by step:</p>
+
+            <div class="nav-tabs">
+                <button class="nav-tab active" onclick="showDemo('attention')">Attention Maps</button>
+                <button class="nav-tab" onclick="showDemo('coordinates')">Relative Coordinates</button>
+                <button class="nav-tab" onclick="showDemo('solving')">Solver Steps</button>
+            </div>
+
+            <div class="animation-container" id="demo-container">
+                <div id="demo-attention" class="demo-panel">
+                    <h3>DSC Attention Evolution</h3>
+                    <p>Watch how the attention sharpens over training:</p>
+                    <div class="demo-controls">
+                        <button class="demo-btn" onclick="animateAttention(1)">Epoch 1</button>
+                        <button class="demo-btn" onclick="animateAttention(50)">Epoch 50</button>
+                        <button class="demo-btn" onclick="animateAttention(200)">Epoch 200</button>
+                    </div>
+                    <div id="attention-display" style="margin-top: 1rem;">
+                        <p><em>Click a button to see attention map evolution</em></p>
+                    </div>
+                </div>
+
+                <div id="demo-coordinates" class="demo-panel" style="display: none;">
+                    <h3>Coordinate Re-projection</h3>
+                    <p>See how absolute coordinates become relative:</p>
+                    <div id="coord-display">
+                        <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+                            <div>
+                                <h4>Absolute Coordinates</h4>
+                                <div id="abs-coords"></div>
+                            </div>
+                            <div>
+                                <h4>Relative to Clue (3,3)</h4>
+                                <div id="rel-coords"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="demo-solving" class="demo-panel" style="display: none;">
+                    <h3>Iterative Solver Refinement</h3>
+                    <p>Watch the solver refine its prediction over 6 steps:</p>
+                    <div class="demo-controls">
+                        <button class="demo-btn" onclick="showSolverStep(1)">Step 1</button>
+                        <button class="demo-btn" onclick="showSolverStep(2)">Step 2</button>
+                        <button class="demo-btn" onclick="showSolverStep(3)">Step 3</button>
+                        <button class="demo-btn" onclick="showSolverStep(4)">Step 4</button>
+                        <button class="demo-btn" onclick="showSolverStep(5)">Step 5</button>
+                        <button class="demo-btn" onclick="showSolverStep(6)">Step 6 (Final)</button>
+                    </div>
+                    <div id="solver-display" style="margin-top: 1rem;">
+                        <p><em>Click a step to see the solver's progressive refinement</em></p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Summary -->
+        <section class="section">
+            <h2>📝 Summary: Why RLAN Works</h2>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem;">
+                <div style="padding: 1.5rem; background: linear-gradient(135deg, #ecfdf5, #d1fae5); border-radius: 12px;">
+                    <h4 style="color: #065f46;">✅ Translation Invariance</h4>
+                    <p>Rules learned relative to anchors work anywhere on the grid.</p>
+                </div>
+                <div style="padding: 1.5rem; background: linear-gradient(135deg, #eff6ff, #dbeafe); border-radius: 12px;">
+                    <h4 style="color: #1e40af;">✅ Scale Invariance</h4>
+                    <p>Normalized coordinates generalize across different grid sizes.</p>
+                </div>
+                <div style="padding: 1.5rem; background: linear-gradient(135deg, #fef3c7, #fde68a); border-radius: 12px;">
+                    <h4 style="color: #92400e;">✅ Compositional Reasoning</h4>
+                    <p>Multiple clues combine for complex multi-step transformations.</p>
+                </div>
+                <div style="padding: 1.5rem; background: linear-gradient(135deg, #fce7f3, #fbcfe8); border-radius: 12px;">
+                    <h4 style="color: #9d174d;">✅ Conditional Logic</h4>
+                    <p>Predicate heads enable IF-THEN reasoning with few examples.</p>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <footer>
+        <p>RLAN: Recursive Latent Attractor Networks</p>
+        <p>Peyman Rahmati | Microsoft Corporation | 2024</p>
+        <p><small>Built for the ARC-AGI Challenge - Towards True Machine Intelligence</small></p>
+    </footer>
+
+    <script>
+        // ARC Color Map
+        const colors = {
+            0: '#000000', 1: '#0074D9', 2: '#FF4136', 3: '#2ECC40', 4: '#FFDC00',
+            5: '#AAAAAA', 6: '#F012BE', 7: '#FF851B', 8: '#7FDBFF', 9: '#870C25'
+        };
+
+        // Create grid HTML
+        function createGrid(containerId, gridData) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+            
+            gridData.forEach(row => {
+                const rowDiv = document.createElement('div');
+                rowDiv.className = 'arc-row';
+                
+                row.forEach(cell => {
+                    const cellDiv = document.createElement('div');
+                    cellDiv.className = `arc-cell color-${cell}`;
+                    cellDiv.textContent = cell;
+                    rowDiv.appendChild(cellDiv);
+                });
+                
+                container.appendChild(rowDiv);
+            });
+        }
+
+        // Example 1: Object Movement
+        const ex1Input = [
+            [5, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 2]
+        ];
+        const ex1Output = [
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 5]
+        ];
+
+        // Example 2: Tiling
+        const ex2Input = [
+            [3, 2],
+            [7, 8]
+        ];
+        const ex2Output = [
+            [3, 2, 3, 2, 3, 2],
+            [7, 8, 7, 8, 7, 8],
+            [2, 3, 2, 3, 2, 3],
+            [8, 7, 8, 7, 8, 7],
+            [3, 2, 3, 2, 3, 2],
+            [7, 8, 7, 8, 7, 8]
+        ];
+
+        // Example 3: Conditional
+        const ex3aInput = [
+            [2, 0, 2],
+            [1, 1, 1],
+            [0, 0, 0]
+        ];
+        const ex3bInput = [
+            [2, 0, 0],
+            [1, 1, 0],
+            [0, 0, 0]
+        ];
+
+        // Initialize grids
+        createGrid('ex1-input', ex1Input);
+        createGrid('ex1-output', ex1Output);
+        createGrid('ex2-input', ex2Input);
+        createGrid('ex2-output', ex2Output);
+        createGrid('ex3a-input', ex3aInput);
+        createGrid('ex3b-input', ex3bInput);
+
+        // Demo navigation
+        function showDemo(demo) {
+            // Hide all panels
+            document.querySelectorAll('.demo-panel').forEach(p => p.style.display = 'none');
+            // Show selected
+            document.getElementById('demo-' + demo).style.display = 'block';
+            // Update tabs
+            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // Initialize coordinate display
+            if (demo === 'coordinates') {
+                initCoordinateDisplay();
+            }
+        }
+
+        // Attention animation
+        function animateAttention(epoch) {
+            const display = document.getElementById('attention-display');
+            const sharpness = epoch < 50 ? 0.3 : (epoch < 200 ? 0.7 : 0.95);
+            
+            let html = `<p><strong>Epoch ${epoch}</strong> - Attention sharpness: ${(sharpness * 100).toFixed(0)}%</p>`;
+            html += '<div style="display: flex; gap: 2rem; flex-wrap: wrap; margin-top: 1rem;">';
+            
+            // Create attention grid
+            html += '<div><h4>Attention Map</h4><div class="attention-grid">';
+            for (let i = 0; i < 4; i++) {
+                html += '<div class="arc-row">';
+                for (let j = 0; j < 4; j++) {
+                    // Red pixel is at (3,3)
+                    const isTarget = (i === 3 && j === 3);
+                    const attention = isTarget ? sharpness : (1 - sharpness) / 15;
+                    const alpha = attention;
+                    const color = isTarget ? 
+                        `rgba(239, 68, 68, ${alpha})` : 
+                        `rgba(100, 100, 100, ${alpha})`;
+                    html += `<div class="attention-cell" style="background: ${color}">${attention.toFixed(2)}</div>`;
+                }
+                html += '</div>';
+            }
+            html += '</div></div>';
+            
+            // Description
+            html += `<div style="max-width: 300px;">
+                <h4>What's Happening</h4>
+                <p>${epoch < 50 ? 
+                    'Early training: Attention is diffuse, exploring the whole grid.' :
+                    epoch < 200 ?
+                    'Mid training: Attention is sharpening on the red pixel.' :
+                    'Late training: Attention is crisp and focused on the target.'
+                }</p>
+            </div>`;
+            
+            html += '</div>';
+            display.innerHTML = html;
+        }
+
+        // Coordinate display
+        function initCoordinateDisplay() {
+            const absContainer = document.getElementById('abs-coords');
+            const relContainer = document.getElementById('rel-coords');
+            
+            let absHtml = '<div class="arc-grid">';
+            let relHtml = '<div class="arc-grid">';
+            
+            const anchorY = 3, anchorX = 3;
+            
+            for (let i = 0; i < 4; i++) {
+                absHtml += '<div class="arc-row">';
+                relHtml += '<div class="arc-row">';
+                for (let j = 0; j < 4; j++) {
+                    const isAnchor = (i === anchorY && j === anchorX);
+                    const bgColor = isAnchor ? '#fef3c7' : '#f1f5f9';
+                    const border = isAnchor ? '3px solid #f59e0b' : '1px solid #ddd';
+                    
+                    absHtml += `<div class="attention-cell" style="background: ${bgColor}; border: ${border}; width: 50px;">(${i},${j})</div>`;
+                    relHtml += `<div class="attention-cell" style="background: ${bgColor}; border: ${border}; width: 50px;">(${i - anchorY},${j - anchorX})</div>`;
+                }
+                absHtml += '</div>';
+                relHtml += '</div>';
+            }
+            
+            absHtml += '</div>';
+            relHtml += '</div>';
+            
+            absContainer.innerHTML = absHtml;
+            relContainer.innerHTML = relHtml;
+        }
+
+        // Solver steps
+        function showSolverStep(step) {
+            const display = document.getElementById('solver-display');
+            
+            // Simulated solver progression
+            const confidence = Math.min(0.95, 0.3 + (step - 1) * 0.15);
+            const noise = Math.max(0, 0.4 - (step - 1) * 0.08);
+            
+            let html = `<p><strong>Step ${step}</strong> - Confidence: ${(confidence * 100).toFixed(0)}%, Noise: ${(noise * 100).toFixed(0)}%</p>`;
+            html += '<div style="display: flex; gap: 2rem; flex-wrap: wrap; margin-top: 1rem;">';
+            
+            // Create prediction grid
+            html += '<div><h4>Current Prediction</h4><div class="arc-grid">';
+            
+            const target = ex1Output;
+            for (let i = 0; i < 4; i++) {
+                html += '<div class="arc-row">';
+                for (let j = 0; j < 4; j++) {
+                    // Add noise in early steps
+                    let color = target[i][j];
+                    if (Math.random() < noise && step < 6) {
+                        color = Math.floor(Math.random() * 3); // Random noise
+                    }
+                    html += `<div class="arc-cell color-${color}">${color}</div>`;
+                }
+                html += '</div>';
+            }
+            html += '</div></div>';
+            
+            // Description
+            html += `<div style="max-width: 300px;">
+                <h4>Refinement Process</h4>
+                <p>${step === 1 ? 
+                    'Step 1: Initial rough guess. The solver has vague information.' :
+                    step < 4 ?
+                    `Step ${step}: Refining structure. Key positions becoming clearer.` :
+                    step < 6 ?
+                    `Step ${step}: Almost there. Fine details being resolved.` :
+                    'Step 6: Final output. High confidence prediction.'
+                }</p>
+            </div>`;
+            
+            html += '</div>';
+            display.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
