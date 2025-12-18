@@ -195,7 +195,16 @@ def create_train_loader(
     )
     
     batch_size = train_cfg['batch_size']
-    num_workers = data_cfg.get('num_workers', 0)
+    
+    # OPTIMIZATION: When using cached samples, use num_workers=0
+    # Workers need to pickle/unpickle the full dataset which is slow for large caches
+    # With cache in main process memory, direct access is faster
+    if cache_samples:
+        num_workers = 0
+        print("  (Using num_workers=0 for cached samples - faster than multiprocessing)")
+    else:
+        num_workers = data_cfg.get('num_workers', 0)
+    
     pin_memory = data_cfg.get('pin_memory', True)
     prefetch_factor = data_cfg.get('prefetch_factor', 2) if num_workers > 0 else None
     persistent_workers = data_cfg.get('persistent_workers', False) and num_workers > 0
