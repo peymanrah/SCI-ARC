@@ -101,19 +101,22 @@ training:
   focal_alpha: 0.75
   
   # ============================================================
-  # DISABLE ALL AUXILIARY LOSSES
+  # MINIMAL AUXILIARY LOSSES
   # ============================================================
+  # CRITICAL FIX: Stop predictor was collapsing to 0 clues because
+  # there was no penalty! Need min_clue regularization to ensure
+  # gradient signal flows back to stop predictor.
   lambda_entropy: 0.0           # OFF - let attention learn naturally
-  lambda_sparsity: 0.0          # OFF - let clue count emerge naturally
+  lambda_sparsity: 0.1          # ON - minimum clue count enforcement
   lambda_predicate: 0.0         # OFF - no SPH
   lambda_curriculum: 0.0        # OFF - no curriculum
-  lambda_deep_supervision: 0.0  # OFF - only final step matters
+  lambda_deep_supervision: 0.5  # ON - helps later steps improve
   lambda_act: 0.0               # OFF - no ACT
   
-  # Clue regularization (all OFF)
-  min_clues: 0.0                # No minimum
-  min_clue_weight: 0.0          # No penalty
-  ponder_weight: 0.0            # No pondering cost
+  # Clue regularization (ENABLED to prevent 0-clue collapse)
+  min_clues: 2.0                # At least 2 clues should be active
+  min_clue_weight: 5.0          # Strong penalty for < 2 clues
+  ponder_weight: 0.01           # Small cost per clue (efficiency)
   entropy_ponder_weight: 0.0    # No entropy pondering
   
   use_stablemax: true

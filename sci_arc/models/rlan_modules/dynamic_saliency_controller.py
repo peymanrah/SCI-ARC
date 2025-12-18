@@ -379,12 +379,20 @@ class DynamicSaliencyController(nn.Module):
             stop_input = torch.cat([attended_features, attn_entropy_normalized], dim=-1)  # (B, D+1)
             
             # Predict stop probability with entropy-aware input
-            stop_logit = self.stop_predictor(stop_input).squeeze(-1)  # (B,)
+            stop_logit_raw = self.stop_predictor(stop_input).squeeze(-1)  # (B,)
             
-            # CLAMP stop_logits to prevent sigmoid saturation
-            # sigmoid(5) = 0.993, sigmoid(-5) = 0.007
-            # This ensures gradients can still flow even with strong preferences
-            stop_logit = stop_logit.clamp(min=-5.0, max=5.0)
+            # SOFT CLAMPING: Use tanh-based squashing instead of hard clamp
+            # Hard clamp breaks gradient flow when saturated!
+            # tanh squashes to [-1, 1], then scale to [-4, 4] for sigmoid range
+            # sigmoid(4) = 0.982, sigmoid(-4) = 0.018 - still allows gradient
+            #
+            # Key insight: tanh has non-zero gradient everywhere (1 - tanh^2)
+            # At tanh(3) = 0.995: gradient = 1 - 0.99 = 0.01 (small but nonzero)
+            # vs hard clamp at 5.0: gradient = 0 (completely blocked!)
+            #
+            # Scale factor 4.0 gives sigmoid range [0.018, 0.982]
+            # This is softer than clamp [-5, 5] -> [0.007, 0.993]
+            stop_logit = 4.0 * torch.tanh(stop_logit_raw / 4.0)
             
             # Update cumulative mask (reduce weight of attended regions)
             # Use soft masking to allow gradients to flow
