@@ -71,10 +71,15 @@ class ARCDataset(Dataset):
     # Padding pixels with this value are ignored in loss computation
     PADDING_IGNORE_VALUE = -100
     
+    # Padding value for INPUT grids (distinguishable from black=0)
+    # Using 10 as padding token for inputs allows the model to distinguish
+    # actual black pixels (0) from padding regions. GridEncoder must handle 11 colors.
+    PAD_COLOR = 10
+    
     # RLAN uses 2D spatial structure (B, H, W, D) - no boundary markers needed
     # Unlike TRM which flattens grids to 1D sequences and uses EOS tokens,
     # RLAN maintains spatial structure so boundary markers are unnecessary.
-    # Colors 0-9 are used directly (10 classes total)
+    # Colors 0-9 are used directly, plus 10 for padding (11 classes total for encoder)
     
     def __init__(
         self,
@@ -269,8 +274,13 @@ class ARCDataset(Dataset):
             result = grid[:self.max_size, :self.max_size].copy()
             return result
         
-        # Determine padding value
-        pad_value = self.PADDING_IGNORE_VALUE if (is_target and self.ignore_padding_in_loss) else 0
+        # Determine padding value:
+        # - Targets: use -100 (PADDING_IGNORE_VALUE) so loss ignores padding
+        # - Inputs: use 10 (PAD_COLOR) so model distinguishes padding from black (0)
+        if is_target and self.ignore_padding_in_loss:
+            pad_value = self.PADDING_IGNORE_VALUE
+        else:
+            pad_value = self.PAD_COLOR  # Use 10 for inputs to distinguish from black
         
         # Need int64 for -100 values (uint8 can't hold negative numbers)
         dtype = np.int64 if pad_value < 0 else np.int32

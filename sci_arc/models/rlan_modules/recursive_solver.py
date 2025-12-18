@@ -425,17 +425,44 @@ class RecursiveSolver(nn.Module):
         """
         Inject count information into spatial features.
         
+        Supports two modes:
+        1. Global counts: count_embedding shape (B, num_colors, D) - broadcast to all pixels
+        2. Per-clue counts: count_embedding shape (B, K, D) - inject per-clue before aggregation
+        
         Args:
-            features: Shape (B, D, H, W)
-            count_embedding: Shape (B, num_colors, D)
+            features: Shape (B, D, H, W) OR (B, K, D, H, W) for per-clue mode
+            count_embedding: Shape (B, num_colors, D) for global OR (B, K, D) for per-clue
             
         Returns:
-            enhanced: Shape (B, D, H, W)
+            enhanced: Same shape as input features
         """
         # Skip if LCR is disabled (avoids wasted computation)
         if self.count_proj is None:
             return features
+        
+        # Check if we have per-clue count embedding (B, K, D)
+        # vs global count embedding (B, num_colors, D)
+        if count_embedding.dim() == 3 and count_embedding.shape[2] == self.hidden_dim:
+            # Per-clue count embedding (B, K, D)
+            B, K_or_C, D_count = count_embedding.shape
             
+            # If features is per-clue (B, K, D, H, W), inject per-clue counts
+            if features.dim() == 5:
+                # Per-clue injection: each clue k gets its own count embedding
+                B, K, D, H, W = features.shape
+                # Expand count_embedding to spatial dimensions
+                count_spatial = count_embedding.view(B, K, D, 1, 1).expand(-1, -1, -1, H, W)
+                enhanced = features + count_spatial
+                return enhanced
+            else:
+                # Features is aggregated (B, D, H, W), sum per-clue counts
+                count_sum = count_embedding.sum(dim=1)  # (B, D)
+                B, D, H, W = features.shape
+                count_spatial = count_sum.view(B, D, 1, 1).expand(-1, -1, H, W)
+                enhanced = features + count_spatial
+                return enhanced
+        
+        # Global count embedding (B, num_colors, D) - original behavior
         B, D, H, W = features.shape
         
         # Flatten count embeddings
@@ -485,7 +512,7 @@ class RecursiveSolver(nn.Module):
         
         Args:
             clue_features: Shape (B, K, D, H, W) from DSC + MSRE
-            count_embedding: Shape (B, num_colors, D) from LCR (ignored if use_lcr=False)
+            count_embedding: Shape (B, num_colors, D) from LCR global OR (B, K, D) from LCR per-clue
             predicates: Shape (B, P) from SPH (ignored if use_sph=False)
             input_grid: Shape (B, H, W) original input grid
             attention_maps: Optional (B, K, H, W) clue attention maps
@@ -506,13 +533,22 @@ class RecursiveSolver(nn.Module):
         B, K, D, H, W = clue_features.shape
         device = clue_features.device
         
+        # Per-clue count injection (paper design: each clue has its local color stats)
+        # If count_embedding is (B, K, D), inject into clue_features BEFORE aggregation
+        # This ensures clue k's aggregated features include clue k's local counts
+        if count_embedding.dim() == 3 and count_embedding.shape[1] == K:
+            # Per-clue counts: inject into per-clue features
+            clue_features = self._inject_counts(clue_features, count_embedding)
+        
         # Aggregate clue features using attention AND stop_probs
         # This creates gradient flow: task_loss -> logits -> aggregated -> stop_probs -> stop_predictor
         # Making clue count a TRUE latent variable learned from target grids
         aggregated = self._aggregate_clues(clue_features, attention_maps, stop_logits)  # (B, D, H, W)
         
-        # Inject count information (skipped if use_lcr=False)
-        aggregated = self._inject_counts(aggregated, count_embedding)
+        # Inject global count information (if LCR returns global counts)
+        # Only applies if count_embedding is (B, num_colors, D) format
+        if count_embedding.dim() == 3 and count_embedding.shape[1] != K:
+            aggregated = self._inject_counts(aggregated, count_embedding)
         
         # Apply predicate gating (skipped if use_sph=False)
         aggregated = self._apply_predicate_gating(aggregated, predicates)

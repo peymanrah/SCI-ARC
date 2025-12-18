@@ -122,23 +122,102 @@ class LatentCountingRegisters(nn.Module):
         
         return encoded
     
+    def forward_per_clue(
+        self,
+        grid: torch.Tensor,
+        attention_maps: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute per-clue attention-weighted count embeddings (paper formulation).
+        
+        Paper: c_t = sum_{i,j} M_t(i,j) * OneHot(X_{i,j})
+        
+        This gives each clue its own soft count of colors within its attended region.
+        Critical for tasks like "fill region with majority color inside boundary"
+        where counts need to be region-conditioned, not global.
+        
+        Args:
+            grid: Shape (B, H, W) input grid with color indices 0-9
+            attention_maps: Shape (B, K, H, W) attention weights per clue from DSC
+            
+        Returns:
+            count_embedding: Shape (B, K, hidden_dim) per-clue count embedding
+        """
+        B, K, H, W = attention_maps.shape
+        C = self.num_colors
+        device = grid.device
+        
+        # Create one-hot color encoding: (B, H, W) -> (B, C, H, W)
+        grid_clamped = grid.clamp(0, C - 1).long()
+        color_onehot = F.one_hot(grid_clamped, num_classes=C)  # (B, H, W, C)
+        color_onehot = color_onehot.permute(0, 3, 1, 2).float()  # (B, C, H, W)
+        
+        # For each clue, compute attention-weighted color counts
+        # Paper formula: c_t = sum_{i,j} M_t(i,j) * OneHot(X_{i,j})
+        per_clue_counts = []
+        
+        for k in range(K):
+            attn_k = attention_maps[:, k]  # (B, H, W)
+            
+            # Weighted sum of one-hot colors by attention
+            # (B, C, H, W) * (B, 1, H, W) -> sum over H,W -> (B, C)
+            weighted_counts = (color_onehot * attn_k.unsqueeze(1)).sum(dim=(-2, -1))  # (B, C)
+            
+            # Normalize by attention sum (soft normalization)
+            attn_sum = attn_k.sum(dim=(-2, -1), keepdim=False) + 1e-6  # (B,)
+            weighted_counts = weighted_counts / attn_sum.unsqueeze(-1)  # (B, C)
+            
+            per_clue_counts.append(weighted_counts)
+        
+        # Stack to (B, K, C)
+        per_clue_counts = torch.stack(per_clue_counts, dim=1)  # (B, K, C)
+        
+        # Encode counts with Fourier features and project to hidden_dim
+        # Reshape for batch processing: (B, K, C) -> (B*K, C)
+        counts_flat = per_clue_counts.view(B * K, C)
+        count_features = self._fourier_encode_count(counts_flat)  # (B*K, C, 1+2*num_freq)
+        count_embed = self.count_encoder(count_features)  # (B*K, C, hidden_dim)
+        
+        # Pool across colors to get per-clue embedding: (B*K, C, hidden_dim) -> (B*K, hidden_dim)
+        # Use attention-weighted pooling based on which colors are present
+        color_weights = counts_flat / (counts_flat.sum(dim=-1, keepdim=True) + 1e-6)  # (B*K, C)
+        clue_embed = (count_embed * color_weights.unsqueeze(-1)).sum(dim=1)  # (B*K, hidden_dim)
+        
+        # Reshape back to (B, K, hidden_dim)
+        clue_embed = clue_embed.view(B, K, self.hidden_dim)
+        
+        return clue_embed
+    
     def forward(
         self,
         grid: torch.Tensor,
         features: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        attention_maps: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute count embeddings for each color.
+        Compute count embeddings.
+        
+        If attention_maps is provided, uses per-clue counting (paper formulation).
+        Otherwise, uses global counting (backward compatible).
         
         Args:
             grid: Shape (B, H, W) input grid with color indices 0-9
             features: Shape (B, D, H, W) encoded features
             mask: Optional (B, H, W) validity mask
+            attention_maps: Optional (B, K, H, W) attention weights per clue
             
         Returns:
-            count_embedding: Shape (B, num_colors, hidden_dim)
+            If attention_maps provided:
+                count_embedding: Shape (B, K, hidden_dim) per-clue
+            Otherwise:
+                count_embedding: Shape (B, num_colors, hidden_dim) global
         """
+        # If attention_maps provided, use per-clue counting (paper formulation)
+        if attention_maps is not None:
+            return self.forward_per_clue(grid, attention_maps)
+        
+        # Otherwise, use global counting (backward compatible)
         B, D, H, W = features.shape
         C = self.num_colors
         device = grid.device

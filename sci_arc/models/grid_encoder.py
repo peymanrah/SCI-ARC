@@ -121,12 +121,18 @@ class GridEncoder(nn.Module):
     - Truncated normal initialization
     
     Parameters: ~500K (intentionally small like TRM philosophy)
+    
+    Note: num_colors should be 11 (colors 0-9 plus padding token 10) to properly
+    distinguish padding from black pixels. The PAD_COLOR=10 is set in dataset.py.
     """
+    
+    # Padding color index (must match dataset.py PAD_COLOR)
+    PAD_COLOR = 10
     
     def __init__(
         self,
         hidden_dim: int = 256,
-        num_colors: int = 10,
+        num_colors: int = 10,  # 10 ARC colors (0-9) - padding token added internally
         max_size: int = 30,
         dropout: float = 0.1,
         use_embed_scale: bool = True,  # TRM-style scaling
@@ -135,7 +141,7 @@ class GridEncoder(nn.Module):
         """
         Args:
             hidden_dim: Output embedding dimension
-            num_colors: Number of ARC colors (typically 10: 0-9)
+            num_colors: Number of ARC colors (10: colors 0-9). Padding token (10) is added internally.
             max_size: Maximum grid dimension (ARC max is 30)
             dropout: Dropout probability
             use_embed_scale: Whether to use TRM-style embedding scaling
@@ -144,7 +150,8 @@ class GridEncoder(nn.Module):
         super().__init__()
         
         self.hidden_dim = hidden_dim
-        self.num_colors = num_colors
+        self.num_colors = num_colors  # ARC colors (0-9)
+        self.num_embeddings = num_colors + 1  # +1 for padding token (10)
         self.max_size = max_size
         self.use_embed_scale = use_embed_scale
         self.use_learned_pos = use_learned_pos and LEARNED_POS_AVAILABLE
@@ -153,9 +160,9 @@ class GridEncoder(nn.Module):
         self.embed_scale = math.sqrt(hidden_dim) if use_embed_scale else 1.0
         embed_init_std = 1.0 / self.embed_scale  # Scale init inversely
         
-        # Color embedding: each color gets a unique vector
+        # Color embedding: each color gets a unique vector (11 total: 0-9 + padding)
         # Use hidden_dim // 2 to leave room for positional encoding
-        self.color_embed = nn.Embedding(num_colors, hidden_dim // 2)
+        self.color_embed = nn.Embedding(self.num_embeddings, hidden_dim // 2)
         
         # Positional encoding: sinusoidal (default) or learned
         if self.use_learned_pos:
@@ -189,15 +196,15 @@ class GridEncoder(nn.Module):
         Encode a grid into embeddings.
         
         Args:
-            grid: [B, H, W] integer tensor with values 0-9
+            grid: [B, H, W] integer tensor with values 0-9 (colors) or 10 (padding)
         
         Returns:
             embeddings: [B, H, W, hidden_dim] embedding tensor
         """
         B, H, W = grid.shape
         
-        # Clamp grid values to valid range (safety)
-        grid = grid.clamp(0, self.num_colors - 1)
+        # Clamp grid values to valid range (0-10, where 10 is padding token)
+        grid = grid.clamp(0, self.num_embeddings - 1)
         
         # Color embedding
         color_emb = self.color_embed(grid)  # [B, H, W, hidden_dim//2]
@@ -219,6 +226,52 @@ class GridEncoder(nn.Module):
             output = output * self.embed_scale
         
         return output
+    
+    def get_valid_mask(self, grid: torch.Tensor) -> torch.Tensor:
+        """
+        Create a valid mask indicating non-padding positions.
+        
+        Args:
+            grid: [B, H, W] integer tensor with values 0-9 (colors) or 10 (padding)
+            
+        Returns:
+            valid_mask: [B, H, W] boolean tensor (True = valid, False = padding)
+        """
+        return grid != self.PAD_COLOR
+    
+    def get_grid_sizes(self, grid: torch.Tensor) -> torch.Tensor:
+        """
+        Compute original grid sizes from the valid mask.
+        
+        Useful for MSRE which needs to know actual grid dimensions for
+        scale-invariant relative position encoding.
+        
+        Args:
+            grid: [B, H, W] integer tensor with values 0-9 (colors) or 10 (padding)
+            
+        Returns:
+            grid_sizes: [B, 2] tensor of (height, width) for each sample
+        """
+        valid_mask = self.get_valid_mask(grid)  # [B, H, W]
+        B, H, W = grid.shape
+        
+        # Find max valid row and column for each sample
+        # For each sample, height = max row index with any valid pixel + 1
+        # width = max column index with any valid pixel + 1
+        row_valid = valid_mask.any(dim=2)  # [B, H] - which rows have valid pixels
+        col_valid = valid_mask.any(dim=1)  # [B, W] - which cols have valid pixels
+        
+        # Create index tensors
+        row_indices = torch.arange(H, device=grid.device).unsqueeze(0).expand(B, -1)  # [B, H]
+        col_indices = torch.arange(W, device=grid.device).unsqueeze(0).expand(B, -1)  # [B, W]
+        
+        # Mask and find max index (default to H-1 and W-1 if all padding)
+        # Add 1 to convert from 0-based index to size
+        heights = torch.where(row_valid, row_indices, torch.zeros_like(row_indices)).max(dim=1).values + 1
+        widths = torch.where(col_valid, col_indices, torch.zeros_like(col_indices)).max(dim=1).values + 1
+        
+        grid_sizes = torch.stack([heights, widths], dim=1)  # [B, 2]
+        return grid_sizes
     
     def encode_pair(
         self, 

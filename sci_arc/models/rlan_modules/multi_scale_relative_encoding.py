@@ -157,24 +157,35 @@ class MultiScaleRelativeEncoding(nn.Module):
         abs_row = row_grid - centroid_row  # (B, K, H, W)
         abs_col = col_grid - centroid_col  # (B, K, H, W)
         
-        # 2. Normalized offset (by grid size)
+        # 2. Normalized offset (by max grid dimension for scale invariance)
+        # Paper: "divide by max(H,W)" for consistent normalization across aspect ratios
+        if grid_sizes is not None:
+            max_dim = torch.max(grid_sizes[:, 0], grid_sizes[:, 1]).view(B, 1, 1, 1).float()
+        else:
+            max_dim = torch.tensor(max(H, W), device=device, dtype=torch.float).view(1, 1, 1, 1)
+        
+        norm_row = abs_row / (max_dim + 1e-6)
+        norm_col = abs_col / (max_dim + 1e-6)
+        
+        # 3. Log-Polar coordinates (paper formulation)
+        # Paper: r = log(sqrt(dx^2 + dy^2) + 1)
+        # Log-radius is specifically helpful for multi-scale generalization
+        # and "rings / dilation / expansion" behaviors in ARC
+        euclidean_dist = torch.sqrt(abs_row ** 2 + abs_col ** 2 + 1e-6)
+        log_radius = torch.log(euclidean_dist + 1)  # Paper's log-polar formulation
+        
+        # Paper: angle = arctan2(j - mu_x, i - mu_y) = arctan2(col_offset, row_offset)
+        # Note: atan2(y, x) convention - col is 'x', row is 'y' in image coords
+        angle = torch.atan2(abs_col, abs_row)  # Range: [-pi, pi]
+        
+        # Normalize log-radius by log of max possible distance (grid diagonal)
         if grid_sizes is not None:
             h_size = grid_sizes[:, 0].view(B, 1, 1, 1).float()
             w_size = grid_sizes[:, 1].view(B, 1, 1, 1).float()
+            max_dist = torch.sqrt(h_size ** 2 + w_size ** 2)
         else:
-            h_size = torch.tensor(H, device=device, dtype=torch.float).view(1, 1, 1, 1)
-            w_size = torch.tensor(W, device=device, dtype=torch.float).view(1, 1, 1, 1)
-        
-        norm_row = abs_row / (h_size + 1e-6)
-        norm_col = abs_col / (w_size + 1e-6)
-        
-        # 3. Polar coordinates
-        radius = torch.sqrt(abs_row ** 2 + abs_col ** 2 + 1e-6)
-        angle = torch.atan2(abs_row, abs_col)  # Range: [-pi, pi]
-        
-        # Normalize radius by grid diagonal
-        diag = torch.sqrt(h_size ** 2 + w_size ** 2)
-        radius_norm = radius / (diag + 1e-6)
+            max_dist = torch.sqrt(torch.tensor(H**2 + W**2, device=device, dtype=torch.float))
+        log_radius_norm = log_radius / (torch.log(max_dist + 1) + 1e-6)
         
         # Normalize angle to [0, 1]
         angle_norm = (angle + math.pi) / (2 * math.pi)
@@ -185,7 +196,7 @@ class MultiScaleRelativeEncoding(nn.Module):
             abs_col / self.max_size,
             norm_row,
             norm_col,
-            radius_norm,
+            log_radius_norm,  # Changed from linear radius to log-polar (paper)
             angle_norm,
         ], dim=-1)  # (B, K, H, W, 6)
         

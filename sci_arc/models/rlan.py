@@ -356,6 +356,11 @@ class RLAN(nn.Module):
         # 1. Encode grid - ALWAYS REQUIRED
         features = self.encode(input_grid)  # (B, D, H, W)
         
+        # Compute valid mask and grid sizes from input for downstream modules
+        # This allows MSRE to do scale-invariant encoding and DSC to avoid anchoring on padding
+        valid_mask = self.encoder.get_valid_mask(input_grid)  # (B, H, W)
+        grid_sizes = self.encoder.get_grid_sizes(input_grid)  # (B, 2)
+        
         # 2. Encode training context if provided and enabled
         context = None
         if self.use_context_encoder and self.context_encoder is not None:
@@ -369,7 +374,7 @@ class RLAN(nn.Module):
         # 3. Dynamic Saliency Controller - find clue anchors (if enabled)
         if self.use_dsc and self.dsc is not None:
             centroids, attention_maps, stop_logits = self.dsc(
-                features, temperature=temperature
+                features, temperature=temperature, mask=valid_mask
             )  # (B, K, 2), (B, K, H, W), (B, K)
         else:
             # Default: single centered anchor, uniform attention
@@ -383,15 +388,21 @@ class RLAN(nn.Module):
         # 4. Multi-Scale Relative Encoding - compute relative coordinates (if enabled)
         if self.use_msre and self.msre is not None:
             clue_features = self.msre(
-                features, centroids, grid_sizes=None
+                features, centroids, grid_sizes=grid_sizes
             )  # (B, K, D, H, W)
         else:
             # Default: just broadcast features across K clues
             clue_features = features.unsqueeze(1).expand(-1, self.max_clues, -1, -1, -1)
         
         # 5. Latent Counting Registers - soft counting (if enabled)
+        # Paper: c_t = sum_{i,j} M_t(i,j) * OneHot(X_{i,j}) (per-clue, attention-weighted)
         if self.use_lcr and self.lcr is not None:
-            count_embedding = self.lcr(input_grid, features)  # (B, num_colors, D)
+            # Pass attention_maps for per-clue counting (paper formulation)
+            count_embedding = self.lcr(
+                input_grid, features, 
+                mask=valid_mask,
+                attention_maps=attention_maps  # Per-clue counting from DSC attention
+            )  # (B, K, D) per-clue, or (B, num_colors, D) if no attention_maps
         else:
             # Default: zeros (RecursiveSolver will skip count injection when use_lcr=False)
             # Using zeros instead of empty() to avoid inf/nan garbage values

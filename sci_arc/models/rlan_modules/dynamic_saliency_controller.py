@@ -31,6 +31,7 @@ def gumbel_softmax_2d(
     temperature: float = 1.0,
     hard: bool = False,
     dim: int = -1,
+    deterministic: bool = False,
 ) -> torch.Tensor:
     """
     Apply Gumbel-softmax to 2D spatial attention logits.
@@ -40,6 +41,7 @@ def gumbel_softmax_2d(
         temperature: Softmax temperature (lower = sharper)
         hard: If True, use straight-through estimator
         dim: Dimension(s) to apply softmax over
+        deterministic: If True, skip Gumbel noise (for eval mode)
         
     Returns:
         Attention weights with same shape as logits
@@ -47,11 +49,16 @@ def gumbel_softmax_2d(
     # Clamp input logits for numerical stability
     logits = logits.clamp(min=-50.0, max=50.0)
     
-    # Add Gumbel noise with improved numerical stability
-    # Use clamp to prevent log(0)
-    uniform = torch.rand_like(logits).clamp(min=1e-10, max=1.0 - 1e-10)
-    gumbel_noise = -torch.log(-torch.log(uniform))
-    noisy_logits = (logits + gumbel_noise) / max(temperature, 1e-10)
+    # During eval or when deterministic=True, use regular softmax (no noise)
+    # This ensures reproducible predictions at inference time
+    if deterministic:
+        noisy_logits = logits / max(temperature, 1e-10)
+    else:
+        # Add Gumbel noise with improved numerical stability
+        # Use clamp to prevent log(0)
+        uniform = torch.rand_like(logits).clamp(min=1e-10, max=1.0 - 1e-10)
+        gumbel_noise = -torch.log(-torch.log(uniform))
+        noisy_logits = (logits + gumbel_noise) / max(temperature, 1e-10)
     
     # Clamp noisy logits for softmax stability  
     noisy_logits = noisy_logits.clamp(min=-50.0, max=50.0)
@@ -168,6 +175,11 @@ class DynamicSaliencyController(nn.Module):
         # Layer norm for stability
         self.query_norm = nn.LayerNorm(hidden_dim)
         self.feature_norm = nn.LayerNorm(hidden_dim)
+        
+        # GRU for recurrence: clue k's query depends on clue k-1's attended features
+        # This implements the paper's claim: "iterative selection depends on H_{t-1}"
+        # attended_features from clue k-1 updates query_state for clue k
+        self.query_gru = nn.GRUCell(hidden_dim, hidden_dim)
         
         self.dropout = nn.Dropout(dropout)
         self.scale = math.sqrt(hidden_dim)
@@ -301,10 +313,17 @@ class DynamicSaliencyController(nn.Module):
         if mask is not None:
             cumulative_mask = cumulative_mask * mask
         
+        # Initialize recurrent query state (paper: H_{t-1})
+        # This state gets updated by attended features from each clue,
+        # making clue k's discovery depend on clues 0..k-1
+        query_state = torch.zeros(B, self.hidden_dim, device=features.device)
+        
         # Process each clue sequentially
         for k in range(K):
-            # Get query for this clue
+            # Get base query for this clue and modulate with recurrent state
+            # The recurrent state carries information from previously discovered clues
             query = self.clue_queries[k:k+1].expand(B, -1)  # (B, D)
+            query = query + query_state  # Add recurrent state (paper's H_{t-1} conditioning)
             query = self.query_norm(query)
             
             # Project query and keys
@@ -325,7 +344,12 @@ class DynamicSaliencyController(nn.Module):
             attn_scores = attn_scores.clamp(min=-50.0, max=50.0)
             
             # Apply Gumbel-softmax for differentiable attention
-            attention = gumbel_softmax_2d(attn_scores, temperature=temperature)
+            # Use deterministic mode during eval for reproducible predictions
+            attention = gumbel_softmax_2d(
+                attn_scores, 
+                temperature=temperature,
+                deterministic=not self.training
+            )
             
             # Compute centroid
             centroid = self._compute_centroid(attention, H, W)
@@ -333,6 +357,10 @@ class DynamicSaliencyController(nn.Module):
             # Compute attended features for stop prediction
             attention_flat = attention.view(B, H * W, 1)
             attended_features = (v * attention_flat).sum(dim=1)  # (B, D)
+            
+            # Update query state with GRU (paper's recurrence: H_t = f(H_{t-1}, attended))
+            # This makes clue k+1's query depend on what clue k attended to
+            query_state = self.query_gru(attended_features, query_state)  # (B, D)
             
             # Compute attention entropy for this clue
             # Low entropy = sharp attention (confident) → can stop

@@ -31,6 +31,7 @@ def gumbel_sigmoid(
     logits: torch.Tensor,
     temperature: float = 1.0,
     hard: bool = False,
+    deterministic: bool = False,
 ) -> torch.Tensor:
     """
     Gumbel-sigmoid for differentiable binary sampling.
@@ -39,19 +40,24 @@ def gumbel_sigmoid(
         logits: Shape (...) logits for binary decision
         temperature: Temperature (lower = sharper)
         hard: If True, use straight-through estimator
+        deterministic: If True, skip Gumbel noise (for eval mode)
         
     Returns:
         probs: Shape (...) probabilities in (0, 1)
     """
-    # Sample Gumbel noise for both classes
-    gumbel_0 = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
-    gumbel_1 = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
-    
-    # Compute soft binary decision
-    log_prob_1 = logits / temperature + gumbel_1
-    log_prob_0 = -logits / temperature + gumbel_0
-    
-    soft = torch.sigmoid(log_prob_1 - log_prob_0)
+    # During eval, use regular sigmoid (no noise) for reproducible predictions
+    if deterministic:
+        soft = torch.sigmoid(logits / temperature)
+    else:
+        # Sample Gumbel noise for both classes
+        gumbel_0 = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
+        gumbel_1 = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
+        
+        # Compute soft binary decision
+        log_prob_1 = logits / temperature + gumbel_1
+        log_prob_0 = -logits / temperature + gumbel_0
+        
+        soft = torch.sigmoid(log_prob_1 - log_prob_0)
     
     if hard:
         hard_decision = (soft > 0.5).float()
@@ -173,8 +179,13 @@ class SymbolicPredicateHeads(nn.Module):
         # Predict predicate logits
         logits = self.predicate_head(global_features)  # (B, P)
         
-        # Apply Gumbel-sigmoid
-        predicates = gumbel_sigmoid(logits, temperature=temperature, hard=hard)
+        # Apply Gumbel-sigmoid (deterministic during eval for reproducibility)
+        predicates = gumbel_sigmoid(
+            logits, 
+            temperature=temperature, 
+            hard=hard,
+            deterministic=not self.training
+        )
         
         return predicates
     
@@ -198,7 +209,11 @@ class SymbolicPredicateHeads(nn.Module):
         """
         global_features = self._compute_global_features(features)
         logits = self.predicate_head(global_features)
-        predicates = gumbel_sigmoid(logits, temperature=temperature)
+        predicates = gumbel_sigmoid(
+            logits, 
+            temperature=temperature,
+            deterministic=not self.training
+        )
         
         return predicates, logits
     
