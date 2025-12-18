@@ -74,8 +74,11 @@ training:
   msre_lr_multiplier: 10.0  # MSRE also needs higher LR
   
   # Temperature schedule (still needed for DSC attention)
+  # CRITICAL: Don't go below 0.5 - causes attention collapse and NaN!
+  # Test showed temperature 0.1 causes numerical instability when 
+  # attention becomes too sharp (delta function -> log(0) -> NaN)
   temperature_start: 1.0
-  temperature_end: 0.1
+  temperature_end: 0.5
   
   # ============================================================
   # MINIMAL LOSS: Task loss with class weighting
@@ -114,7 +117,7 @@ training:
   lambda_act: 0.0               # OFF - no ACT
   
   # Clue regularization (ENABLED to prevent 0-clue collapse)
-  min_clues: 2.0                # At least 2 clues should be active
+  min_clues: 1.0                # At least 1 clues should be active
   min_clue_weight: 5.0          # Strong penalty for < 2 clues
   ponder_weight: 0.01           # Small cost per clue (efficiency)
   entropy_ponder_weight: 0.0    # No entropy pondering
