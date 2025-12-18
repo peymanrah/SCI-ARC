@@ -142,7 +142,7 @@ def predict_with_tta(
     stacked = torch.stack(all_predictions, dim=0)
     
     # Majority voting
-    num_classes = 11
+    num_classes = 10
     votes = F.one_hot(stacked.long(), num_classes=num_classes).sum(dim=0)  # (B, H, W, num_classes)
     final_pred = votes.argmax(dim=-1)  # (B, H, W)
     
@@ -494,7 +494,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> RLAN:
     model = RLAN(
         hidden_dim=model_config.get('hidden_dim', 128),
         num_colors=model_config.get('num_colors', 10),
-        num_classes=model_config.get('num_classes', 11),
+        num_classes=model_config.get('num_classes', 10),
         max_clues=model_config.get('max_clues', 5),
         num_predicates=model_config.get('num_predicates', 8),
         num_solver_steps=model_config.get('num_solver_steps', 6),

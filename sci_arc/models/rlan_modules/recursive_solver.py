@@ -232,7 +232,7 @@ class RecursiveSolver(nn.Module):
     def __init__(
         self,
         hidden_dim: int = 128,
-        num_classes: int = 11,
+        num_classes: int = 10,
         num_steps: int = 6,
         num_predicates: int = 8,
         num_colors: int = 10,
@@ -245,7 +245,7 @@ class RecursiveSolver(nn.Module):
         """
         Args:
             hidden_dim: Feature dimension
-            num_classes: Output classes (10 colors + background)
+            num_classes: Output classes (10 colors, 0-9)
             num_steps: Number of refinement iterations (T)
             num_predicates: Number of predicate inputs
             num_colors: Number of input colors (for count embedding)

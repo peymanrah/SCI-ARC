@@ -174,7 +174,7 @@ class TestDSCGradientFlow:
         config = RLANConfig(
             hidden_dim=64,
             num_colors=10,
-            num_classes=11,
+            num_classes=10,
             max_grid_size=10,
             max_clues=4,
             num_predicates=4,
@@ -386,71 +386,51 @@ class TestPerSampleClueLoss:
         return True
 
 
-class TestWeightedStablemaxTRM:
+class TestWeightedStablemaxLoss:
     """
-    Test Issue 3: Class 1 Over-Prediction
+    Test WeightedStablemaxLoss with 10-class encoding.
     
-    Problem: Class 1 (color 0/black) is 70-80% of predictions vs ~10% target
-    Root Cause: With TRM encoding, class 1 was treated as FG instead of BG
-    Fix: Add use_trm_encoding flag so classes 0-1 get bg_weight_cap
+    10-class encoding: class 0 = black/BG, classes 1-9 = colors/FG
     """
     
-    def test_trm_encoding_weight_assignment(self):
-        """Verify WeightedStablemaxLoss assigns correct weights with TRM encoding."""
+    def test_weight_assignment(self):
+        """Verify WeightedStablemaxLoss assigns correct weights."""
         print("\n" + "=" * 70)
-        print("TEST: TRM Encoding Weight Assignment")
+        print("TEST: 10-Class Weight Assignment")
         print("=" * 70)
         
-        B, C, H, W = 2, 11, 8, 8  # 11 classes for TRM
+        B, C, H, W = 2, 10, 8, 8  # 10 classes
         
-        # Create loss with TRM encoding
-        loss_trm = WeightedStablemaxLoss(
+        # Create loss
+        loss_fn = WeightedStablemaxLoss(
             bg_weight_cap=1.0,
             fg_weight_cap=10.0,
             min_class_weight=0.1,
-            use_trm_encoding=True,
-        )
-        
-        # Create loss without TRM encoding (original)
-        loss_orig = WeightedStablemaxLoss(
-            bg_weight_cap=1.0,
-            fg_weight_cap=10.0,
-            min_class_weight=0.1,
-            use_trm_encoding=False,
         )
         
         # Create imbalanced targets (typical ARC distribution)
-        # Class 0 (boundary): 10%, Class 1 (black): 60%, Others: 30%
+        # Class 0 (black): 60%, Others: 40%
         targets = torch.zeros(B, H, W, dtype=torch.long)
-        targets[:, :, :5] = 1  # 60% black (class 1)
-        targets[:, 0, :] = 0   # 10% boundary (class 0)
-        targets[:, :, 5:] = torch.randint(2, 11, (B, H, 3))  # 30% colors
+        targets[:, :, :5] = 0  # 60% black (class 0)
+        targets[:, :, 5:] = torch.randint(1, 10, (B, H, 3))  # 40% colors
         
         logits = torch.randn(B, C, H, W, requires_grad=True)
         
         # Compute loss
-        loss_val_trm = loss_trm(logits, targets)
-        loss_val_orig = loss_orig(logits.detach().clone().requires_grad_(True), targets)
+        loss_val = loss_fn(logits, targets)
         
-        print(f"\n  TRM Encoding Class Assignments:")
-        print(f"    Class 0 (boundary): BG weight cap = 1.0")
-        print(f"    Class 1 (color 0/black): BG weight cap = 1.0  <-- KEY FIX!")
-        print(f"    Classes 2-10 (colors 1-9): FG weight cap = 10.0")
+        print(f"\n  10-Class Encoding Weight Assignments:")
+        print(f"    Class 0 (black): BG weight cap = 1.0")
+        print(f"    Classes 1-9 (colors): FG weight cap = 10.0")
         
-        print(f"\n  Original Encoding Class Assignments:")
-        print(f"    Class 0 (color 0/black): BG weight cap = 1.0")
-        print(f"    Classes 1-9 (colors 1-9): FG weight cap = 10.0")
+        print(f"\n  Loss value: {loss_val.item():.4f}")
         
-        print(f"\n  Loss values:")
-        print(f"    With TRM encoding: {loss_val_trm.item():.4f}")
-        print(f"    Without TRM encoding: {loss_val_orig.item():.4f}")
+        # The key insight: class 0 gets LOW weight (1.0)
+        # Classes 1-9 get HIGH weight (up to 10.0)
+        # This prevents the model from just predicting background
         
-        # The key insight: with TRM encoding, class 1 gets LOW weight (1.0)
-        # This prevents the model from being rewarded for predicting class 1
-        # even when it's wrong, because the gradient is capped
-        
-        print(f"\n  [OK] TRM encoding correctly treats class 1 as background")
-        print(f"    This prevents over-prediction of black/class-1")
+        print(f"\n  [OK] 10-class encoding correctly weights BG vs FG")
+        print(f"    This prevents over-prediction of black/class-0")
         
         return True
     
@@ -460,20 +440,19 @@ class TestWeightedStablemaxTRM:
         print("TEST: Class Weight Gradient Flow")
         print("=" * 70)
         
-        B, C, H, W = 2, 11, 4, 4
+        B, C, H, W = 2, 10, 4, 4  # 10 classes
         
         loss_fn = WeightedStablemaxLoss(
             bg_weight_cap=1.0,
             fg_weight_cap=10.0,
             min_class_weight=0.1,
-            use_trm_encoding=True,
         )
         
         # Create targets with equal class distribution
         targets = torch.zeros(B, H, W, dtype=torch.long)
-        targets[0, :2, :] = 1  # Class 1 (black/BG)
+        targets[0, :2, :] = 0  # Class 0 (black/BG)
         targets[0, 2:, :] = 2  # Class 2 (FG)
-        targets[1, :2, :] = 1
+        targets[1, :2, :] = 0
         targets[1, 2:, :] = 5  # Class 5 (FG)
         
         # Create logits that are wrong for all classes
@@ -489,17 +468,17 @@ class TestWeightedStablemaxTRM:
         # Check gradient magnitudes for different target classes
         # FG classes should have larger gradients
         
-        # Gradient for class 1 (BG) pixels
-        bg_mask = (targets == 1).float().unsqueeze(1)  # (B, 1, H, W)
-        bg_grad = (logits.grad.abs() * bg_mask).sum() / bg_mask.sum()
+        # Gradient for class 0 (BG) pixels
+        bg_mask = (targets == 0).float().unsqueeze(1)  # (B, 1, H, W)
+        bg_grad = (logits.grad.abs() * bg_mask).sum() / max(bg_mask.sum().item(), 1)
         
-        # Gradient for class 2+ (FG) pixels
-        fg_mask = (targets >= 2).float().unsqueeze(1)  # (B, 1, H, W)
-        fg_grad = (logits.grad.abs() * fg_mask).sum() / fg_mask.sum()
+        # Gradient for class 1+ (FG) pixels
+        fg_mask = (targets >= 1).float().unsqueeze(1)  # (B, 1, H, W)
+        fg_grad = (logits.grad.abs() * fg_mask).sum() / max(fg_mask.sum().item(), 1)
         
         print(f"\n  Gradient magnitudes by class type:")
-        print(f"    BG (class 1) avg gradient: {bg_grad.item():.6f}")
-        print(f"    FG (class 2+) avg gradient: {fg_grad.item():.6f}")
+        print(f"    BG (class 0) avg gradient: {bg_grad.item():.6f}")
+        print(f"    FG (class 1+) avg gradient: {fg_grad.item():.6f}")
         print(f"    Ratio FG/BG: {fg_grad.item() / (bg_grad.item() + 1e-10):.2f}x")
         
         # FG should have stronger gradients
@@ -569,7 +548,6 @@ class TestLossComputation:
             loss_mode='weighted_stablemax',
             bg_weight_cap=1.0,
             fg_weight_cap=10.0,
-            use_trm_encoding=True,
         )
         
         # Random initialization (high loss)
@@ -632,7 +610,7 @@ class TestOptimizerParamGroups:
         config = RLANConfig(
             hidden_dim=64,
             num_colors=10,
-            num_classes=11,
+            num_classes=10,
             max_grid_size=10,
             max_clues=4,
             num_predicates=4,
@@ -734,17 +712,17 @@ def run_all_tests():
         print(f"  [FAIL] test_rlan_loss_per_sample_integration: {e}")
         results['rlan_loss_integration'] = False
     
-    # Issue 3: Class 1 Over-Prediction
+    # Issue 3: Class Weighting
     print("\n\n" + "#" * 70)
-    print("# ISSUE 3: CLASS 1 OVER-PREDICTION")
+    print("# ISSUE 3: CLASS WEIGHTING")
     print("#" * 70)
     
-    tests_3 = TestWeightedStablemaxTRM()
+    tests_3 = TestWeightedStablemaxLoss()
     try:
-        results['trm_weights'] = tests_3.test_trm_encoding_weight_assignment()
+        results['class_weights'] = tests_3.test_weight_assignment()
     except Exception as e:
-        print(f"  [FAIL] test_trm_encoding_weight_assignment: {e}")
-        results['trm_weights'] = False
+        print(f"  [FAIL] test_weight_assignment: {e}")
+        results['class_weights'] = False
     
     try:
         results['class_gradients'] = tests_3.test_class_weight_gradient_flow()

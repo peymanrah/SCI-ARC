@@ -12,7 +12,7 @@ model:
   type: "rlan"
   hidden_dim: 128
   num_colors: 10
-  num_classes: 11   # TRM encoding: 0=boundary, 1-10=colors (shifted +1)
+  num_classes: 10   # colors 0-9 (no boundary markers needed)
   max_grid_size: 30
   
   # Task-specific (NOT capacity-dependent)

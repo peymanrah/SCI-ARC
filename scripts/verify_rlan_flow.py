@@ -87,7 +87,7 @@ from sci_arc.models import RLAN
 model = RLAN(
     hidden_dim=64,  # Small for testing
     num_colors=10,
-    num_classes=11,
+    num_classes=10,
     max_clues=3,
     num_predicates=4,
     num_solver_steps=3,
@@ -103,8 +103,8 @@ model.eval()
 with torch.no_grad():
     logits = model(x, temperature=1.0)
 
-# Note: RLAN outputs (B, C, H, W) format - 11 classes, same spatial size
-expected_shape = (batch_size, 11, grid_size, grid_size)  # (B, num_classes, H, W)
+# Note: RLAN outputs (B, C, H, W) format - 10 classes, same spatial size
+expected_shape = (batch_size, 10, grid_size, grid_size)  # (B, num_classes, H, W)
 assert logits.shape == expected_shape, f"Expected logits shape {expected_shape}, got {logits.shape}"
 print(f"  Output shape: {logits.shape} - CORRECT (B, C, H, W format)")
 

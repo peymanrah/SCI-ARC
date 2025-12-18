@@ -144,17 +144,13 @@ def create_train_loader(
     augment_enabled = augment_cfg.get('enabled', True)
     color_permutation = augment_cfg.get('color_permutation', False)
     color_permutation_prob = augment_cfg.get('color_permutation_prob', 0.3)  # Default to 30%!
-    translational_augment = augment_cfg.get('translational', True)  # TRM-style offset
+    translational_augment = augment_cfg.get('translational', True)  # Random offset augmentation
     
     # Enable augmentation tracking for debugging (verifies diversity)
     track_augmentation = config.get('logging', {}).get('track_augmentation', True)
     
-    # CRITICAL: Ignore padding in loss (like TRM) to prevent BG mode collapse
+    # CRITICAL: Ignore padding in loss to prevent BG mode collapse
     ignore_padding_in_loss = data_cfg.get('ignore_padding_in_loss', True)  # Default True!
-    
-    # TRM-STYLE ENCODING: Shift colors +1, add boundary markers (class 0)
-    # This dilutes dominant class (color 0) from ~60% to ~43%, preventing mode collapse
-    use_trm_encoding = data_cfg.get('use_trm_encoding', True)  # Default True!
     
     train_dataset = ARCDataset(
         data_cfg['train_path'],
@@ -165,8 +161,7 @@ def create_train_loader(
         translational_augment=translational_augment,
         curriculum_stage=curriculum_stage,  # Apply curriculum filtering!
         track_augmentation=track_augmentation,  # Enable for diversity logging
-        ignore_padding_in_loss=ignore_padding_in_loss,  # Ignore padding (like TRM)
-        use_trm_encoding=use_trm_encoding,  # TRM-style color shift + boundary markers
+        ignore_padding_in_loss=ignore_padding_in_loss,  # Ignore padding in loss
     )
     
     batch_size = train_cfg['batch_size']
@@ -317,10 +312,6 @@ def create_loss(config: dict) -> RLANLoss:
     """Create RLAN loss function from config."""
     train_config = config['training']
     model_config = config['model']
-    data_config = config.get('data', {})
-    
-    # Get TRM encoding flag from data config
-    use_trm_encoding = data_config.get('use_trm_encoding', True)
     
     loss_fn = RLANLoss(
         focal_gamma=train_config['focal_gamma'],
@@ -333,15 +324,14 @@ def create_loss(config: dict) -> RLANLoss:
         lambda_act=train_config.get('lambda_act', 0.1),  # ACT halting loss weight
         min_clues=train_config.get('min_clues', 2.5),  # Minimum clues to use (increased default)
         min_clue_weight=train_config.get('min_clue_weight', 5.0),  # Strong penalty for fewer clues
-        ponder_weight=train_config.get('ponder_weight', 0.02),  # Base cost per clue (REDUCED from 0.1)
-        entropy_ponder_weight=train_config.get('entropy_ponder_weight', 0.02),  # Extra cost for diffuse attention (REDUCED)
+        ponder_weight=train_config.get('ponder_weight', 0.02),  # Base cost per clue
+        entropy_ponder_weight=train_config.get('entropy_ponder_weight', 0.02),  # Extra cost for diffuse attention
         max_clues=model_config['max_clues'],
         use_stablemax=train_config.get('use_stablemax', True),
-        loss_mode=train_config.get('loss_mode', 'focal_stablemax'),  # TRM uses 'stablemax'
+        loss_mode=train_config.get('loss_mode', 'focal_stablemax'),
         # BG/FG weight caps for weighted_stablemax (CRITICAL for preventing collapse)
-        bg_weight_cap=train_config.get('bg_weight_cap', 2.0),  # Increased from 1.0
-        fg_weight_cap=train_config.get('fg_weight_cap', 5.0),  # Reduced from 10.0
-        use_trm_encoding=use_trm_encoding,  # Handle TRM encoding in class weights
+        bg_weight_cap=train_config.get('bg_weight_cap', 2.0),
+        fg_weight_cap=train_config.get('fg_weight_cap', 5.0),
     )
     
     return loss_fn
@@ -1014,7 +1004,7 @@ def train_epoch(
             # With TRM encoding: class 0=boundary, classes 1-10=colors 0-9
             with torch.no_grad():
                 preds = logits.argmax(dim=1)  # (B, H, W)
-                num_classes = logits.shape[1]  # 11 with TRM encoding, 10 without
+                num_classes = logits.shape[1]  # 10 classes (colors 0-9)
                 total_pixels = preds.numel()
                 
                 # Target distribution - use VALID pixels only (exclude -100 padding)
@@ -1056,10 +1046,9 @@ def train_epoch(
                 epoch_diagnostics['per_class_correct'] = class_correct
                 epoch_diagnostics['per_class_total'] = class_total
                 
-                # NEW: Color confusion matrix for diagnosing color prediction issues
-                # With TRM encoding: class 0=boundary, class 1=color 0 (black)
-                # Check: when model predicts FG, which color does it tend to predict?
-                fg_class_start = 2 if num_classes == 11 else 1  # Skip boundary and black
+                # Color confusion matrix for diagnosing color prediction issues
+                # 10-class encoding: class 0=black (BG), classes 1-9=colors 1-9 (FG)
+                fg_class_start = 1  # Foreground starts at class 1
                 fg_mask = test_outputs >= fg_class_start  # Foreground = colors 1-9
                 if fg_mask.sum() > 0:
                     # What colors is the model predicting for FG targets?
@@ -1124,8 +1113,7 @@ def evaluate(
     METRICS COMPUTED OVER VALID PIXELS ONLY (excluding -100 padding):
     - pixel_accuracy: correct / total valid pixels
     - task_accuracy: tasks where ALL valid pixels are correct
-    - non_bg_accuracy: accuracy on foreground pixels only (colors 1-9)
-    - fg_accuracy: same as non_bg_accuracy (TRM-aware)
+    - fg_accuracy: accuracy on foreground pixels only (colors 1-9)
     """
     model.eval()
     
@@ -1135,14 +1123,12 @@ def evaluate(
     correct_tasks = 0
     
     # Additional metrics for debugging
-    total_fg_correct = 0  # Foreground (colors 1-9, not boundary/black)
+    # 10-class encoding: class 0=black (BG), classes 1-9=colors 1-9 (FG)
+    total_fg_correct = 0  # Foreground (colors 1-9)
     total_fg_pixels = 0
-    total_boundary_correct = 0  # Boundary markers (class 0 with TRM)
-    total_boundary_pixels = 0
-    total_bg_correct = 0  # Background/black (class 1 with TRM, class 0 without)
+    total_bg_correct = 0  # Background/black (class 0)
     total_bg_pixels = 0
     
-    # Detect TRM encoding from model output (11 classes = TRM, 10 = original)
     num_classes = None  # Will be set from first batch
     color_predictions = None  # Will initialize after knowing num_classes
     color_targets = None
@@ -1179,15 +1165,12 @@ def evaluate(
             
             # Initialize color tracking on first batch (after we know num_classes)
             if num_classes is None:
-                num_classes = logits.shape[1]  # 11 with TRM encoding, 10 without
+                num_classes = logits.shape[1]  # 10 classes (colors 0-9)
                 color_predictions = [0] * num_classes
                 color_targets = [0] * num_classes
-                use_trm = (num_classes == 11)
-                # With TRM: 0=boundary, 1=black(bg), 2-10=colors 1-9 (fg)
-                # Without TRM: 0=black(bg), 1-9=colors 1-9 (fg)
-                fg_start = 2 if use_trm else 1
-                bg_class = 1 if use_trm else 0
-                boundary_class = 0 if use_trm else None
+                # 10-class encoding: 0=black(bg), 1-9=colors 1-9 (fg)
+                fg_start = 1
+                bg_class = 0
             
             # CRITICAL: Only evaluate on VALID pixels (exclude -100 padding)
             valid_mask = test_outputs >= 0  # Exclude -100 padding
@@ -1199,7 +1182,7 @@ def evaluate(
                 total_correct += correct_mask.sum().item()
                 total_valid_pixels += batch_valid_pixels
                 
-                # Foreground accuracy (colors 1-9, excluding boundary and black)
+                # Foreground accuracy (colors 1-9)
                 fg_mask = (test_outputs >= fg_start) & valid_mask
                 if fg_mask.any():
                     fg_correct = (correct_mask & fg_mask).sum().item()
@@ -1212,14 +1195,6 @@ def evaluate(
                     bg_correct = (correct_mask & bg_mask).sum().item()
                     total_bg_correct += bg_correct
                     total_bg_pixels += bg_mask.sum().item()
-                
-                # Boundary accuracy (class 0 with TRM encoding)
-                if boundary_class is not None:
-                    boundary_mask = (test_outputs == boundary_class) & valid_mask
-                    if boundary_mask.any():
-                        boundary_correct = (correct_mask & boundary_mask).sum().item()
-                        total_boundary_correct += boundary_correct
-                        total_boundary_pixels += boundary_mask.sum().item()
                 
                 # Color distribution tracking (over valid pixels only)
                 valid_preds = predictions[valid_mask]
@@ -1273,28 +1248,16 @@ def evaluate(
     task_accuracy = correct_tasks / max(total_tasks, 1)
     fg_accuracy = total_fg_correct / max(total_fg_pixels, 1)
     bg_accuracy = total_bg_correct / max(total_bg_pixels, 1)
-    boundary_accuracy = total_boundary_correct / max(total_boundary_pixels, 1)
     
     # Calculate class distribution ratios (over valid pixels)
+    # 10-class encoding: class 0=bg/black, classes 1-9=foreground
     total_valid = sum(color_predictions) if color_predictions else 1
     total_target = sum(color_targets) if color_targets else 1
     
-    # With TRM: class 0=boundary, class 1=bg/black
-    # Without TRM: class 0=bg/black
-    if num_classes == 11:  # TRM encoding
-        boundary_ratio_pred = color_predictions[0] / max(total_valid, 1)
-        boundary_ratio_target = color_targets[0] / max(total_target, 1)
-        bg_ratio_pred = color_predictions[1] / max(total_valid, 1)
-        bg_ratio_target = color_targets[1] / max(total_target, 1)
-        fg_ratio_pred = sum(color_predictions[2:]) / max(total_valid, 1)
-        fg_ratio_target = sum(color_targets[2:]) / max(total_target, 1)
-    else:  # Original encoding
-        boundary_ratio_pred = 0.0
-        boundary_ratio_target = 0.0
-        bg_ratio_pred = color_predictions[0] / max(total_valid, 1) if color_predictions else 0
-        bg_ratio_target = color_targets[0] / max(total_target, 1) if color_targets else 0
-        fg_ratio_pred = sum(color_predictions[1:]) / max(total_valid, 1) if color_predictions else 0
-        fg_ratio_target = sum(color_targets[1:]) / max(total_target, 1) if color_targets else 0
+    bg_ratio_pred = color_predictions[0] / max(total_valid, 1) if color_predictions else 0
+    bg_ratio_target = color_targets[0] / max(total_target, 1) if color_targets else 0
+    fg_ratio_pred = sum(color_predictions[1:]) / max(total_valid, 1) if color_predictions else 0
+    fg_ratio_target = sum(color_targets[1:]) / max(total_target, 1) if color_targets else 0
     
     # Color diversity (how many colors are actually predicted vs targets)
     colors_used = sum(1 for c in color_predictions if c > 0) if color_predictions else 0
@@ -1310,13 +1273,10 @@ def evaluate(
         # Primary metrics (computed over valid pixels only)
         'pixel_accuracy': pixel_accuracy,
         'task_accuracy': task_accuracy,
-        'fg_accuracy': fg_accuracy,  # Renamed from non_bg_accuracy for clarity
+        'fg_accuracy': fg_accuracy,
         'bg_accuracy': bg_accuracy,
-        'boundary_accuracy': boundary_accuracy,
         
         # Class distribution ratios (over valid pixels)
-        'boundary_ratio_pred': boundary_ratio_pred,
-        'boundary_ratio_target': boundary_ratio_target,
         'bg_ratio_pred': bg_ratio_pred,
         'bg_ratio_target': bg_ratio_target,
         'fg_ratio_pred': fg_ratio_pred,
@@ -1331,7 +1291,6 @@ def evaluate(
         'total_valid_pixels': total_valid_pixels,
         'total_fg_pixels': total_fg_pixels,
         'total_bg_pixels': total_bg_pixels,
-        'total_boundary_pixels': total_boundary_pixels,
         
         # Module metrics
         'dsc_entropy': dsc_entropy_sum / max(num_eval_samples, 1),
@@ -1493,30 +1452,24 @@ Config Overrides:
         print("Starting fresh training")
     
     # ================================================================
-    # VALIDATE num_classes vs use_trm_encoding CONSISTENCY
+    # VALIDATE num_classes = 10 (colors 0-9, no boundary markers)
     # ================================================================
-    # TRM encoding shifts colors by +1 and adds boundary class 0:
-    #   - Without TRM: classes 0-9 (10 colors) → num_classes=10
-    #   - With TRM: class 0 (boundary) + classes 1-10 (colors) → num_classes=11
-    # Mismatch causes CUDA scatter/gather index out of bounds errors!
-    data_cfg = config.get('data', {})
+    # RLAN uses 2D spatial structure so boundary markers are not needed.
+    # Colors 0-9 map directly to classes 0-9.
     model_cfg = config.get('model', {})
-    use_trm_encoding = data_cfg.get('use_trm_encoding', True)  # Defaults to True
-    expected_classes = 11 if use_trm_encoding else 10
     actual_classes = model_cfg.get('num_classes', 10)
     
-    if actual_classes != expected_classes:
+    if actual_classes != 10:
         print(f"\n{'!'*60}")
         print(f"WARNING: num_classes MISMATCH DETECTED!")
         print(f"{'!'*60}")
-        print(f"  use_trm_encoding: {use_trm_encoding}")
-        print(f"  Expected num_classes: {expected_classes}")
+        print(f"  Expected num_classes: 10 (colors 0-9)")
         print(f"  Config num_classes: {actual_classes}")
-        print(f"  AUTO-FIXING: Setting num_classes={expected_classes}")
+        print(f"  AUTO-FIXING: Setting num_classes=10")
         print(f"{'!'*60}\n")
-        config['model']['num_classes'] = expected_classes
+        config['model']['num_classes'] = 10
     else:
-        print(f"\nnum_classes validation: OK (TRM={use_trm_encoding}, classes={actual_classes})")
+        print(f"\nnum_classes validation: OK (10 classes for colors 0-9)")
     
     # Create model
     model = create_model(config)
@@ -2193,12 +2146,11 @@ Config Overrides:
                 print(f"  Pred %: [{pred_str}]")
                 print(f"  Target %: [{tgt_str}]")
                 
-                # Check for background collapse (with TRM: class 0 is boundary, class 1 is black)
-                # Determine if TRM encoding based on number of classes
+                # Check for background collapse
+                # 10-class encoding: class 0 is black (BG), classes 1-9 are FG
                 num_classes = len(pred_pcts)
-                use_trm = (num_classes == 11)
-                bg_class = 1 if use_trm else 0  # Black/background class
-                fg_start = 2 if use_trm else 1  # First foreground color class
+                bg_class = 0  # Black/background class
+                fg_start = 1  # First foreground color class
                 
                 if len(pred_pcts) > bg_class and len(target_pcts) > bg_class:
                     bg_excess = pred_pcts[bg_class] - target_pcts[bg_class]
@@ -2219,7 +2171,7 @@ Config Overrides:
                 class_total = diagnostics.get('per_class_total', [])
                 if class_correct and class_total:
                     class_accs = []
-                    num_classes = len(class_correct)  # Use actual num_classes (11 with TRM, 10 without)
+                    num_classes = len(class_correct)
                     for c in range(num_classes):
                         if c < len(class_total) and class_total[c] > 0:
                             acc = class_correct[c] / class_total[c] * 100
@@ -2357,20 +2309,15 @@ Config Overrides:
                     print(f"      Training model is learning but EMA hasn't caught up yet")
             
             # Core metrics (all computed over VALID pixels only, excluding padding)
-            num_classes = eval_metrics.get('num_classes', 10)
-            use_trm = (num_classes == 11)
-            print(f"  --- Evaluation Metrics (Valid Pixels Only, TRM={use_trm}) ---")
+            # 10-class encoding: class 0=black (BG), classes 1-9=colors (FG)
+            print(f"  --- Evaluation Metrics (Valid Pixels Only) ---")
             print(f"  Pixel Accuracy: {eval_metrics['pixel_accuracy']:.4f}")
             print(f"  Task Accuracy: {eval_metrics['task_accuracy']:.4f}")
             print(f"  FG Accuracy (colors 1-9): {eval_metrics['fg_accuracy']:.4f}")
             print(f"  BG Accuracy (black): {eval_metrics['bg_accuracy']:.4f}")
-            if use_trm:
-                print(f"  Boundary Accuracy: {eval_metrics['boundary_accuracy']:.4f}")
             
             # Class distribution ratios
             print(f"  Class Ratios (pred/target):")
-            if use_trm:
-                print(f"    Boundary: {eval_metrics['boundary_ratio_pred']:.1%} / {eval_metrics['boundary_ratio_target']:.1%}")
             print(f"    BG (black): {eval_metrics['bg_ratio_pred']:.1%} / {eval_metrics['bg_ratio_target']:.1%}")
             print(f"    FG (colors): {eval_metrics['fg_ratio_pred']:.1%} / {eval_metrics['fg_ratio_target']:.1%}")
             print(f"  Colors Used (pred/target): {eval_metrics['colors_used']} / {eval_metrics['colors_target']}")

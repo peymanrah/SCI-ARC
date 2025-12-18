@@ -268,7 +268,7 @@ class TestRecursiveSolver:
     def solver(self):
         return RecursiveSolver(
             hidden_dim=64,
-            num_classes=11,
+            num_classes=10,
             num_steps=3,
             num_predicates=8,
             num_colors=10,
@@ -283,8 +283,8 @@ class TestRecursiveSolver:
         
         logits = solver(clue_features, count_embedding, predicates, input_grid)
         
-        assert logits.shape == (2, 11, 10, 10), \
-            f"Expected (2, 11, 10, 10), got {logits.shape}"
+        assert logits.shape == (2, 10, 10, 10), \
+            f"Expected (2, 10, 10, 10), got {logits.shape}"
     
     def test_all_steps_output(self, solver):
         """Test that return_all_steps returns correct number of predictions."""

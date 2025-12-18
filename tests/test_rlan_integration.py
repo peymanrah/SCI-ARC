@@ -20,7 +20,7 @@ class TestRLANIntegration:
         return RLAN(
             hidden_dim=64,
             num_colors=10,
-            num_classes=11,
+            num_classes=10,
             max_clues=3,
             num_predicates=4,
             num_solver_steps=2,
@@ -32,8 +32,8 @@ class TestRLANIntegration:
         input_grid = torch.randint(0, 10, (2, 15, 15))
         logits = model(input_grid)
         
-        assert logits.shape == (2, 11, 15, 15), \
-            f"Expected (2, 11, 15, 15), got {logits.shape}"
+        assert logits.shape == (2, 10, 15, 15), \
+            f"Expected (2, 10, 15, 15), got {logits.shape}"
     
     def test_forward_with_intermediates(self, model):
         """Test forward pass with intermediate outputs."""
@@ -50,7 +50,7 @@ class TestRLANIntegration:
         assert "all_logits" in outputs
         
         # Check shapes
-        assert outputs["logits"].shape == (2, 11, 15, 15)
+        assert outputs["logits"].shape == (2, 10, 15, 15)
         assert outputs["centroids"].shape == (2, 3, 2)  # 3 clues, 2 coords
         assert outputs["attention_maps"].shape == (2, 3, 15, 15)
         assert outputs["stop_logits"].shape == (2, 3)
@@ -67,8 +67,8 @@ class TestRLANIntegration:
             input_grid = torch.randint(0, 10, (1, h, w))
             logits = model(input_grid)
             
-            assert logits.shape == (1, 11, h, w), \
-                f"Size ({h}, {w}): Expected (1, 11, {h}, {w}), got {logits.shape}"
+            assert logits.shape == (1, 10, h, w), \
+                f"Size ({h}, {w}): Expected (1, 10, {h}, {w}), got {logits.shape}"
     
     def test_batch_sizes(self, model):
         """Test various batch sizes."""
@@ -82,7 +82,7 @@ class TestRLANIntegration:
     def test_gradient_flow_all_params(self, model):
         """Test that gradients flow to all parameters (with context for full coverage)."""
         input_grid = torch.randint(0, 10, (2, 10, 10))
-        target = torch.randint(0, 11, (2, 10, 10))
+        target = torch.randint(0, 10, (2, 10, 10))
         
         # Use training context to exercise context_encoder
         train_inputs = torch.randint(0, 10, (2, 3, 10, 10))
@@ -137,7 +137,7 @@ class TestRLANIntegration:
         
         assert prediction.shape == (2, 10, 10)
         assert prediction.dtype == torch.int64 or prediction.dtype == torch.long
-        assert (prediction >= 0).all() and (prediction < 11).all()
+        assert (prediction >= 0).all() and (prediction < 10).all()
     
     def test_count_parameters(self, model):
         """Test parameter counting."""
@@ -215,7 +215,7 @@ class TestRLANEdgeCases:
         input_grid = torch.randint(0, 10, (1, 1, 1))
         
         logits = model(input_grid)
-        assert logits.shape == (1, 11, 1, 1)
+        assert logits.shape == (1, 10, 1, 1)
     
     def test_uniform_color_grid(self):
         """Test with grid of single color."""
@@ -223,7 +223,7 @@ class TestRLANEdgeCases:
         input_grid = torch.zeros(2, 10, 10, dtype=torch.long)
         
         outputs = model(input_grid, return_intermediates=True)
-        assert outputs["logits"].shape == (2, 11, 10, 10)
+        assert outputs["logits"].shape == (2, 10, 10, 10)
     
     def test_all_different_colors(self):
         """Test with all colors present."""
@@ -232,7 +232,7 @@ class TestRLANEdgeCases:
         input_grid = torch.arange(10).repeat(10).reshape(1, 10, 10) % 10
         
         outputs = model(input_grid.long(), return_intermediates=True)
-        assert outputs["logits"].shape == (1, 11, 10, 10)
+        assert outputs["logits"].shape == (1, 10, 10, 10)
     
     def test_rectangular_grid(self):
         """Test with highly rectangular grid."""
@@ -241,12 +241,12 @@ class TestRLANEdgeCases:
         # Very wide
         input_wide = torch.randint(0, 10, (1, 3, 30))
         logits_wide = model(input_wide)
-        assert logits_wide.shape == (1, 11, 3, 30)
+        assert logits_wide.shape == (1, 10, 3, 30)
         
         # Very tall
         input_tall = torch.randint(0, 10, (1, 30, 3))
         logits_tall = model(input_tall)
-        assert logits_tall.shape == (1, 11, 30, 3)
+        assert logits_tall.shape == (1, 10, 30, 3)
 
 
 class TestRLANMemory:
@@ -258,7 +258,7 @@ class TestRLANMemory:
         optimizer = torch.optim.Adam(model.parameters())
         
         input_grid = torch.randint(0, 10, (4, 10, 10))
-        target = torch.randint(0, 11, (4, 10, 10))
+        target = torch.randint(0, 10, (4, 10, 10))
         
         # Run a few training steps
         for _ in range(5):
@@ -280,7 +280,7 @@ class TestRLANMemory:
         logits = model(input_grid)
         
         assert logits.device.type == "cuda"
-        assert logits.shape == (2, 11, 10, 10)
+        assert logits.shape == (2, 10, 10, 10)
 
 
 if __name__ == "__main__":

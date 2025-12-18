@@ -347,7 +347,7 @@ def test_solver(device: torch.device):
     print("="*80)
     
     solver = RecursiveSolver(
-        hidden_dim=128, num_classes=11, num_steps=6,
+        hidden_dim=128, num_classes=10, num_steps=6,
         num_predicates=8, num_colors=10, dropout=0.0
     ).to(device)
     

@@ -24,7 +24,7 @@ model:
   type: "rlan"
   hidden_dim: 256
   num_colors: 10
-  num_classes: 11  # 0=boundary, 1-10=colors (TRM-style encoding)
+  num_classes: 10  # colors 0-9 (no boundary markers needed for 2D spatial structure)
   max_grid_size: 30
   
   max_clues: 6
@@ -137,16 +137,10 @@ data:
   
   max_grid_size: 30
   
-  # CRITICAL: Ignore padding in loss (like TRM)
+  # CRITICAL: Ignore padding in loss
   # Without this, padding pixels (93% of grid) dominate the loss
   # and cause mode collapse to background-only predictions
   ignore_padding_in_loss: true
-  
-  # TRM-STYLE ENCODING (prevents mode collapse)
-  # 1. Shift colors by +1: colors 0-9 → classes 1-10
-  # 2. Add boundary markers (class 0) at grid edges
-  # This dilutes dominant class (color 0) from 60% → ~43%
-  use_trm_encoding: true
   
   num_workers: 24
   pin_memory: true

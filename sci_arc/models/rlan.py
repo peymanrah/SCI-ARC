@@ -58,7 +58,7 @@ class RLANConfig:
     # Core dimensions
     hidden_dim: int = 128
     num_colors: int = 10
-    num_classes: int = 11  # 10 colors + background
+    num_classes: int = 10  # 10 colors (0-9), no boundary markers needed
     max_grid_size: int = 30
     
     # DSC parameters
@@ -132,7 +132,7 @@ class RLAN(nn.Module):
         self,
         hidden_dim: int = 128,
         num_colors: int = 10,
-        num_classes: int = 11,
+        num_classes: int = 10,
         max_grid_size: int = 30,
         max_clues: int = 5,
         num_predicates: int = 8,
@@ -147,7 +147,7 @@ class RLAN(nn.Module):
         Args:
             hidden_dim: Feature dimension throughout the model
             num_colors: Number of ARC colors (0-9)
-            num_classes: Output classes (typically 11: 10 colors + background)
+            num_classes: Output classes (10 colors, no boundary markers)
             max_grid_size: Maximum grid dimension (ARC max is 30)
             max_clues: Maximum spatial anchors to discover
             num_predicates: Number of binary predicates
