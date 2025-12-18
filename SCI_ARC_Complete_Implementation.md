@@ -2840,3 +2840,113 @@ When CISL is enabled, training logs these additional metrics to wandb:
 - `train/cisl_consist` - Within-task consistency loss
 - `train/cisl_content_inv` - Content invariance loss (was cisl_color_inv)
 - `train/cisl_variance` - Batch variance loss
+
+---
+
+## 🔬 RLAN Ablation Study Findings (January 2025)
+
+Comprehensive ablation study on RLAN training stability. These findings are now applied to production configs.
+
+### Key Findings Summary
+
+| Component | Finding | Recommendation |
+|-----------|---------|----------------|
+| **Scheduler** | Causes NaN via LR spikes during warmup/transitions | `scheduler: "none"` for max stability |
+| **LR Multipliers** | 0.2 too low; recovery requires epochs | All multipliers = 1.0 |
+| **LCR Loss** | No benefit observed | Disabled (`lambda_lcr: 0.0`) |
+| **SPH Loss** | No benefit observed | Disabled (`lambda_sph: 0.0`) |
+| **Sample Caching** | Repeated samples allow gradient accumulation | `cache_samples: true` |
+| **Loss Function** | weighted_stablemax best for stability | Keep as default |
+
+### NaN Root Cause Analysis
+
+NaN was caused by **scheduler + warmup interaction**, NOT by grid expansion or architecture:
+- Warmup → very low LR (1e-6) → weights barely update
+- Warmup ends → LR jumps to 3e-4 (300x increase)
+- Gradients from large LR × accumulated errors → explosion
+
+**Solution**: Use constant LR for maximum stability.
+
+### Two-Phase Training Workflow
+
+**Phase 1: Cached Training (Maximum Stability)**
+```bash
+python scripts/train_rlan.py --config configs/rlan_stable.yaml
+```
+
+Config (`rlan_stable.yaml`):
+- `cache_samples: true` - Pre-generate samples
+- `num_cached_samples: 32000` - Large sample cache
+- `scheduler: "none"` - Constant learning rate
+- All auxiliary losses disabled
+
+**Phase 2: On-the-Fly Training (Maximum Diversity)**
+```bash
+python scripts/train_rlan.py --config configs/rlan_onthefly.yaml \
+    --resume checkpoints/rlan_stable/best.pt \
+    --reset-optimizer
+```
+
+Config (`rlan_onthefly.yaml`):
+- `cache_samples: false` - Fresh samples every epoch
+- `learning_rate: 1e-4` - Lower LR for fine-tuning
+- `scheduler: "cosine"` - Gradual decay now safe
+
+### Production Config: rlan_stable.yaml
+
+```yaml
+model:
+  hidden_dim: 256
+  num_structure_slots: 8
+  max_objects: 16
+  use_context_encoder: true   # Core architecture
+  use_dsc: true               # Deep Supervision
+  use_msre: true              # Multi-Scale
+  use_lcr: false              # DISABLED
+  use_sph: false              # DISABLED
+
+training:
+  learning_rate: 3e-4
+  scheduler: "none"           # Constant LR for stability
+  loss_type: "weighted_stablemax"
+  use_ema: true
+  ema_decay: 0.999
+
+  # Caching for repeated sample exposure
+  cache_samples: true
+  num_cached_samples: 32000
+  
+  # ALL auxiliary losses disabled - pure task loss
+  lambda_temporal_consistency: 0.0
+  lambda_diversity: 0.0
+  lambda_scl: 0.0
+  lambda_lcr: 0.0
+  lambda_sph: 0.0
+```
+
+### Grid Expansion Test Results
+
+Proven 100% accuracy on challenging grid expansion tasks with NO NaN:
+
+| Task | Input | Output | Expansion | Accuracy | Epochs |
+|------|-------|--------|-----------|----------|--------|
+| f5b8619d | 6×6 | 12×12 | 4× | 100% | 94 |
+| b91ae062 | 3×3 | 12×12 | 16× | 100% | 98 |
+| 007bbfb7 | 3×3 | 9×9 | 9× (tiling) | 100% | 132 |
+
+All tests used `scheduler: "none"` and cached samples.
+
+### Checkpoint Resume Best Practices
+
+When switching from Phase 1 to Phase 2:
+1. Use `--resume checkpoints/rlan_stable/best.pt` to load model weights
+2. Use `--reset-optimizer` to reinitialize optimizer with new LR
+3. EMA automatically reinitializes from loaded model weights
+4. Training continues from epoch 0 with Phase 2 config
+
+```python
+# load_checkpoint() supports:
+load_checkpoint(model, optimizer, scheduler, path, reset_optimizer=True)
+# reset_optimizer=True: Load model weights only, skip optimizer/scheduler state
+```
+

@@ -92,6 +92,9 @@ class ARCDataset(Dataset):
         curriculum_stage: int = 0,  # 0=all, 1=easy, 2=medium, 3=hard
         track_augmentation: bool = True,  # Track augmentation stats for debugging
         ignore_padding_in_loss: bool = True,  # NEW: Use -100 for padding in targets
+        cache_samples: bool = False,  # NEW: Cache pre-generated samples for memorization
+        num_cached_samples: int = 32000,  # NEW: Number of cached samples to generate
+        cache_path: str = None,  # NEW: Path to load/save cached samples
     ):
         """
         Initialize ARCDataset.
@@ -109,6 +112,12 @@ class ARCDataset(Dataset):
             track_augmentation: Whether to return augmentation metadata for logging
             ignore_padding_in_loss: If True, use -100 as padding value for target grids
                                     so loss ignores padding pixels
+            cache_samples: If True, pre-generate cached samples for consistent training
+                          This allows the model to see the SAME samples multiple epochs
+                          which is REQUIRED for learning hard tasks (>100 epochs needed)
+            num_cached_samples: Number of samples to pre-generate (default: 32000)
+                               With 400 tasks, this is 80 augmented versions per task
+            cache_path: Path to save/load cached samples (for persistence across runs)
         """
         self.data_path = Path(data_path)
         self.max_size = max_size
@@ -119,6 +128,12 @@ class ARCDataset(Dataset):
         self.curriculum_stage = curriculum_stage
         self.track_augmentation = track_augmentation
         self.ignore_padding_in_loss = ignore_padding_in_loss
+        self.cache_samples = cache_samples
+        self.num_cached_samples = num_cached_samples
+        self.cache_path = Path(cache_path) if cache_path else None
+        
+        # Cached sample storage
+        self._cached_samples: List[Dict[str, Any]] = []
         
         # Load tasks
         self.tasks = self._load_tasks()
@@ -128,6 +143,10 @@ class ARCDataset(Dataset):
             self.tasks = self._filter_by_difficulty(curriculum_stage)
         
         print(f"Loaded {len(self.tasks)} tasks from {data_path}")
+        
+        # Build cache if enabled
+        if cache_samples:
+            self._build_cache()
     
     def _load_tasks(self) -> List[Dict]:
         """Load tasks from JSON file or directory."""
@@ -168,11 +187,148 @@ class ARCDataset(Dataset):
         
         return tasks
     
+    def _build_cache(self):
+        """
+        Build cache of pre-generated samples for consistent training.
+        
+        When cache_samples=True, we generate `num_cached_samples` augmented
+        versions upfront. This ensures the model sees the SAME samples every
+        epoch, which is CRITICAL for learning hard tasks that need >100 epochs.
+        
+        The cache can optionally be saved to disk for persistence.
+        """
+        import time
+        
+        # Try to load from disk first
+        if self.cache_path and self.cache_path.exists():
+            print(f"Loading cached samples from {self.cache_path}...")
+            try:
+                import pickle
+                with open(self.cache_path, 'rb') as f:
+                    self._cached_samples = pickle.load(f)
+                print(f"Loaded {len(self._cached_samples)} cached samples from disk")
+                return
+            except Exception as e:
+                print(f"Warning: Failed to load cache: {e}")
+        
+        print(f"Building cache with {self.num_cached_samples} samples...")
+        start_time = time.time()
+        
+        # Calculate samples per task
+        num_tasks = len(self.tasks)
+        samples_per_task = max(1, self.num_cached_samples // num_tasks)
+        
+        self._cached_samples = []
+        for task_idx in range(num_tasks):
+            for aug_idx in range(samples_per_task):
+                sample = self._generate_sample(task_idx)
+                self._cached_samples.append(sample)
+        
+        elapsed = time.time() - start_time
+        print(f"Cached {len(self._cached_samples)} samples in {elapsed:.1f}s "
+              f"({samples_per_task} per task)")
+        
+        # Save to disk if path specified
+        if self.cache_path:
+            print(f"Saving cache to {self.cache_path}...")
+            try:
+                import pickle
+                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.cache_path, 'wb') as f:
+                    pickle.dump(self._cached_samples, f)
+                print(f"Cache saved successfully")
+            except Exception as e:
+                print(f"Warning: Failed to save cache: {e}")
+    
+    def _generate_sample(self, task_idx: int) -> Dict[str, Any]:
+        """Generate a single sample with current augmentation settings."""
+        task = self.tasks[task_idx]
+        
+        # Parse train pairs
+        train_inputs = []
+        train_outputs = []
+        for pair in task['train']:
+            inp = np.array(pair['input'], dtype=np.int64)
+            out = np.array(pair['output'], dtype=np.int64)
+            train_inputs.append(inp)
+            train_outputs.append(out)
+        
+        # Parse test pairs (use first test case)
+        test_pair = task['test'][0] if task['test'] else task['train'][0]
+        test_input = np.array(test_pair['input'], dtype=np.int64)
+        test_output = np.array(test_pair.get('output', test_pair['input']), dtype=np.int64)
+        
+        # Initialize augmentation tracking
+        aug_info = {
+            'dihedral_id': 0,
+            'color_perm_applied': False,
+            'translational_offset': (0, 0),
+        }
+        
+        # Apply dihedral augmentation
+        if self.augment:
+            train_inputs, train_outputs, test_input, test_output, dihedral_id = self._augment_dihedral_tracked(
+                train_inputs, train_outputs, test_input, test_output
+            )
+            aug_info['dihedral_id'] = dihedral_id
+        
+        # Apply color permutation
+        if self.color_permutation and random.random() < self.color_permutation_prob:
+            train_inputs, train_outputs, test_input, test_output = self._augment_color(
+                train_inputs, train_outputs, test_input, test_output
+            )
+            aug_info['color_perm_applied'] = True
+        
+        # Compute translational offset
+        offset = None
+        if self.translational_augment:
+            all_grids = train_inputs + train_outputs + [test_input, test_output]
+            max_h = max(g.shape[0] for g in all_grids)
+            max_w = max(g.shape[1] for g in all_grids)
+            max_offset_r = self.max_size - max_h
+            max_offset_c = self.max_size - max_w
+            if max_offset_r > 0 and max_offset_c > 0:
+                offset = (random.randint(0, max_offset_r), random.randint(0, max_offset_c))
+                aug_info['translational_offset'] = offset
+        
+        # Pad grids
+        train_inputs_padded = [self._pad_grid(g, offset, is_target=False) for g in train_inputs]
+        train_outputs_padded = [self._pad_grid(g, offset, is_target=True) for g in train_outputs]
+        test_input_padded = self._pad_grid(test_input, offset, is_target=False)
+        test_output_padded = self._pad_grid(test_output, offset, is_target=True)
+        
+        result = {
+            'task_id': task.get('task_id', str(task_idx)),
+            'input_grids': [torch.from_numpy(g) for g in train_inputs_padded],
+            'output_grids': [torch.from_numpy(g) for g in train_outputs_padded],
+            'test_input': torch.from_numpy(test_input_padded),
+            'test_output': torch.from_numpy(test_output_padded),
+            'num_train_pairs': len(train_inputs),
+            'transform_family': 0,
+        }
+        
+        if self.track_augmentation:
+            result['aug_info'] = aug_info
+        
+        return result
+    
     def __len__(self) -> int:
+        if self.cache_samples and self._cached_samples:
+            return len(self._cached_samples)
         return len(self.tasks)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get a single sample with fresh random augmentation and tracking."""
+        """
+        Get a single sample.
+        
+        If cache_samples=True, returns a pre-generated cached sample.
+        Otherwise, generates fresh random augmentation on-the-fly.
+        """
+        # Return cached sample if available
+        if self.cache_samples and self._cached_samples:
+            return self._cached_samples[idx]
+        
+        # Generate on-the-fly (original behavior)
         task = self.tasks[idx]
         
         # Parse train pairs
@@ -989,11 +1145,28 @@ class SCIARCDataset(Dataset):
         return aug_inputs, aug_outputs, aug_test_in, aug_test_out, augment_info
 
 
-def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = 0) -> torch.Tensor:
-    """Pad grid to max_size x max_size."""
+def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = None) -> torch.Tensor:
+    """
+    Pad grid to max_size x max_size.
+    
+    Args:
+        grid: Input grid tensor
+        max_size: Target size
+        pad_value: Value for padding. If None, infer from grid:
+                   - Use -100 if grid contains -100 (target with ignore_index)
+                   - Use 0 otherwise (input grid)
+    """
     h, w = grid.shape
     if h >= max_size and w >= max_size:
         return grid[:max_size, :max_size]
+    
+    # Infer padding value from grid content if not specified
+    # This preserves the -100 ignore_index for targets
+    if pad_value is None:
+        if (grid == -100).any():
+            pad_value = -100  # Target grid with ignore_index
+        else:
+            pad_value = 0  # Input grid
     
     padded = torch.full((max_size, max_size), pad_value, dtype=grid.dtype)
     padded[:min(h, max_size), :min(w, max_size)] = grid[:min(h, max_size), :min(w, max_size)]

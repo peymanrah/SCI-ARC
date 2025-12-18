@@ -1,0 +1,156 @@
+# RLAN ON-THE-FLY Configuration
+# ================================
+# Use this config to CONTINUE training from a cached checkpoint
+# with infinite sample diversity (on-the-fly augmentation)
+#
+# TRAINING WORKFLOW:
+# 1. Train with rlan_stable.yaml (cache_samples=true) until convergence
+# 2. Resume with this config (cache_samples=false) for diversity
+#
+# Example:
+#   python scripts/train_rlan.py --config configs/rlan_onthefly.yaml \
+#       --resume checkpoints/rlan_stable/best.pt
+#
+# KEY DIFFERENCES FROM STABLE:
+# - cache_samples: false (infinite diversity)
+# - Lower learning_rate (5e-5) for fine-tuning
+# - Warmup enabled (avoid destabilizing pre-trained weights)
+#
+# ================================
+
+model:
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10
+  max_grid_size: 30
+  
+  max_clues: 6
+  num_predicates: 32
+  num_solver_steps: 6
+  
+  use_act: false
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8
+  
+  # SAME MODULES AS STABLE (must match for checkpoint loading)
+  use_context_encoder: true
+  use_dsc: true
+  use_msre: true
+  use_lcr: false
+  use_sph: false
+  use_learned_pos: false
+
+training:
+  max_epochs: 500  # Extended for diversity learning
+  
+  batch_size: 16
+  grad_accumulation_steps: 2
+  
+  # LOWER LEARNING RATE for fine-tuning from checkpoint
+  learning_rate: 5.0e-5  # 10x lower than stable (fine-tuning)
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  
+  temperature_start: 0.7  # Start lower (model is pretrained)
+  temperature_end: 0.5
+  
+  loss_mode: 'weighted_stablemax'
+  bg_weight_cap: 2.0
+  fg_weight_cap: 5.0
+  
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  
+  # ALL AUXILIARY LOSSES OFF
+  lambda_entropy: 0.0
+  lambda_sparsity: 0.0
+  lambda_predicate: 0.0
+  lambda_curriculum: 0.0
+  lambda_deep_supervision: 0.0
+  lambda_act: 0.0
+  
+  min_clues: 2.0
+  min_clue_weight: 0.0
+  ponder_weight: 0.0
+  entropy_ponder_weight: 0.0
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  # COSINE SCHEDULER for gradual learning
+  scheduler: "cosine"
+  warmup_epochs: 10  # Warmup to avoid destabilizing pretrained weights
+  min_lr: 1.0e-6
+  
+  use_ema: true
+  ema_decay: 0.999
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  ignore_padding_in_loss: true
+  
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+  
+  # ON-THE-FLY SAMPLING (infinite diversity)
+  cache_samples: false
+  
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    color_permutation_prob: 0.3
+    translational: true
+
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+
+logging:
+  log_every: 10
+  save_every: 25
+  eval_every: 10
+  keep_last_n: 5
+  checkpoint_dir: "checkpoints/rlan_onthefly"
+  log_to_file: true
+  track_augmentation: true
+  
+  use_wandb: false
+  wandb_project: "rlan-arc"
+  wandb_run_name: null
+
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false
+
+device:
+  use_cuda: true
+  mixed_precision: true
+  dtype: "bfloat16"
+  compile: false

@@ -1,6 +1,6 @@
 # RLAN Visual Demo Training Log
 
-**Date:** 2025-12-17 20:35:18
+**Date:** 2025-12-17 22:07:53
 **Device:** cpu
 **Max Epochs:** 200
 **Learning Rate:** 0.0005
@@ -24,7 +24,7 @@
 
 - loss_mode: weighted_stablemax
 - lambda_sparsity: 0.1
-- min_clues: 2.0
+- min_clues: 1.0
 - min_clue_weight: 5.0
 - lambda_deep_supervision: 0.5
 
@@ -39,58 +39,58 @@
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 1.272954 |
-| task_loss | 0.848060 |
-| focal_loss | 0.848060 |
-| entropy_loss | 2.656512 |
-| sparsity_loss | 0.071821 |
+| total_loss | 1.229038 |
+| task_loss | 0.818003 |
+| focal_loss | 0.818003 |
+| entropy_loss | 2.648053 |
+| sparsity_loss | 0.055593 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 1.896614 |
-| deep_supervision_loss | 0.835424 |
+| curriculum_loss | 1.061338 |
+| deep_supervision_loss | 0.810952 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.031380 |
-| sparsity_entropy_pondering | 0.040442 |
-| expected_clues_used | 3.137985 |
-| stop_prob_from_loss | 0.215504 |
-| clues_used_std | 0.156469 |
+| sparsity_base_pondering | 0.024260 |
+| sparsity_entropy_pondering | 0.031333 |
+| expected_clues_used | 2.425976 |
+| stop_prob_from_loss | 0.393506 |
+| clues_used_std | 0.163526 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 4.17%
-- **BG Accuracy:** 2.05%
-- **FG Accuracy:** 10.87%
+- **Total Accuracy:** 11.98%
+- **BG Accuracy:** 13.70%
+- **FG Accuracy:** 6.52%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 3.1% | 3.2% | 0.0% | ❌ | [0, 5] | [0, 1, 3, 4, 6, 7, 8] |
-| 2 | 7.8% | 0.0% | 13.9% | ❌ | [0, 2, 3, 7, 8] | [1, 3, 4, 6, 7, 8, 9] |
-| 3 | 1.6% | 1.8% | 0.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] |
+| 1 | 17.2% | 17.5% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 4, 5, 6, 7, 8] |
+| 2 | 9.4% | 10.7% | 8.3% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 4, 5, 7, 8, 9] |
+| 3 | 9.4% | 10.9% | 0.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 4, 5, 6, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.06 | [0.236, 0.218, 0.241, 0.242] | [-1.18, -1.28, -1.15, -1.14] |
-| 2 | 3.03 | [0.347, 0.132, 0.140, 0.348] | [-0.63, -1.88, -1.82, -0.63] |
-| 3 | 3.32 | [0.129, 0.125, 0.241, 0.187] | [-1.91, -1.94, -1.15, -1.47] |
+| 1 | 2.34 | [0.334, 0.716, 0.429, 0.183] | [-0.69, 0.92, -0.29, -1.50] |
+| 2 | 2.32 | [0.479, 0.485, 0.362, 0.349] | [-0.08, -0.06, -0.57, -0.62] |
+| 3 | 2.61 | [0.315, 0.420, 0.440, 0.210] | [-0.78, -0.32, -0.24, -1.32] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.777 | 0.751 | 0.386 | 0.709 |
-| 2 | 0.530 | 0.811 | 0.802 | 0.689 |
-| 3 | 0.762 | 0.648 | 0.284 | 0.515 |
+| 1 | 0.759 | 0.689 | 0.503 | 0.636 |
+| 2 | 0.392 | 0.532 | 0.708 | 0.833 |
+| 3 | 0.885 | 0.196 | 0.831 | 0.676 |
 
 ### Gradient Norms (selected modules)
-- **encoder:** 0.139968
-- **feature_proj:** 0.253349
-- **context_encoder:** 0.765009
-- **context_injector:** 0.130557
-- **dsc:** 0.203252
-- **msre:** 0.237928
-- **solver:** 4.920971
+- **encoder:** 0.252822
+- **feature_proj:** 0.417249
+- **context_encoder:** 0.950121
+- **context_injector:** 0.189357
+- **dsc:** 0.357423
+- **msre:** 0.376285
+- **solver:** 4.853251
 
 ### Predictions vs Targets
 
@@ -106,10 +106,10 @@ Target:
 
 Prediction:
 ```
-8 6 8 6
-4 3 3 4
-3 6 6 3
-3 4 6 3
+0 0 0 5
+3 3 3 3
+4 5 3 4
+4 3 7 3
 ```
 
 **Example 2:**
@@ -126,12 +126,12 @@ Target:
 
 Prediction:
 ```
-8 3 8 8 7 6
-3 3 3 9 3 3
-4 3 4 4 3 3
-3 3 9 7 7 1
-3 3 7 4 4 1
-3 3 3 7 7 3
+9 2 0 0 0 0
+2 5 0 3 5 3
+7 0 3 4 3 4
+0 3 3 3 3 3
+8 3 3 7 2 2
+3 5 2 3 3 2
 ```
 
 **Example 3:**
@@ -145,9 +145,9 @@ Target:
 
 Prediction:
 ```
-8 0 3
-4 4 8
-3 3 7
+4 6 5
+2 3 0
+7 0 0
 ```
 
 
@@ -158,58 +158,58 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.939997 |
-| task_loss | 0.620140 |
-| focal_loss | 0.620140 |
-| entropy_loss | 2.455837 |
-| sparsity_loss | 0.078965 |
+| total_loss | 0.943309 |
+| task_loss | 0.622430 |
+| focal_loss | 0.622430 |
+| entropy_loss | 2.630549 |
+| sparsity_loss | 0.075294 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.417709 |
-| deep_supervision_loss | 0.623921 |
+| curriculum_loss | 2.062506 |
+| deep_supervision_loss | 0.626698 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.036134 |
-| sparsity_entropy_pondering | 0.042831 |
-| expected_clues_used | 3.613421 |
-| stop_prob_from_loss | 0.096645 |
-| clues_used_std | 0.058512 |
+| sparsity_base_pondering | 0.033152 |
+| sparsity_entropy_pondering | 0.042141 |
+| expected_clues_used | 3.315236 |
+| stop_prob_from_loss | 0.171191 |
+| clues_used_std | 0.124663 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 75.52%
-- **BG Accuracy:** 91.78%
-- **FG Accuracy:** 23.91%
+- **Total Accuracy:** 70.83%
+- **BG Accuracy:** 88.36%
+- **FG Accuracy:** 15.22%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 85.9% | 87.3% | 0.0% | ❌ | [0, 5] | [0, 2, 8] |
-| 2 | 54.7% | 100.0% | 19.4% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 85.9% | 92.7% | 44.4% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 8] |
+| 1 | 84.4% | 85.7% | 0.0% | ❌ | [0, 5] | [0, 2, 8] |
+| 2 | 48.4% | 96.4% | 11.1% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 8] |
+| 3 | 79.7% | 87.3% | 33.3% | ❌ | [0, 1, 2] | [0, 2, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.68 | [0.067, 0.125, 0.048, 0.078] | [-2.63, -1.94, -2.98, -2.47] |
-| 2 | 3.58 | [0.098, 0.093, 0.132, 0.096] | [-2.22, -2.27, -1.88, -2.24] |
-| 3 | 3.58 | [0.103, 0.142, 0.060, 0.116] | [-2.16, -1.80, -2.75, -2.04] |
+| 1 | 3.30 | [0.154, 0.153, 0.124, 0.268] | [-1.71, -1.71, -1.96, -1.01] |
+| 2 | 3.45 | [0.156, 0.122, 0.161, 0.115] | [-1.69, -1.97, -1.65, -2.04] |
+| 3 | 3.20 | [0.219, 0.216, 0.203, 0.164] | [-1.27, -1.29, -1.37, -1.63] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.681 | 0.624 | 0.844 | 0.790 |
-| 2 | 0.824 | 0.386 | 0.875 | 0.406 |
-| 3 | 0.329 | 0.551 | 0.696 | 0.079 |
+| 1 | 0.775 | 0.707 | 0.787 | 0.647 |
+| 2 | 0.764 | 0.677 | 0.298 | 0.675 |
+| 3 | 0.395 | 0.588 | 0.531 | 0.747 |
 
 ### Gradient Norms (selected modules)
-- **encoder:** 0.075018
-- **feature_proj:** 0.132185
-- **context_encoder:** 0.178830
-- **context_injector:** 0.067429
-- **dsc:** 0.062798
-- **msre:** 0.123535
-- **solver:** 1.466049
+- **encoder:** 0.059588
+- **feature_proj:** 0.102555
+- **context_encoder:** 0.120261
+- **context_injector:** 0.052242
+- **dsc:** 0.097725
+- **msre:** 0.085706
+- **solver:** 1.335707
 
 
 ## Epoch 3
@@ -219,58 +219,58 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.899619 |
-| task_loss | 0.589897 |
-| focal_loss | 0.589897 |
-| entropy_loss | 2.716869 |
-| sparsity_loss | 0.080496 |
+| total_loss | 0.928230 |
+| task_loss | 0.611157 |
+| focal_loss | 0.611157 |
+| entropy_loss | 2.583061 |
+| sparsity_loss | 0.061626 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.292672 |
-| deep_supervision_loss | 0.603344 |
+| curriculum_loss | 1.610945 |
+| deep_supervision_loss | 0.621821 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.034789 |
-| sparsity_entropy_pondering | 0.045707 |
-| expected_clues_used | 3.478912 |
-| stop_prob_from_loss | 0.130272 |
-| clues_used_std | 0.062807 |
+| sparsity_base_pondering | 0.027611 |
+| sparsity_entropy_pondering | 0.034015 |
+| expected_clues_used | 2.761109 |
+| stop_prob_from_loss | 0.309723 |
+| clues_used_std | 0.129944 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 56.77%
-- **BG Accuracy:** 62.33%
-- **FG Accuracy:** 39.13%
+- **Total Accuracy:** 42.71%
+- **BG Accuracy:** 44.52%
+- **FG Accuracy:** 36.96%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 51.6% | 52.4% | 0.0% | ❌ | [0, 5] | [0, 1, 2, 7] |
-| 2 | 53.1% | 89.3% | 25.0% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 7] |
-| 3 | 65.6% | 60.0% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7] |
+| 1 | 34.4% | 34.9% | 0.0% | ❌ | [0, 5] | [0, 1, 2, 7] |
+| 2 | 46.9% | 78.6% | 22.2% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 7] |
+| 3 | 46.9% | 38.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.41 | [0.150, 0.134, 0.102, 0.207] | [-1.73, -1.87, -2.17, -1.34] |
-| 2 | 3.51 | [0.094, 0.091, 0.155, 0.150] | [-2.26, -2.31, -1.69, -1.73] |
-| 3 | 3.52 | [0.123, 0.099, 0.149, 0.110] | [-1.97, -2.21, -1.74, -2.09] |
+| 1 | 2.91 | [0.187, 0.344, 0.211, 0.349] | [-1.47, -0.65, -1.32, -0.62] |
+| 2 | 2.66 | [0.279, 0.203, 0.364, 0.491] | [-0.95, -1.37, -0.56, -0.04] |
+| 3 | 2.71 | [0.211, 0.401, 0.410, 0.266] | [-1.32, -0.40, -0.36, -1.01] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.676 | 0.644 | 0.792 | 0.529 |
-| 2 | 0.867 | 0.771 | 0.588 | 0.256 |
-| 3 | 0.494 | 0.714 | 0.697 | 0.813 |
+| 1 | 0.207 | 0.490 | 0.815 | 0.355 |
+| 2 | 0.318 | 0.747 | 0.793 | 0.870 |
+| 3 | 0.863 | 0.798 | 0.490 | 0.707 |
 
 ### Gradient Norms (selected modules)
-- **encoder:** 0.067350
-- **feature_proj:** 0.119863
-- **context_encoder:** 0.134096
-- **context_injector:** 0.053008
-- **dsc:** 0.089557
-- **msre:** 0.085257
-- **solver:** 2.289415
+- **encoder:** 0.036979
+- **feature_proj:** 0.063134
+- **context_encoder:** 0.082130
+- **context_injector:** 0.040048
+- **dsc:** 0.045633
+- **msre:** 0.070734
+- **solver:** 1.480526
 
 
 ## Epoch 4
@@ -280,58 +280,58 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.863184 |
-| task_loss | 0.569675 |
-| focal_loss | 0.569675 |
-| entropy_loss | 2.765840 |
-| sparsity_loss | 0.058031 |
+| total_loss | 0.853131 |
+| task_loss | 0.565381 |
+| focal_loss | 0.565381 |
+| entropy_loss | 2.375450 |
+| sparsity_loss | 0.034387 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 1.233965 |
-| deep_supervision_loss | 0.575411 |
+| curriculum_loss | 0.423857 |
+| deep_supervision_loss | 0.568622 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.024554 |
-| sparsity_entropy_pondering | 0.033477 |
-| expected_clues_used | 2.455351 |
-| stop_prob_from_loss | 0.386162 |
-| clues_used_std | 0.140143 |
+| sparsity_base_pondering | 0.016165 |
+| sparsity_entropy_pondering | 0.018223 |
+| expected_clues_used | 1.616482 |
+| stop_prob_from_loss | 0.595879 |
+| clues_used_std | 0.292192 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 52.08%
-- **BG Accuracy:** 58.22%
-- **FG Accuracy:** 32.61%
+- **Total Accuracy:** 71.35%
+- **BG Accuracy:** 84.93%
+- **FG Accuracy:** 28.26%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 50.0% | 50.8% | 0.0% | ❌ | [0, 5] | [0, 2, 8] |
-| 2 | 54.7% | 85.7% | 30.6% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 8] |
-| 3 | 51.6% | 52.7% | 44.4% | ❌ | [0, 1, 2] | [0, 1, 2, 8] |
+| 1 | 79.7% | 81.0% | 0.0% | ❌ | [0, 5] | [0, 2, 7] |
+| 2 | 51.6% | 96.4% | 16.7% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 7, 8] |
+| 3 | 82.8% | 83.6% | 77.8% | ❌ | [0, 1, 2] | [0, 1, 2, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 2.60 | [0.321, 0.274, 0.588, 0.222] | [-0.75, -0.98, 0.35, -1.25] |
-| 2 | 2.32 | [0.426, 0.403, 0.446, 0.410] | [-0.30, -0.39, -0.22, -0.36] |
-| 3 | 2.46 | [0.292, 0.330, 0.540, 0.382] | [-0.88, -0.71, 0.16, -0.48] |
+| 1 | 1.88 | [0.678, 0.471, 0.505, 0.463] | [0.75, -0.12, 0.02, -0.15] |
+| 2 | 1.66 | [0.776, 0.634, 0.447, 0.480] | [1.24, 0.55, -0.21, -0.08] |
+| 3 | 1.30 | [0.629, 0.690, 0.662, 0.714] | [0.53, 0.80, 0.67, 0.92] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.624 | 0.810 | 0.599 | 0.742 |
-| 2 | 0.530 | 0.607 | 0.724 | 0.773 |
-| 3 | 0.706 | 0.872 | 0.229 | 0.764 |
+| 1 | 0.835 | 0.698 | 0.173 | 0.376 |
+| 2 | 0.499 | 0.794 | 0.640 | 0.740 |
+| 3 | 0.221 | 0.652 | 0.631 | 0.595 |
 
 ### Gradient Norms (selected modules)
-- **encoder:** 0.027486
-- **feature_proj:** 0.049699
-- **context_encoder:** 0.089759
-- **context_injector:** 0.031861
-- **dsc:** 0.045640
-- **msre:** 0.045032
-- **solver:** 1.454014
+- **encoder:** 0.046317
+- **feature_proj:** 0.080105
+- **context_encoder:** 0.094567
+- **context_injector:** 0.056885
+- **dsc:** 0.125180
+- **msre:** 0.061251
+- **solver:** 0.908592
 
 
 ## Epoch 5
@@ -341,58 +341,58 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.994893 |
-| task_loss | 0.723063 |
-| focal_loss | 0.723063 |
-| entropy_loss | 2.417895 |
-| sparsity_loss | 0.037614 |
+| total_loss | 1.084928 |
+| task_loss | 0.810559 |
+| focal_loss | 0.810559 |
+| entropy_loss | 2.696430 |
+| sparsity_loss | 0.010563 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 0.699293 |
-| deep_supervision_loss | 0.536136 |
+| curriculum_loss | 0.027003 |
+| deep_supervision_loss | 0.546626 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
-| sparsity_min_clue_penalty | 0.391718 |
-| sparsity_base_pondering | 0.016963 |
-| sparsity_entropy_pondering | 0.020652 |
-| expected_clues_used | 1.696251 |
-| stop_prob_from_loss | 0.575937 |
-| clues_used_std | 0.755051 |
-| per_sample_clue_penalty_mean | 0.195859 |
+| sparsity_min_clue_penalty | 0.542966 |
+| sparsity_base_pondering | 0.004570 |
+| sparsity_entropy_pondering | 0.005993 |
+| expected_clues_used | 0.457034 |
+| stop_prob_from_loss | 0.885741 |
+| clues_used_std | 0.128313 |
+| per_sample_clue_penalty_mean | 0.271483 |
 
 ### Metrics
-- **Total Accuracy:** 66.15%
-- **BG Accuracy:** 76.71%
-- **FG Accuracy:** 32.61%
+- **Total Accuracy:** 68.75%
+- **BG Accuracy:** 80.82%
+- **FG Accuracy:** 30.43%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 68.8% | 69.8% | 0.0% | ❌ | [0, 5] | [0, 2, 8] |
-| 2 | 54.7% | 92.9% | 25.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 7, 8] |
-| 3 | 75.0% | 76.4% | 66.7% | ❌ | [0, 1, 2] | [0, 1, 2, 8] |
+| 1 | 75.0% | 76.2% | 0.0% | ❌ | [0, 5] | [0, 2, 7, 8] |
+| 2 | 53.1% | 92.9% | 22.2% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 3, 7, 8] |
+| 3 | 78.1% | 80.0% | 66.7% | ❌ | [0, 1, 2] | [0, 1, 2, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 2.11 | [0.523, 0.424, 0.326, 0.620] | [0.09, -0.31, -0.73, 0.49] |
-| 2 | 0.82 | [0.723, 0.837, 0.837, 0.777] | [0.96, 1.64, 1.64, 1.25] |
-| 3 | 2.16 | [0.360, 0.577, 0.457, 0.449] | [-0.57, 0.31, -0.17, -0.20] |
+| 1 | 0.40 | [0.914, 0.885, 0.895, 0.907] | [2.37, 2.04, 2.14, 2.28] |
+| 2 | 0.60 | [0.906, 0.814, 0.844, 0.832] | [2.27, 1.48, 1.68, 1.60] |
+| 3 | 0.37 | [0.911, 0.927, 0.911, 0.882] | [2.33, 2.55, 2.32, 2.01] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.893 | 0.863 | 0.645 | 0.746 |
-| 2 | 0.293 | 0.495 | 0.300 | 0.768 |
-| 3 | 0.255 | 0.226 | 0.767 | 0.725 |
+| 1 | 0.673 | 0.823 | 0.279 | 0.767 |
+| 2 | 0.789 | 0.842 | 0.522 | 0.710 |
+| 3 | 0.414 | 0.750 | 0.673 | 0.539 |
 
 ### Gradient Norms (selected modules)
-- **encoder:** 0.818837
-- **feature_proj:** 1.504406
-- **context_encoder:** 2.012478
-- **context_injector:** 1.122653
-- **dsc:** 2.429895
-- **msre:** 0.128634
-- **solver:** 1.437052
+- **encoder:** 0.959119
+- **feature_proj:** 1.676346
+- **context_encoder:** 1.931357
+- **context_injector:** 1.345950
+- **dsc:** 3.670722
+- **msre:** 0.043251
+- **solver:** 1.038471
 
 
 ## Epoch 6
@@ -402,49 +402,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.735467 |
-| task_loss | 0.482081 |
-| focal_loss | 0.482081 |
-| entropy_loss | 2.629043 |
-| sparsity_loss | 0.083883 |
+| total_loss | 0.761756 |
+| task_loss | 0.498702 |
+| focal_loss | 0.498702 |
+| entropy_loss | 2.046156 |
+| sparsity_loss | 0.053276 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.460750 |
-| deep_supervision_loss | 0.489995 |
+| curriculum_loss | 1.297224 |
+| deep_supervision_loss | 0.515454 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.036848 |
-| sparsity_entropy_pondering | 0.047035 |
-| expected_clues_used | 3.684789 |
-| stop_prob_from_loss | 0.078803 |
-| clues_used_std | 0.071059 |
+| sparsity_base_pondering | 0.026640 |
+| sparsity_entropy_pondering | 0.026636 |
+| expected_clues_used | 2.664023 |
+| stop_prob_from_loss | 0.333994 |
+| clues_used_std | 0.230344 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 55.21%
-- **BG Accuracy:** 53.42%
-- **FG Accuracy:** 60.87%
+- **Total Accuracy:** 66.15%
+- **BG Accuracy:** 72.60%
+- **FG Accuracy:** 45.65%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 45.3% | 46.0% | 0.0% | ❌ | [0, 5] | [0, 1, 2, 3, 7, 8] |
-| 2 | 67.2% | 85.7% | 52.8% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 3, 7, 8] |
-| 3 | 53.1% | 45.5% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 62.5% | 63.5% | 0.0% | ❌ | [0, 5] | [0, 1, 2, 7, 8] |
+| 2 | 59.4% | 92.9% | 33.3% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 3, 7, 8] |
+| 3 | 76.6% | 72.7% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.75 | [0.046, 0.070, 0.066, 0.063] | [-3.03, -2.58, -2.65, -2.70] |
-| 2 | 3.61 | [0.085, 0.081, 0.068, 0.154] | [-2.38, -2.42, -2.62, -1.70] |
-| 3 | 3.69 | [0.123, 0.082, 0.052, 0.054] | [-1.96, -2.41, -2.90, -2.86] |
+| 1 | 2.44 | [0.414, 0.410, 0.389, 0.347] | [-0.35, -0.36, -0.45, -0.63] |
+| 2 | 2.65 | [0.374, 0.298, 0.339, 0.338] | [-0.52, -0.86, -0.67, -0.67] |
+| 3 | 2.90 | [0.241, 0.270, 0.373, 0.216] | [-1.15, -0.99, -0.52, -1.29] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.789 | 0.815 | 0.511 | 0.709 |
-| 2 | 0.781 | 0.665 | 0.752 | 0.203 |
-| 3 | 0.178 | 0.609 | 0.780 | 0.793 |
+| 1 | 0.770 | 0.288 | 0.427 | 0.765 |
+| 2 | 0.353 | 0.795 | 0.262 | 0.305 |
+| 3 | 0.737 | 0.739 | 0.019 | 0.445 |
 
 
 ## Epoch 7
@@ -454,49 +454,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.779672 |
-| task_loss | 0.510056 |
-| focal_loss | 0.510056 |
-| entropy_loss | 2.285871 |
-| sparsity_loss | 0.081055 |
+| total_loss | 0.733146 |
+| task_loss | 0.478524 |
+| focal_loss | 0.478524 |
+| entropy_loss | 2.643575 |
+| sparsity_loss | 0.082839 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.656004 |
-| deep_supervision_loss | 0.523022 |
+| curriculum_loss | 2.278578 |
+| deep_supervision_loss | 0.492675 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038445 |
-| sparsity_entropy_pondering | 0.042610 |
-| expected_clues_used | 3.844494 |
-| stop_prob_from_loss | 0.038877 |
-| clues_used_std | 0.026056 |
+| sparsity_base_pondering | 0.036449 |
+| sparsity_entropy_pondering | 0.046389 |
+| expected_clues_used | 3.644933 |
+| stop_prob_from_loss | 0.088767 |
+| clues_used_std | 0.043868 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 72.40%
-- **BG Accuracy:** 85.62%
-- **FG Accuracy:** 30.43%
+- **Total Accuracy:** 51.04%
+- **BG Accuracy:** 53.42%
+- **FG Accuracy:** 43.48%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 81.2% | 82.5% | 0.0% | ❌ | [0, 5] | [0, 2, 7, 8] |
-| 2 | 50.0% | 96.4% | 13.9% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 7] |
-| 3 | 85.9% | 83.6% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7, 8] |
+| 1 | 40.6% | 41.3% | 0.0% | ❌ | [0, 5] | [0, 1, 2, 7] |
+| 2 | 57.8% | 92.9% | 30.6% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 7] |
+| 3 | 54.7% | 47.3% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.83 | [0.029, 0.080, 0.037, 0.026] | [-3.51, -2.44, -3.26, -3.61] |
-| 2 | 3.87 | [0.032, 0.040, 0.027, 0.026] | [-3.40, -3.17, -3.59, -3.62] |
-| 3 | 3.83 | [0.027, 0.056, 0.057, 0.029] | [-3.58, -2.83, -2.81, -3.50] |
+| 1 | 3.60 | [0.131, 0.104, 0.075, 0.089] | [-1.89, -2.16, -2.51, -2.32] |
+| 2 | 3.69 | [0.086, 0.097, 0.077, 0.051] | [-2.37, -2.23, -2.48, -2.92] |
+| 3 | 3.65 | [0.195, 0.060, 0.048, 0.051] | [-1.42, -2.76, -2.98, -2.93] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.720 | 0.006 | 0.543 | 0.881 |
-| 2 | 0.554 | 0.392 | 0.714 | 0.891 |
-| 3 | 0.782 | 0.202 | 0.157 | 0.753 |
+| 1 | 0.607 | 0.360 | 0.447 | 0.582 |
+| 2 | 0.752 | 0.359 | 0.752 | 0.801 |
+| 3 | 0.778 | 0.785 | 0.775 | 0.630 |
 
 
 ## Epoch 8
@@ -506,49 +506,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.719687 |
-| task_loss | 0.470444 |
-| focal_loss | 0.470444 |
-| entropy_loss | 2.574888 |
-| sparsity_loss | 0.087131 |
+| total_loss | 0.685223 |
+| task_loss | 0.446516 |
+| focal_loss | 0.446516 |
+| entropy_loss | 2.000571 |
+| sparsity_loss | 0.075367 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.723901 |
-| deep_supervision_loss | 0.481059 |
+| curriculum_loss | 2.641215 |
+| deep_supervision_loss | 0.462341 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038907 |
-| sparsity_entropy_pondering | 0.048224 |
-| expected_clues_used | 3.890724 |
-| stop_prob_from_loss | 0.027319 |
-| clues_used_std | 0.002301 |
+| sparsity_base_pondering | 0.038333 |
+| sparsity_entropy_pondering | 0.037034 |
+| expected_clues_used | 3.833288 |
+| stop_prob_from_loss | 0.041678 |
+| clues_used_std | 0.020226 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 56.77%
-- **BG Accuracy:** 54.79%
-- **FG Accuracy:** 63.04%
+- **Total Accuracy:** 67.71%
+- **BG Accuracy:** 73.29%
+- **FG Accuracy:** 50.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 39.1% | 39.7% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7] |
-| 2 | 71.9% | 89.3% | 58.3% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 59.4% | 54.5% | 88.9% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7] |
+| 1 | 67.2% | 68.3% | 0.0% | ❌ | [0, 5] | [0, 2, 7] |
+| 2 | 62.5% | 92.9% | 38.9% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 3, 7] |
+| 3 | 73.4% | 69.1% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.89 | [0.025, 0.030, 0.027, 0.028] | [-3.65, -3.47, -3.57, -3.56] |
-| 2 | 3.89 | [0.031, 0.023, 0.027, 0.025] | [-3.44, -3.74, -3.59, -3.64] |
-| 3 | 3.89 | [0.023, 0.027, 0.023, 0.037] | [-3.75, -3.58, -3.73, -3.26] |
+| 1 | 3.81 | [0.036, 0.050, 0.049, 0.055] | [-3.30, -2.95, -2.96, -2.85] |
+| 2 | 3.84 | [0.037, 0.036, 0.050, 0.035] | [-3.27, -3.28, -2.95, -3.33] |
+| 3 | 3.85 | [0.037, 0.053, 0.032, 0.032] | [-3.25, -2.89, -3.42, -3.42] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.710 | 0.388 | 0.594 | 0.741 |
-| 2 | 0.322 | 0.851 | 0.674 | 0.653 |
-| 3 | 0.814 | 0.702 | 0.669 | 0.312 |
+| 1 | 0.580 | 0.283 | 0.122 | 0.189 |
+| 2 | 0.629 | 0.757 | 0.160 | 0.651 |
+| 3 | 0.635 | 0.268 | 0.687 | 0.812 |
 
 
 ## Epoch 9
@@ -558,49 +558,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.697296 |
-| task_loss | 0.453811 |
-| focal_loss | 0.453811 |
-| entropy_loss | 2.806804 |
-| sparsity_loss | 0.091823 |
+| total_loss | 0.612416 |
+| task_loss | 0.396019 |
+| focal_loss | 0.396019 |
+| entropy_loss | 2.418802 |
+| sparsity_loss | 0.083700 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.728562 |
-| deep_supervision_loss | 0.468606 |
+| curriculum_loss | 2.655472 |
+| deep_supervision_loss | 0.416052 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039072 |
-| sparsity_entropy_pondering | 0.052751 |
-| expected_clues_used | 3.907152 |
-| stop_prob_from_loss | 0.023212 |
-| clues_used_std | 0.006037 |
+| sparsity_base_pondering | 0.038669 |
+| sparsity_entropy_pondering | 0.045031 |
+| expected_clues_used | 3.866880 |
+| stop_prob_from_loss | 0.033280 |
+| clues_used_std | 0.022660 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 55.73%
-- **BG Accuracy:** 48.63%
-- **FG Accuracy:** 78.26%
+- **Total Accuracy:** 64.06%
+- **BG Accuracy:** 60.96%
+- **FG Accuracy:** 73.91%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 35.9% | 36.5% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
-| 2 | 81.2% | 85.7% | 77.8% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 50.0% | 43.6% | 88.9% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 51.6% | 52.4% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
+| 2 | 81.2% | 96.4% | 69.4% | ❌ | [0, 2, 3, 7, 8] | [0, 1, 2, 3, 7, 8] |
+| 3 | 59.4% | 52.7% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.90 | [0.026, 0.022, 0.028, 0.024] | [-3.64, -3.78, -3.55, -3.72] |
-| 2 | 3.91 | [0.021, 0.021, 0.022, 0.025] | [-3.85, -3.86, -3.79, -3.68] |
-| 3 | 3.91 | [0.025, 0.022, 0.021, 0.023] | [-3.68, -3.77, -3.85, -3.77] |
+| 1 | 3.87 | [0.048, 0.027, 0.027, 0.033] | [-2.98, -3.60, -3.57, -3.39] |
+| 2 | 3.85 | [0.051, 0.027, 0.037, 0.040] | [-2.92, -3.58, -3.26, -3.19] |
+| 3 | 3.89 | [0.028, 0.029, 0.029, 0.023] | [-3.55, -3.50, -3.50, -3.75] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.659 | 0.636 | 0.428 | 0.576 |
-| 2 | 0.709 | 0.756 | 0.688 | 0.651 |
-| 3 | 0.740 | 0.595 | 0.899 | 0.762 |
+| 1 | 0.186 | 0.598 | 0.591 | 0.461 |
+| 2 | 0.565 | 0.459 | 0.714 | 0.656 |
+| 3 | 0.748 | 0.594 | 0.630 | 0.777 |
 
 
 ## Epoch 10
@@ -610,58 +610,58 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.676292 |
-| task_loss | 0.440153 |
-| focal_loss | 0.440153 |
-| entropy_loss | 2.685732 |
-| sparsity_loss | 0.089600 |
+| total_loss | 0.601148 |
+| task_loss | 0.390951 |
+| focal_loss | 0.390951 |
+| entropy_loss | 2.306275 |
+| sparsity_loss | 0.082168 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.715732 |
-| deep_supervision_loss | 0.454358 |
+| curriculum_loss | 2.695194 |
+| deep_supervision_loss | 0.403959 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039093 |
-| sparsity_entropy_pondering | 0.050507 |
-| expected_clues_used | 3.909319 |
-| stop_prob_from_loss | 0.022670 |
-| clues_used_std | 0.001343 |
+| sparsity_base_pondering | 0.038953 |
+| sparsity_entropy_pondering | 0.043215 |
+| expected_clues_used | 3.895328 |
+| stop_prob_from_loss | 0.026168 |
+| clues_used_std | 0.005720 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 57.29%
-- **BG Accuracy:** 56.85%
-- **FG Accuracy:** 58.70%
+- **Total Accuracy:** 75.00%
+- **BG Accuracy:** 79.45%
+- **FG Accuracy:** 60.87%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 51.6% | 52.4% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
-| 2 | 65.6% | 85.7% | 50.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 54.7% | 47.3% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 76.6% | 77.8% | 0.0% | ❌ | [0, 5] | [0, 2, 7, 8] |
+| 2 | 73.4% | 100.0% | 52.8% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 75.0% | 70.9% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.022, 0.021, 0.022, 0.025] | [-3.81, -3.87, -3.79, -3.68] |
-| 2 | 3.91 | [0.025, 0.021, 0.023, 0.022] | [-3.64, -3.83, -3.75, -3.81] |
-| 3 | 3.91 | [0.024, 0.021, 0.024, 0.022] | [-3.70, -3.85, -3.70, -3.78] |
+| 1 | 3.89 | [0.026, 0.033, 0.026, 0.027] | [-3.64, -3.39, -3.64, -3.60] |
+| 2 | 3.90 | [0.023, 0.027, 0.026, 0.024] | [-3.75, -3.59, -3.64, -3.72] |
+| 3 | 3.90 | [0.024, 0.028, 0.027, 0.024] | [-3.70, -3.53, -3.57, -3.70] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.884 | 0.764 | 0.746 | 0.350 |
-| 2 | 0.298 | 0.606 | 0.559 | 0.784 |
-| 3 | 0.820 | 0.745 | 0.493 | 0.699 |
+| 1 | 0.635 | 0.515 | 0.429 | 0.376 |
+| 2 | 0.684 | 0.263 | 0.548 | 0.695 |
+| 3 | 0.757 | 0.563 | 0.565 | 0.625 |
 
 ### Gradient Norms (selected modules)
-- **encoder:** 0.069718
-- **feature_proj:** 0.122150
-- **context_encoder:** 0.094359
-- **context_injector:** 0.071744
-- **dsc:** 0.104653
-- **msre:** 0.117971
-- **solver:** 0.888651
+- **encoder:** 0.033875
+- **feature_proj:** 0.056994
+- **context_encoder:** 0.043300
+- **context_injector:** 0.038635
+- **dsc:** 0.023713
+- **msre:** 0.088617
+- **solver:** 1.969083
 
 ### Predictions vs Targets
 
@@ -679,8 +679,8 @@ Prediction:
 ```
 2 2 2 2
 7 8 8 8
-3 2 3 0
-7 8 0 0
+0 0 0 0
+0 0 0 0
 ```
 
 **Example 2:**
@@ -697,12 +697,12 @@ Target:
 
 Prediction:
 ```
-2 2 2 2 2 2
+3 2 3 2 2 2
 7 8 7 8 8 8
-2 3 2 3 3 3
-8 8 8 0 0 0
-3 8 0 8 0 0
-7 8 8 0 0 0
+2 3 2 3 0 0
+8 7 8 0 0 0
+0 0 0 0 0 0
+7 8 8 0 8 0
 ```
 
 **Example 3:**
@@ -729,49 +729,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.639439 |
-| task_loss | 0.413961 |
-| focal_loss | 0.413961 |
-| entropy_loss | 2.811016 |
-| sparsity_loss | 0.092071 |
+| total_loss | 0.569542 |
+| task_loss | 0.365955 |
+| focal_loss | 0.365955 |
+| entropy_loss | 2.571519 |
+| sparsity_loss | 0.087398 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.708134 |
-| deep_supervision_loss | 0.432542 |
+| curriculum_loss | 2.697231 |
+| deep_supervision_loss | 0.389694 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039144 |
-| sparsity_entropy_pondering | 0.052927 |
-| expected_clues_used | 3.914386 |
-| stop_prob_from_loss | 0.021404 |
-| clues_used_std | 0.006072 |
+| sparsity_base_pondering | 0.039058 |
+| sparsity_entropy_pondering | 0.048339 |
+| expected_clues_used | 3.905847 |
+| stop_prob_from_loss | 0.023538 |
+| clues_used_std | 0.002995 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 63.02%
-- **BG Accuracy:** 67.12%
-- **FG Accuracy:** 50.00%
+- **Total Accuracy:** 58.33%
+- **BG Accuracy:** 50.68%
+- **FG Accuracy:** 82.61%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 62.5% | 63.5% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
-| 2 | 62.5% | 92.9% | 38.9% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 64.1% | 58.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 42.2% | 42.9% | 0.0% | ❌ | [0, 5] | [0, 2, 7, 8] |
+| 2 | 82.8% | 85.7% | 80.6% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 50.0% | 41.8% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.023, 0.021, 0.023, 0.024] | [-3.76, -3.83, -3.77, -3.70] |
-| 2 | 3.91 | [0.023, 0.023, 0.021, 0.021] | [-3.77, -3.74, -3.84, -3.86] |
-| 3 | 3.92 | [0.019, 0.020, 0.020, 0.020] | [-3.93, -3.88, -3.91, -3.91] |
+| 1 | 3.90 | [0.024, 0.022, 0.029, 0.022] | [-3.70, -3.80, -3.49, -3.80] |
+| 2 | 3.91 | [0.020, 0.022, 0.023, 0.028] | [-3.91, -3.82, -3.77, -3.56] |
+| 3 | 3.91 | [0.025, 0.026, 0.021, 0.021] | [-3.65, -3.62, -3.83, -3.85] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.564 | 0.756 | 0.683 | 0.570 |
-| 2 | 0.558 | 0.461 | 0.638 | 0.774 |
-| 3 | 0.799 | 0.737 | 0.808 | 0.762 |
+| 1 | 0.639 | 0.628 | 0.014 | 0.636 |
+| 2 | 0.802 | 0.684 | 0.633 | 0.461 |
+| 3 | 0.815 | 0.553 | 0.766 | 0.788 |
 
 
 ## Epoch 12
@@ -781,49 +781,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.581207 |
-| task_loss | 0.375859 |
-| focal_loss | 0.375859 |
-| entropy_loss | 2.708932 |
-| sparsity_loss | 0.090130 |
+| total_loss | 0.651112 |
+| task_loss | 0.431537 |
+| focal_loss | 0.431537 |
+| entropy_loss | 2.482732 |
+| sparsity_loss | 0.085753 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.693145 |
-| deep_supervision_loss | 0.392669 |
+| curriculum_loss | 2.682525 |
+| deep_supervision_loss | 0.421999 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039137 |
-| sparsity_entropy_pondering | 0.050993 |
-| expected_clues_used | 3.913724 |
-| stop_prob_from_loss | 0.021569 |
-| clues_used_std | 0.002400 |
+| sparsity_base_pondering | 0.039074 |
+| sparsity_entropy_pondering | 0.046679 |
+| expected_clues_used | 3.907360 |
+| stop_prob_from_loss | 0.023160 |
+| clues_used_std | 0.007328 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 65.62%
-- **BG Accuracy:** 67.12%
-- **FG Accuracy:** 60.87%
+- **Total Accuracy:** 80.73%
+- **BG Accuracy:** 91.10%
+- **FG Accuracy:** 47.83%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 59.4% | 60.3% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
-| 2 | 70.3% | 92.9% | 52.8% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 67.2% | 61.8% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 85.9% | 87.3% | 0.0% | ❌ | [0, 5] | [0, 1, 2, 7] |
+| 2 | 64.1% | 100.0% | 36.1% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 92.2% | 90.9% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.021, 0.022, 0.024, 0.023] | [-3.85, -3.81, -3.73, -3.76] |
-| 2 | 3.91 | [0.023, 0.021, 0.020, 0.023] | [-3.77, -3.83, -3.89, -3.76] |
-| 3 | 3.92 | [0.020, 0.023, 0.020, 0.020] | [-3.88, -3.75, -3.88, -3.87] |
+| 1 | 3.91 | [0.023, 0.020, 0.023, 0.021] | [-3.75, -3.88, -3.74, -3.83] |
+| 2 | 3.91 | [0.021, 0.023, 0.025, 0.020] | [-3.83, -3.75, -3.68, -3.87] |
+| 3 | 3.90 | [0.025, 0.025, 0.028, 0.024] | [-3.67, -3.67, -3.55, -3.72] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.715 | 0.633 | 0.721 | 0.453 |
-| 2 | 0.575 | 0.571 | 0.772 | 0.415 |
-| 3 | 0.844 | 0.601 | 0.811 | 0.706 |
+| 1 | 0.747 | 0.747 | 0.687 | 0.596 |
+| 2 | 0.790 | 0.511 | 0.698 | 0.740 |
+| 3 | 0.263 | 0.736 | 0.002 | 0.647 |
 
 
 ## Epoch 13
@@ -833,49 +833,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.545001 |
-| task_loss | 0.351177 |
-| focal_loss | 0.351177 |
-| entropy_loss | 2.465811 |
-| sparsity_loss | 0.085463 |
+| total_loss | 0.534665 |
+| task_loss | 0.347182 |
+| focal_loss | 0.347182 |
+| entropy_loss | 2.458309 |
+| sparsity_loss | 0.085370 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.675647 |
-| deep_supervision_loss | 0.370555 |
+| curriculum_loss | 2.674833 |
+| deep_supervision_loss | 0.357894 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039089 |
-| sparsity_entropy_pondering | 0.046373 |
-| expected_clues_used | 3.908930 |
-| stop_prob_from_loss | 0.022768 |
-| clues_used_std | 0.005621 |
+| sparsity_base_pondering | 0.039103 |
+| sparsity_entropy_pondering | 0.046266 |
+| expected_clues_used | 3.910330 |
+| stop_prob_from_loss | 0.022417 |
+| clues_used_std | 0.002796 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 63.02%
-- **BG Accuracy:** 58.22%
-- **FG Accuracy:** 78.26%
+- **Total Accuracy:** 72.40%
+- **BG Accuracy:** 69.86%
+- **FG Accuracy:** 80.43%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 46.9% | 47.6% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
-| 2 | 84.4% | 96.4% | 75.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 57.8% | 50.9% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 64.1% | 65.1% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7] |
+| 2 | 87.5% | 100.0% | 77.8% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 65.6% | 60.0% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.022, 0.020, 0.022, 0.026] | [-3.80, -3.88, -3.82, -3.63] |
-| 2 | 3.91 | [0.021, 0.021, 0.022, 0.023] | [-3.85, -3.84, -3.80, -3.76] |
-| 3 | 3.90 | [0.022, 0.024, 0.025, 0.026] | [-3.79, -3.71, -3.65, -3.63] |
+| 1 | 3.91 | [0.021, 0.020, 0.020, 0.032] | [-3.84, -3.90, -3.87, -3.42] |
+| 2 | 3.91 | [0.024, 0.021, 0.022, 0.021] | [-3.69, -3.85, -3.79, -3.85] |
+| 3 | 3.91 | [0.023, 0.022, 0.021, 0.021] | [-3.73, -3.79, -3.82, -3.85] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.720 | 0.658 | 0.841 | 0.380 |
-| 2 | 0.849 | 0.636 | 0.618 | 0.484 |
-| 3 | 0.713 | 0.355 | 0.588 | 0.273 |
+| 1 | 0.493 | 0.685 | 0.693 | 0.022 |
+| 2 | 0.575 | 0.575 | 0.702 | 0.596 |
+| 3 | 0.777 | 0.568 | 0.728 | 0.679 |
 
 
 ## Epoch 14
@@ -885,49 +885,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.511017 |
-| task_loss | 0.328007 |
-| focal_loss | 0.328007 |
-| entropy_loss | 2.401278 |
-| sparsity_loss | 0.084284 |
+| total_loss | 0.533902 |
+| task_loss | 0.345010 |
+| focal_loss | 0.345010 |
+| entropy_loss | 2.596506 |
+| sparsity_loss | 0.088059 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.659647 |
-| deep_supervision_loss | 0.349164 |
+| curriculum_loss | 2.665490 |
+| deep_supervision_loss | 0.360171 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039078 |
-| sparsity_entropy_pondering | 0.045207 |
-| expected_clues_used | 3.907776 |
-| stop_prob_from_loss | 0.023056 |
-| clues_used_std | 0.015667 |
+| sparsity_base_pondering | 0.039156 |
+| sparsity_entropy_pondering | 0.048904 |
+| expected_clues_used | 3.915576 |
+| stop_prob_from_loss | 0.021106 |
+| clues_used_std | 0.002537 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 65.10%
-- **BG Accuracy:** 59.59%
-- **FG Accuracy:** 82.61%
+- **Total Accuracy:** 63.54%
+- **BG Accuracy:** 56.16%
+- **FG Accuracy:** 86.96%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
 | 1 | 45.3% | 46.0% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
-| 2 | 89.1% | 100.0% | 80.6% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 60.9% | 54.5% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 2 | 89.1% | 92.9% | 86.1% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 56.2% | 49.1% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.021, 0.022, 0.022, 0.022] | [-3.85, -3.80, -3.81, -3.80] |
-| 2 | 3.92 | [0.022, 0.020, 0.020, 0.019] | [-3.81, -3.91, -3.89, -3.95] |
-| 3 | 3.89 | [0.027, 0.022, 0.021, 0.041] | [-3.60, -3.81, -3.83, -3.16] |
+| 1 | 3.91 | [0.020, 0.024, 0.020, 0.023] | [-3.90, -3.69, -3.89, -3.75] |
+| 2 | 3.92 | [0.022, 0.020, 0.019, 0.021] | [-3.80, -3.89, -3.92, -3.84] |
+| 3 | 3.92 | [0.022, 0.020, 0.020, 0.022] | [-3.81, -3.88, -3.90, -3.80] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.638 | 0.609 | 0.769 | 0.619 |
-| 2 | 0.527 | 0.722 | 0.779 | 0.814 |
-| 3 | 0.311 | 0.513 | 0.554 | 0.073 |
+| 1 | 0.726 | 0.242 | 0.645 | 0.571 |
+| 2 | 0.685 | 0.728 | 0.624 | 0.726 |
+| 3 | 0.595 | 0.562 | 0.759 | 0.630 |
 
 
 ## Epoch 15
@@ -937,49 +937,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.489236 |
-| task_loss | 0.312753 |
-| focal_loss | 0.312753 |
-| entropy_loss | 2.597099 |
-| sparsity_loss | 0.088046 |
+| total_loss | 0.488069 |
+| task_loss | 0.313522 |
+| focal_loss | 0.313522 |
+| entropy_loss | 2.291525 |
+| sparsity_loss | 0.082266 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.644786 |
-| deep_supervision_loss | 0.335356 |
+| curriculum_loss | 2.649938 |
+| deep_supervision_loss | 0.332642 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039138 |
-| sparsity_entropy_pondering | 0.048907 |
-| expected_clues_used | 3.913840 |
-| stop_prob_from_loss | 0.021540 |
-| clues_used_std | 0.004448 |
+| sparsity_base_pondering | 0.039135 |
+| sparsity_entropy_pondering | 0.043131 |
+| expected_clues_used | 3.913474 |
+| stop_prob_from_loss | 0.021632 |
+| clues_used_std | 0.004698 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 66.67%
-- **BG Accuracy:** 60.27%
-- **FG Accuracy:** 86.96%
+- **Total Accuracy:** 64.06%
+- **BG Accuracy:** 54.11%
+- **FG Accuracy:** 95.65%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 50.0% | 50.8% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
-| 2 | 90.6% | 96.4% | 86.1% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 59.4% | 52.7% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 40.6% | 41.3% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
+| 2 | 96.9% | 96.4% | 97.2% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 54.7% | 47.3% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.028, 0.023, 0.020, 0.020] | [-3.56, -3.74, -3.91, -3.89] |
-| 2 | 3.92 | [0.019, 0.021, 0.020, 0.021] | [-3.94, -3.83, -3.88, -3.83] |
-| 3 | 3.91 | [0.020, 0.022, 0.025, 0.020] | [-3.90, -3.82, -3.67, -3.90] |
+| 1 | 3.91 | [0.023, 0.020, 0.023, 0.024] | [-3.76, -3.89, -3.73, -3.69] |
+| 2 | 3.91 | [0.020, 0.022, 0.022, 0.024] | [-3.91, -3.80, -3.79, -3.70] |
+| 3 | 3.92 | [0.021, 0.020, 0.020, 0.020] | [-3.83, -3.87, -3.91, -3.89] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.326 | 0.465 | 0.845 | 0.687 |
-| 2 | 0.732 | 0.591 | 0.607 | 0.600 |
-| 3 | 0.741 | 0.701 | 0.444 | 0.754 |
+| 1 | 0.565 | 0.720 | 0.491 | 0.547 |
+| 2 | 0.791 | 0.243 | 0.226 | 0.687 |
+| 3 | 0.654 | 0.647 | 0.533 | 0.508 |
 
 
 ## Epoch 16
@@ -989,49 +989,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.460695 |
-| task_loss | 0.294871 |
-| focal_loss | 0.294871 |
-| entropy_loss | 2.869983 |
-| sparsity_loss | 0.093259 |
+| total_loss | 0.470107 |
+| task_loss | 0.300547 |
+| focal_loss | 0.300547 |
+| entropy_loss | 2.272623 |
+| sparsity_loss | 0.081964 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.639644 |
-| deep_supervision_loss | 0.312996 |
+| curriculum_loss | 2.635681 |
+| deep_supervision_loss | 0.322729 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039177 |
-| sparsity_entropy_pondering | 0.054082 |
-| expected_clues_used | 3.917749 |
-| stop_prob_from_loss | 0.020563 |
-| clues_used_std | 0.004570 |
+| sparsity_base_pondering | 0.039160 |
+| sparsity_entropy_pondering | 0.042804 |
+| expected_clues_used | 3.915979 |
+| stop_prob_from_loss | 0.021005 |
+| clues_used_std | 0.002046 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 73.96%
-- **BG Accuracy:** 68.49%
-- **FG Accuracy:** 91.30%
+- **Total Accuracy:** 63.54%
+- **BG Accuracy:** 55.48%
+- **FG Accuracy:** 89.13%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 64.1% | 63.5% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
-| 2 | 93.8% | 100.0% | 88.9% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 64.1% | 58.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 40.6% | 41.3% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
+| 2 | 92.2% | 96.4% | 88.9% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 57.8% | 50.9% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.022, 0.019, 0.025, 0.021] | [-3.79, -3.92, -3.67, -3.83] |
-| 2 | 3.92 | [0.020, 0.019, 0.020, 0.021] | [-3.91, -3.93, -3.88, -3.83] |
-| 3 | 3.92 | [0.020, 0.019, 0.020, 0.020] | [-3.89, -3.94, -3.88, -3.90] |
+| 1 | 3.92 | [0.022, 0.020, 0.022, 0.020] | [-3.78, -3.89, -3.80, -3.91] |
+| 2 | 3.91 | [0.022, 0.020, 0.019, 0.025] | [-3.81, -3.87, -3.94, -3.67] |
+| 3 | 3.92 | [0.022, 0.020, 0.020, 0.021] | [-3.81, -3.91, -3.90, -3.84] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.574 | 0.733 | 0.501 | 0.683 |
-| 2 | 0.687 | 0.755 | 0.785 | 0.545 |
-| 3 | 0.596 | 0.868 | 0.833 | 0.722 |
+| 1 | 0.457 | 0.435 | 0.570 | 0.830 |
+| 2 | 0.177 | 0.453 | 0.661 | 0.593 |
+| 3 | 0.482 | 0.619 | 0.677 | 0.603 |
 
 
 ## Epoch 17
@@ -1041,49 +1041,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.469486 |
-| task_loss | 0.302500 |
-| focal_loss | 0.302500 |
-| entropy_loss | 2.345382 |
-| sparsity_loss | 0.083253 |
+| total_loss | 0.449661 |
+| task_loss | 0.286524 |
+| focal_loss | 0.286524 |
+| entropy_loss | 2.563559 |
+| sparsity_loss | 0.087495 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.607110 |
-| deep_supervision_loss | 0.317321 |
+| curriculum_loss | 2.622351 |
+| deep_supervision_loss | 0.308776 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039096 |
-| sparsity_entropy_pondering | 0.044157 |
-| expected_clues_used | 3.909588 |
-| stop_prob_from_loss | 0.022603 |
-| clues_used_std | 0.004411 |
+| sparsity_base_pondering | 0.039183 |
+| sparsity_entropy_pondering | 0.048312 |
+| expected_clues_used | 3.918290 |
+| stop_prob_from_loss | 0.020427 |
+| clues_used_std | 0.001523 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 88.54%
-- **BG Accuracy:** 96.58%
-- **FG Accuracy:** 63.04%
+- **Total Accuracy:** 68.23%
+- **BG Accuracy:** 60.96%
+- **FG Accuracy:** 91.30%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 96.9% | 98.4% | 0.0% | ❌ | [0, 5] | [0, 7] |
-| 2 | 75.0% | 100.0% | 55.6% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 93.8% | 92.7% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2] |
+| 1 | 50.0% | 50.8% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
+| 2 | 95.3% | 100.0% | 91.7% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 59.4% | 52.7% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.022, 0.024, 0.022, 0.020] | [-3.80, -3.72, -3.79, -3.89] |
-| 2 | 3.91 | [0.021, 0.020, 0.022, 0.025] | [-3.85, -3.91, -3.79, -3.65] |
-| 3 | 3.90 | [0.033, 0.019, 0.024, 0.020] | [-3.38, -3.93, -3.72, -3.91] |
+| 1 | 3.92 | [0.022, 0.020, 0.020, 0.020] | [-3.79, -3.91, -3.89, -3.90] |
+| 2 | 3.92 | [0.020, 0.020, 0.024, 0.020] | [-3.90, -3.89, -3.72, -3.92] |
+| 3 | 3.92 | [0.022, 0.019, 0.019, 0.020] | [-3.80, -3.92, -3.94, -3.90] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.514 | 0.433 | 0.424 | 0.734 |
-| 2 | 0.810 | 0.772 | 0.576 | 0.296 |
-| 3 | 0.081 | 0.834 | 0.434 | 0.860 |
+| 1 | 0.830 | 0.576 | 0.591 | 0.526 |
+| 2 | 0.724 | 0.459 | 0.121 | 0.781 |
+| 3 | 0.877 | 0.615 | 0.711 | 0.585 |
 
 
 ## Epoch 18
@@ -1093,49 +1093,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.514578 |
-| task_loss | 0.328060 |
-| focal_loss | 0.328060 |
-| entropy_loss | 2.351384 |
-| sparsity_loss | 0.083454 |
+| total_loss | 0.422616 |
+| task_loss | 0.268028 |
+| focal_loss | 0.268028 |
+| entropy_loss | 2.287799 |
+| sparsity_loss | 0.082305 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.607414 |
-| deep_supervision_loss | 0.356347 |
+| curriculum_loss | 2.608074 |
+| deep_supervision_loss | 0.292715 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039143 |
-| sparsity_entropy_pondering | 0.044310 |
-| expected_clues_used | 3.914335 |
-| stop_prob_from_loss | 0.021416 |
-| clues_used_std | 0.008775 |
+| sparsity_base_pondering | 0.039184 |
+| sparsity_entropy_pondering | 0.043121 |
+| expected_clues_used | 3.918435 |
+| stop_prob_from_loss | 0.020391 |
+| clues_used_std | 0.004395 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 59.38%
-- **BG Accuracy:** 49.32%
-- **FG Accuracy:** 91.30%
+- **Total Accuracy:** 81.25%
+- **BG Accuracy:** 80.14%
+- **FG Accuracy:** 84.78%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 37.5% | 36.5% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
-| 2 | 85.9% | 82.1% | 88.9% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 54.7% | 47.3% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 1 | 71.9% | 71.4% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
+| 2 | 89.1% | 100.0% | 80.6% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 82.8% | 80.0% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.92 | [0.019, 0.020, 0.020, 0.020] | [-3.94, -3.89, -3.89, -3.90] |
-| 2 | 3.90 | [0.019, 0.025, 0.022, 0.030] | [-3.93, -3.67, -3.80, -3.48] |
-| 3 | 3.92 | [0.021, 0.022, 0.020, 0.019] | [-3.86, -3.77, -3.91, -3.92] |
+| 1 | 3.92 | [0.019, 0.020, 0.020, 0.020] | [-3.94, -3.89, -3.87, -3.91] |
+| 2 | 3.92 | [0.020, 0.019, 0.020, 0.019] | [-3.89, -3.92, -3.87, -3.94] |
+| 3 | 3.91 | [0.022, 0.022, 0.022, 0.020] | [-3.77, -3.79, -3.77, -3.90] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.727 | 0.505 | 0.570 | 0.599 |
-| 2 | 0.764 | 0.273 | 0.665 | 0.061 |
-| 3 | 0.649 | 0.316 | 0.829 | 0.827 |
+| 1 | 0.769 | 0.429 | 0.459 | 0.535 |
+| 2 | 0.723 | 0.650 | 0.550 | 0.715 |
+| 3 | 0.498 | 0.325 | 0.344 | 0.605 |
 
 
 ## Epoch 19
@@ -1145,49 +1145,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.413595 |
-| task_loss | 0.265309 |
-| focal_loss | 0.265309 |
-| entropy_loss | 2.447896 |
-| sparsity_loss | 0.085099 |
+| total_loss | 0.379340 |
+| task_loss | 0.238462 |
+| focal_loss | 0.238462 |
+| entropy_loss | 2.386660 |
+| sparsity_loss | 0.084202 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.586864 |
-| deep_supervision_loss | 0.279552 |
+| curriculum_loss | 2.596169 |
+| deep_supervision_loss | 0.264916 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039049 |
-| sparsity_entropy_pondering | 0.046050 |
-| expected_clues_used | 3.904860 |
-| stop_prob_from_loss | 0.023785 |
-| clues_used_std | 0.015127 |
+| sparsity_base_pondering | 0.039201 |
+| sparsity_entropy_pondering | 0.045001 |
+| expected_clues_used | 3.920137 |
+| stop_prob_from_loss | 0.019966 |
+| clues_used_std | 0.002890 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 87.50%
-- **BG Accuracy:** 85.62%
-- **FG Accuracy:** 93.48%
+- **Total Accuracy:** 76.56%
+- **BG Accuracy:** 69.18%
+- **FG Accuracy:** 100.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 79.7% | 81.0% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7] |
-| 2 | 96.9% | 100.0% | 94.4% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 85.9% | 83.6% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7, 8] |
+| 1 | 57.8% | 57.1% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
+| 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 71.9% | 67.3% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.022, 0.025, 0.021, 0.026] | [-3.78, -3.66, -3.86, -3.61] |
-| 2 | 3.92 | [0.021, 0.020, 0.020, 0.020] | [-3.84, -3.91, -3.91, -3.89] |
-| 3 | 3.89 | [0.021, 0.022, 0.021, 0.046] | [-3.82, -3.78, -3.83, -3.04] |
+| 1 | 3.92 | [0.019, 0.019, 0.019, 0.020] | [-3.94, -3.92, -3.94, -3.88] |
+| 2 | 3.92 | [0.019, 0.020, 0.019, 0.020] | [-3.92, -3.89, -3.93, -3.89] |
+| 3 | 3.92 | [0.023, 0.020, 0.021, 0.020] | [-3.76, -3.89, -3.87, -3.90] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.415 | 0.642 | 0.722 | 0.322 |
-| 2 | 0.437 | 0.744 | 0.720 | 0.698 |
-| 3 | 0.727 | 0.745 | 0.737 | 0.154 |
+| 1 | 0.748 | 0.648 | 0.476 | 0.525 |
+| 2 | 0.702 | 0.639 | 0.675 | 0.559 |
+| 3 | 0.281 | 0.705 | 0.336 | 0.592 |
 
 
 ## Epoch 20
@@ -1197,58 +1197,58 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.421068 |
-| task_loss | 0.268576 |
-| focal_loss | 0.268576 |
-| entropy_loss | 2.364446 |
-| sparsity_loss | 0.083561 |
+| total_loss | 0.355389 |
+| task_loss | 0.221374 |
+| focal_loss | 0.221374 |
+| entropy_loss | 2.212728 |
+| sparsity_loss | 0.080918 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.561452 |
-| deep_supervision_loss | 0.288271 |
+| curriculum_loss | 2.581222 |
+| deep_supervision_loss | 0.251846 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039069 |
-| sparsity_entropy_pondering | 0.044492 |
-| expected_clues_used | 3.906934 |
-| stop_prob_from_loss | 0.023267 |
-| clues_used_std | 0.004645 |
+| sparsity_base_pondering | 0.039198 |
+| sparsity_entropy_pondering | 0.041719 |
+| expected_clues_used | 3.919820 |
+| stop_prob_from_loss | 0.020045 |
+| clues_used_std | 0.000418 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 91.15%
-- **BG Accuracy:** 95.89%
-- **FG Accuracy:** 76.09%
+- **Total Accuracy:** 76.04%
+- **BG Accuracy:** 68.49%
+- **FG Accuracy:** 100.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 93.8% | 95.2% | 0.0% | ❌ | [0, 5] | [0, 2, 7] |
-| 2 | 84.4% | 100.0% | 72.2% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 95.3% | 94.5% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7] |
+| 1 | 64.1% | 63.5% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
+| 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 64.1% | 58.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.90 | [0.024, 0.033, 0.021, 0.019] | [-3.73, -3.38, -3.86, -3.92] |
-| 2 | 3.91 | [0.023, 0.019, 0.033, 0.020] | [-3.75, -3.94, -3.39, -3.88] |
-| 3 | 3.91 | [0.020, 0.022, 0.021, 0.025] | [-3.88, -3.81, -3.84, -3.68] |
+| 1 | 3.92 | [0.019, 0.021, 0.020, 0.020] | [-3.93, -3.82, -3.91, -3.91] |
+| 2 | 3.92 | [0.020, 0.019, 0.021, 0.020] | [-3.90, -3.92, -3.84, -3.88] |
+| 3 | 3.92 | [0.021, 0.019, 0.021, 0.019] | [-3.84, -3.95, -3.86, -3.93] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.467 | 0.384 | 0.810 | 0.772 |
-| 2 | 0.304 | 0.822 | 0.018 | 0.484 |
-| 3 | 0.707 | 0.755 | 0.753 | 0.545 |
+| 1 | 0.666 | 0.169 | 0.632 | 0.664 |
+| 2 | 0.728 | 0.564 | 0.572 | 0.469 |
+| 3 | 0.213 | 0.621 | 0.387 | 0.700 |
 
 ### Gradient Norms (selected modules)
-- **encoder:** 0.067023
-- **feature_proj:** 0.116496
-- **context_encoder:** 0.172867
-- **context_injector:** 0.082767
-- **dsc:** 0.063336
-- **msre:** 0.135732
-- **solver:** 1.214691
+- **encoder:** 0.024228
+- **feature_proj:** 0.038000
+- **context_encoder:** 0.027387
+- **context_injector:** 0.021048
+- **dsc:** 0.014884
+- **msre:** 0.046039
+- **solver:** 0.669939
 
 ### Predictions vs Targets
 
@@ -1264,10 +1264,10 @@ Target:
 
 Prediction:
 ```
+2 0 0 0
 0 0 0 0
-0 0 0 0
-0 0 0 0
-0 0 0 0
+3 2 3 2
+0 0 7 5
 ```
 
 **Example 2:**
@@ -1284,12 +1284,12 @@ Target:
 
 Prediction:
 ```
-3 2 3 2 0 2
-7 8 7 8 7 0
-2 3 2 3 2 0
-8 7 8 7 0 0
-3 2 3 2 0 0
-7 0 7 0 7 0
+3 2 3 2 3 2
+7 8 7 8 7 8
+2 3 2 3 2 3
+8 7 8 7 8 7
+3 2 3 2 3 2
+7 8 7 8 7 8
 ```
 
 **Example 3:**
@@ -1316,49 +1316,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.387985 |
-| task_loss | 0.243659 |
-| focal_loss | 0.243659 |
-| entropy_loss | 2.225088 |
-| sparsity_loss | 0.080733 |
+| total_loss | 0.346466 |
+| task_loss | 0.216263 |
+| focal_loss | 0.216263 |
+| entropy_loss | 1.835813 |
+| sparsity_loss | 0.073766 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.521465 |
-| deep_supervision_loss | 0.272504 |
+| curriculum_loss | 2.562202 |
+| deep_supervision_loss | 0.245652 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038933 |
-| sparsity_entropy_pondering | 0.041800 |
-| expected_clues_used | 3.893319 |
-| stop_prob_from_loss | 0.026670 |
-| clues_used_std | 0.026808 |
+| sparsity_base_pondering | 0.039173 |
+| sparsity_entropy_pondering | 0.034594 |
+| expected_clues_used | 3.917256 |
+| stop_prob_from_loss | 0.020686 |
+| clues_used_std | 0.002459 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 93.23%
-- **BG Accuracy:** 93.84%
-- **FG Accuracy:** 91.30%
+- **Total Accuracy:** 86.46%
+- **BG Accuracy:** 82.88%
+- **FG Accuracy:** 97.83%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 90.6% | 92.1% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7] |
-| 2 | 95.3% | 100.0% | 91.7% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 93.8% | 92.7% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7, 8] |
+| 1 | 79.7% | 79.4% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
+| 2 | 98.4% | 100.0% | 97.2% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 81.2% | 78.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.86 | [0.041, 0.022, 0.053, 0.022] | [-3.16, -3.79, -2.89, -3.79] |
-| 2 | 3.91 | [0.028, 0.019, 0.019, 0.020] | [-3.54, -3.93, -3.93, -3.89] |
-| 3 | 3.90 | [0.020, 0.026, 0.026, 0.024] | [-3.87, -3.63, -3.61, -3.72] |
+| 1 | 3.92 | [0.019, 0.021, 0.023, 0.022] | [-3.94, -3.82, -3.77, -3.81] |
+| 2 | 3.92 | [0.023, 0.021, 0.019, 0.020] | [-3.75, -3.83, -3.95, -3.87] |
+| 3 | 3.92 | [0.020, 0.020, 0.020, 0.020] | [-3.87, -3.90, -3.88, -3.91] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.263 | 0.833 | 0.123 | 0.691 |
-| 2 | 0.090 | 0.663 | 0.688 | 0.547 |
-| 3 | 0.768 | 0.725 | 0.508 | 0.521 |
+| 1 | 0.576 | 0.444 | 0.209 | 0.331 |
+| 2 | 0.252 | 0.546 | 0.653 | 0.287 |
+| 3 | 0.658 | 0.587 | 0.393 | 0.361 |
 
 
 ## Epoch 22
@@ -1368,22 +1368,22 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.356470 |
-| task_loss | 0.223463 |
-| focal_loss | 0.223463 |
-| entropy_loss | 2.183800 |
-| sparsity_loss | 0.079811 |
+| total_loss | 0.314143 |
+| task_loss | 0.193927 |
+| focal_loss | 0.193927 |
+| entropy_loss | 1.921887 |
+| sparsity_loss | 0.075418 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.517867 |
-| deep_supervision_loss | 0.250051 |
+| curriculum_loss | 2.549727 |
+| deep_supervision_loss | 0.225348 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038910 |
-| sparsity_entropy_pondering | 0.040902 |
-| expected_clues_used | 3.890963 |
-| stop_prob_from_loss | 0.027259 |
-| clues_used_std | 0.015789 |
+| sparsity_base_pondering | 0.039191 |
+| sparsity_entropy_pondering | 0.036227 |
+| expected_clues_used | 3.919132 |
+| stop_prob_from_loss | 0.020217 |
+| clues_used_std | 0.002132 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
@@ -1394,23 +1394,23 @@ Prediction:
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 70.3% | 69.8% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
+| 1 | 76.6% | 76.2% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
 | 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 81.2% | 78.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7, 8] |
+| 3 | 75.0% | 70.9% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.89 | [0.027, 0.027, 0.026, 0.025] | [-3.59, -3.58, -3.63, -3.66] |
-| 2 | 3.90 | [0.020, 0.024, 0.021, 0.030] | [-3.91, -3.70, -3.82, -3.46] |
-| 3 | 3.87 | [0.032, 0.026, 0.026, 0.042] | [-3.41, -3.60, -3.62, -3.13] |
+| 1 | 3.92 | [0.021, 0.022, 0.020, 0.020] | [-3.86, -3.80, -3.92, -3.89] |
+| 2 | 3.92 | [0.021, 0.021, 0.020, 0.021] | [-3.85, -3.86, -3.88, -3.86] |
+| 3 | 3.92 | [0.019, 0.020, 0.021, 0.019] | [-3.94, -3.91, -3.87, -3.93] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.634 | 0.629 | 0.734 | 0.787 |
-| 2 | 0.603 | 0.440 | 0.412 | 0.043 |
-| 3 | 0.371 | 0.592 | 0.723 | 0.334 |
+| 1 | 0.367 | 0.338 | 0.416 | 0.519 |
+| 2 | 0.414 | 0.342 | 0.439 | 0.510 |
+| 3 | 0.747 | 0.580 | 0.369 | 0.504 |
 
 
 ## Epoch 23
@@ -1420,49 +1420,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.341399 |
-| task_loss | 0.209977 |
-| focal_loss | 0.209977 |
-| entropy_loss | 2.623935 |
-| sparsity_loss | 0.087144 |
+| total_loss | 0.300852 |
+| task_loss | 0.183696 |
+| focal_loss | 0.183696 |
+| entropy_loss | 2.101032 |
+| sparsity_loss | 0.078785 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.418719 |
-| deep_supervision_loss | 0.245415 |
+| curriculum_loss | 2.536478 |
+| deep_supervision_loss | 0.218556 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038478 |
-| sparsity_entropy_pondering | 0.048666 |
-| expected_clues_used | 3.847797 |
-| stop_prob_from_loss | 0.038051 |
-| clues_used_std | 0.087011 |
+| sparsity_base_pondering | 0.039185 |
+| sparsity_entropy_pondering | 0.039600 |
+| expected_clues_used | 3.918539 |
+| stop_prob_from_loss | 0.020365 |
+| clues_used_std | 0.001664 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 77.08%
-- **BG Accuracy:** 69.86%
+- **Total Accuracy:** 87.50%
+- **BG Accuracy:** 83.56%
 - **FG Accuracy:** 100.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 60.9% | 60.3% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
+| 1 | 79.7% | 79.4% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
 | 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 70.3% | 65.5% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
+| 3 | 82.8% | 80.0% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.75 | [0.046, 0.100, 0.057, 0.046] | [-3.03, -2.20, -2.81, -3.02] |
-| 2 | 3.92 | [0.019, 0.020, 0.020, 0.022] | [-3.95, -3.90, -3.89, -3.80] |
-| 3 | 3.87 | [0.044, 0.032, 0.025, 0.026] | [-3.07, -3.42, -3.65, -3.63] |
+| 1 | 3.92 | [0.019, 0.023, 0.020, 0.021] | [-3.96, -3.74, -3.92, -3.85] |
+| 2 | 3.92 | [0.019, 0.020, 0.020, 0.023] | [-3.94, -3.89, -3.87, -3.74] |
+| 3 | 3.92 | [0.020, 0.020, 0.020, 0.019] | [-3.87, -3.91, -3.89, -3.93] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.697 | 0.458 | 0.502 | 0.591 |
-| 2 | 0.745 | 0.652 | 0.737 | 0.494 |
-| 3 | 0.647 | 0.647 | 0.649 | 0.753 |
+| 1 | 0.796 | 0.648 | 0.431 | 0.267 |
+| 2 | 0.766 | 0.471 | 0.455 | 0.311 |
+| 3 | 0.307 | 0.660 | 0.406 | 0.544 |
 
 
 ## Epoch 24
@@ -1472,49 +1472,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.294645 |
-| task_loss | 0.179861 |
-| focal_loss | 0.179861 |
-| entropy_loss | 2.137622 |
-| sparsity_loss | 0.079217 |
+| total_loss | 0.298698 |
+| task_loss | 0.185699 |
+| focal_loss | 0.185699 |
+| entropy_loss | 1.955772 |
+| sparsity_loss | 0.075991 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.498143 |
-| deep_supervision_loss | 0.213723 |
+| curriculum_loss | 2.515955 |
+| deep_supervision_loss | 0.210798 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039062 |
-| sparsity_entropy_pondering | 0.040155 |
-| expected_clues_used | 3.906165 |
-| stop_prob_from_loss | 0.023459 |
-| clues_used_std | 0.008807 |
+| sparsity_base_pondering | 0.039154 |
+| sparsity_entropy_pondering | 0.036837 |
+| expected_clues_used | 3.915443 |
+| stop_prob_from_loss | 0.021139 |
+| clues_used_std | 0.003480 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 98.44%
-- **BG Accuracy:** 97.95%
-- **FG Accuracy:** 100.00%
+- **Total Accuracy:** 88.02%
+- **BG Accuracy:** 84.93%
+- **FG Accuracy:** 97.83%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 100.0% | 100.0% | 100.0% | ✅ | [0, 5] | [0, 5] |
-| 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 95.3% | 94.5% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 7, 8] |
+| 1 | 81.2% | 82.5% | 0.0% | ❌ | [0, 5] | [0, 2, 3, 7, 8] |
+| 2 | 98.4% | 96.4% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 84.4% | 81.8% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.90 | [0.027, 0.023, 0.028, 0.022] | [-3.59, -3.73, -3.54, -3.78] |
-| 2 | 3.92 | [0.022, 0.022, 0.019, 0.020] | [-3.78, -3.78, -3.94, -3.88] |
-| 3 | 3.90 | [0.024, 0.024, 0.027, 0.022] | [-3.72, -3.70, -3.58, -3.81] |
+| 1 | 3.92 | [0.024, 0.020, 0.021, 0.019] | [-3.72, -3.89, -3.86, -3.92] |
+| 2 | 3.91 | [0.020, 0.020, 0.025, 0.023] | [-3.87, -3.90, -3.65, -3.76] |
+| 3 | 3.92 | [0.019, 0.020, 0.022, 0.020] | [-3.93, -3.89, -3.80, -3.87] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.667 | 0.731 | 0.470 | 0.686 |
-| 2 | 0.315 | 0.215 | 0.564 | 0.412 |
-| 3 | 0.569 | 0.549 | 0.343 | 0.646 |
+| 1 | 0.149 | 0.536 | 0.569 | 0.516 |
+| 2 | 0.614 | 0.469 | 0.587 | 0.029 |
+| 3 | 0.756 | 0.373 | 0.557 | 0.489 |
 
 
 ## Epoch 25
@@ -1524,49 +1524,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.299102 |
-| task_loss | 0.181450 |
-| focal_loss | 0.181450 |
-| entropy_loss | 2.523299 |
-| sparsity_loss | 0.086670 |
+| total_loss | 0.271971 |
+| task_loss | 0.166998 |
+| focal_loss | 0.166998 |
+| entropy_loss | 1.881687 |
+| sparsity_loss | 0.074574 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.498651 |
-| deep_supervision_loss | 0.217971 |
+| curriculum_loss | 2.498095 |
+| deep_supervision_loss | 0.195032 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039152 |
-| sparsity_entropy_pondering | 0.047518 |
-| expected_clues_used | 3.915237 |
-| stop_prob_from_loss | 0.021191 |
-| clues_used_std | 0.003942 |
+| sparsity_base_pondering | 0.039135 |
+| sparsity_entropy_pondering | 0.035438 |
+| expected_clues_used | 3.913537 |
+| stop_prob_from_loss | 0.021616 |
+| clues_used_std | 0.002884 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 97.92%
-- **BG Accuracy:** 98.63%
-- **FG Accuracy:** 95.65%
+- **Total Accuracy:** 99.48%
+- **BG Accuracy:** 99.32%
+- **FG Accuracy:** 100.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 98.4% | 100.0% | 97.2% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 96.9% | 96.4% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2] |
+| 1 | 100.0% | 100.0% | 100.0% | ✅ | [0, 5] | [0, 5] |
+| 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 98.4% | 98.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.022, 0.022, 0.024, 0.019] | [-3.81, -3.80, -3.69, -3.93] |
-| 2 | 3.92 | [0.019, 0.021, 0.021, 0.019] | [-3.92, -3.83, -3.86, -3.95] |
-| 3 | 3.91 | [0.022, 0.022, 0.020, 0.023] | [-3.79, -3.81, -3.87, -3.76] |
+| 1 | 3.92 | [0.020, 0.022, 0.022, 0.020] | [-3.88, -3.79, -3.81, -3.90] |
+| 2 | 3.91 | [0.020, 0.020, 0.026, 0.020] | [-3.89, -3.90, -3.62, -3.87] |
+| 3 | 3.91 | [0.022, 0.024, 0.021, 0.023] | [-3.80, -3.70, -3.85, -3.76] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.548 | 0.625 | 0.517 | 0.794 |
-| 2 | 0.613 | 0.371 | 0.578 | 0.721 |
-| 3 | 0.725 | 0.546 | 0.795 | 0.448 |
+| 1 | 0.749 | 0.247 | 0.472 | 0.672 |
+| 2 | 0.784 | 0.588 | 0.083 | 0.543 |
+| 3 | 0.328 | 0.322 | 0.249 | 0.395 |
 
 
 ## Epoch 26
@@ -1576,49 +1576,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.257790 |
-| task_loss | 0.153656 |
-| focal_loss | 0.153656 |
-| entropy_loss | 2.608932 |
-| sparsity_loss | 0.088351 |
+| total_loss | 0.257116 |
+| task_loss | 0.155083 |
+| focal_loss | 0.155083 |
+| entropy_loss | 1.534450 |
+| sparsity_loss | 0.068042 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.488097 |
-| deep_supervision_loss | 0.190597 |
+| curriculum_loss | 2.481668 |
+| deep_supervision_loss | 0.190458 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039185 |
-| sparsity_entropy_pondering | 0.049166 |
-| expected_clues_used | 3.918514 |
-| stop_prob_from_loss | 0.020372 |
-| clues_used_std | 0.002927 |
+| sparsity_base_pondering | 0.039147 |
+| sparsity_entropy_pondering | 0.028895 |
+| expected_clues_used | 3.914691 |
+| stop_prob_from_loss | 0.021327 |
+| clues_used_std | 0.002159 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 98.44%
+- **Total Accuracy:** 98.96%
 - **BG Accuracy:** 98.63%
-- **FG Accuracy:** 97.83%
+- **FG Accuracy:** 100.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 96.9% | 92.9% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 100.0% | 100.0% | 100.0% | ✅ | [0, 1, 2] | [0, 1, 2] |
+| 1 | 98.4% | 98.4% | 100.0% | ❌ | [0, 5] | [0, 5, 8] |
+| 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 98.4% | 98.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.92 | [0.020, 0.023, 0.019, 0.019] | [-3.88, -3.76, -3.93, -3.93] |
-| 2 | 3.92 | [0.020, 0.019, 0.020, 0.020] | [-3.90, -3.93, -3.89, -3.92] |
-| 3 | 3.92 | [0.022, 0.020, 0.021, 0.021] | [-3.80, -3.87, -3.85, -3.83] |
+| 1 | 3.91 | [0.022, 0.020, 0.023, 0.020] | [-3.79, -3.88, -3.74, -3.89] |
+| 2 | 3.91 | [0.022, 0.023, 0.021, 0.021] | [-3.78, -3.76, -3.86, -3.82] |
+| 3 | 3.92 | [0.022, 0.020, 0.020, 0.021] | [-3.78, -3.88, -3.90, -3.86] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.619 | 0.542 | 0.766 | 0.742 |
-| 2 | 0.600 | 0.637 | 0.485 | 0.537 |
-| 3 | 0.483 | 0.680 | 0.693 | 0.744 |
+| 1 | 0.413 | 0.402 | 0.210 | 0.590 |
+| 2 | 0.231 | 0.378 | 0.485 | 0.242 |
+| 3 | 0.191 | 0.382 | 0.424 | 0.479 |
 
 
 ## Epoch 27
@@ -1628,49 +1628,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.244419 |
-| task_loss | 0.149042 |
-| focal_loss | 0.149042 |
-| entropy_loss | 2.345199 |
-| sparsity_loss | 0.083225 |
+| total_loss | 0.249551 |
+| task_loss | 0.150939 |
+| focal_loss | 0.150939 |
+| entropy_loss | 1.849804 |
+| sparsity_loss | 0.073832 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.457200 |
-| deep_supervision_loss | 0.174108 |
+| curriculum_loss | 2.452241 |
+| deep_supervision_loss | 0.182456 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039089 |
-| sparsity_entropy_pondering | 0.044136 |
-| expected_clues_used | 3.908913 |
-| stop_prob_from_loss | 0.022772 |
-| clues_used_std | 0.016800 |
+| sparsity_base_pondering | 0.039067 |
+| sparsity_entropy_pondering | 0.034765 |
+| expected_clues_used | 3.906691 |
+| stop_prob_from_loss | 0.023327 |
+| clues_used_std | 0.001117 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 94.79%
-- **BG Accuracy:** 93.84%
-- **FG Accuracy:** 97.83%
+- **Total Accuracy:** 90.62%
+- **BG Accuracy:** 87.67%
+- **FG Accuracy:** 100.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 85.9% | 67.9% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 100.0% | 100.0% | 100.0% | ✅ | [0, 1, 2] | [0, 1, 2] |
+| 1 | 90.6% | 90.5% | 100.0% | ❌ | [0, 5] | [0, 5, 7, 8] |
+| 2 | 95.3% | 89.3% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 3 | 85.9% | 83.6% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2, 3, 7, 8] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.89 | [0.024, 0.036, 0.029, 0.022] | [-3.71, -3.30, -3.52, -3.79] |
-| 2 | 3.92 | [0.023, 0.019, 0.020, 0.021] | [-3.74, -3.94, -3.88, -3.87] |
-| 3 | 3.92 | [0.020, 0.020, 0.020, 0.020] | [-3.87, -3.88, -3.91, -3.90] |
+| 1 | 3.91 | [0.022, 0.025, 0.027, 0.021] | [-3.81, -3.68, -3.58, -3.83] |
+| 2 | 3.91 | [0.027, 0.022, 0.022, 0.021] | [-3.57, -3.77, -3.81, -3.83] |
+| 3 | 3.91 | [0.026, 0.023, 0.023, 0.022] | [-3.64, -3.74, -3.77, -3.82] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.436 | 0.253 | 0.445 | 0.528 |
-| 2 | 0.251 | 0.688 | 0.684 | 0.505 |
-| 3 | 0.596 | 0.798 | 0.818 | 0.765 |
+| 1 | 0.624 | 0.309 | 0.466 | 0.533 |
+| 2 | 0.280 | 0.469 | 0.357 | 0.581 |
+| 3 | 0.305 | 0.403 | 0.479 | 0.533 |
 
 
 ## Epoch 28
@@ -1680,49 +1680,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.236276 |
-| task_loss | 0.142714 |
-| focal_loss | 0.142714 |
-| entropy_loss | 2.512331 |
-| sparsity_loss | 0.086386 |
+| total_loss | 0.238137 |
+| task_loss | 0.143812 |
+| focal_loss | 0.143812 |
+| entropy_loss | 1.849967 |
+| sparsity_loss | 0.073781 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.450088 |
-| deep_supervision_loss | 0.169846 |
+| curriculum_loss | 2.436879 |
+| deep_supervision_loss | 0.173894 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039090 |
-| sparsity_entropy_pondering | 0.047295 |
-| expected_clues_used | 3.909026 |
-| stop_prob_from_loss | 0.022743 |
-| clues_used_std | 0.013734 |
+| sparsity_base_pondering | 0.039044 |
+| sparsity_entropy_pondering | 0.034737 |
+| expected_clues_used | 3.904355 |
+| stop_prob_from_loss | 0.023911 |
+| clues_used_std | 0.004664 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 93.23%
-- **BG Accuracy:** 91.78%
+- **Total Accuracy:** 99.48%
+- **BG Accuracy:** 100.00%
 - **FG Accuracy:** 97.83%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
 | 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 81.2% | 57.1% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
 | 3 | 100.0% | 100.0% | 100.0% | ✅ | [0, 1, 2] | [0, 1, 2] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.022, 0.023, 0.020, 0.025] | [-3.80, -3.77, -3.88, -3.65] |
-| 2 | 3.92 | [0.019, 0.020, 0.019, 0.019] | [-3.92, -3.89, -3.93, -3.94] |
-| 3 | 3.89 | [0.024, 0.021, 0.035, 0.026] | [-3.72, -3.86, -3.32, -3.63] |
+| 1 | 3.90 | [0.026, 0.023, 0.024, 0.024] | [-3.63, -3.76, -3.70, -3.71] |
+| 2 | 3.91 | [0.023, 0.023, 0.021, 0.023] | [-3.73, -3.74, -3.83, -3.76] |
+| 3 | 3.90 | [0.026, 0.026, 0.021, 0.026] | [-3.63, -3.61, -3.82, -3.61] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.743 | 0.740 | 0.804 | 0.499 |
-| 2 | 0.679 | 0.577 | 0.858 | 0.704 |
-| 3 | 0.437 | 0.762 | 0.068 | 0.377 |
+| 1 | 0.408 | 0.396 | 0.352 | 0.521 |
+| 2 | 0.564 | 0.255 | 0.431 | 0.510 |
+| 3 | 0.735 | 0.370 | 0.550 | 0.246 |
 
 
 ## Epoch 29
@@ -1732,49 +1732,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.242253 |
-| task_loss | 0.144529 |
-| focal_loss | 0.144529 |
-| entropy_loss | 2.833924 |
-| sparsity_loss | 0.092547 |
+| total_loss | 0.224295 |
+| task_loss | 0.134344 |
+| focal_loss | 0.134344 |
+| entropy_loss | 1.770055 |
+| sparsity_loss | 0.072341 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.442615 |
-| deep_supervision_loss | 0.176940 |
+| curriculum_loss | 2.428038 |
+| deep_supervision_loss | 0.165433 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039169 |
-| sparsity_entropy_pondering | 0.053378 |
-| expected_clues_used | 3.916909 |
-| stop_prob_from_loss | 0.020773 |
-| clues_used_std | 0.004713 |
+| sparsity_base_pondering | 0.039066 |
+| sparsity_entropy_pondering | 0.033275 |
+| expected_clues_used | 3.906588 |
+| stop_prob_from_loss | 0.023353 |
+| clues_used_std | 0.010889 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 93.23%
-- **BG Accuracy:** 91.78%
+- **Total Accuracy:** 99.48%
+- **BG Accuracy:** 100.00%
 - **FG Accuracy:** 97.83%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
 | 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 81.2% | 57.1% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 2 | 100.0% | 100.0% | 100.0% | ✅ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
 | 3 | 100.0% | 100.0% | 100.0% | ✅ | [0, 1, 2] | [0, 1, 2] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.92 | [0.021, 0.021, 0.020, 0.021] | [-3.85, -3.86, -3.88, -3.82] |
-| 2 | 3.92 | [0.020, 0.020, 0.020, 0.020] | [-3.91, -3.91, -3.91, -3.92] |
-| 3 | 3.91 | [0.021, 0.022, 0.023, 0.022] | [-3.82, -3.81, -3.76, -3.81] |
+| 1 | 3.91 | [0.022, 0.020, 0.022, 0.022] | [-3.78, -3.90, -3.80, -3.80] |
+| 2 | 3.89 | [0.024, 0.026, 0.033, 0.023] | [-3.71, -3.62, -3.37, -3.76] |
+| 3 | 3.91 | [0.022, 0.021, 0.023, 0.022] | [-3.78, -3.84, -3.73, -3.80] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.705 | 0.756 | 0.654 | 0.775 |
-| 2 | 0.635 | 0.571 | 0.530 | 0.741 |
-| 3 | 0.678 | 0.676 | 0.733 | 0.725 |
+| 1 | 0.581 | 0.600 | 0.338 | 0.533 |
+| 2 | 0.678 | 0.287 | 0.187 | 0.426 |
+| 3 | 0.423 | 0.393 | 0.269 | 0.393 |
 
 
 ## Epoch 30
@@ -1784,58 +1784,58 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.239158 |
-| task_loss | 0.141941 |
-| focal_loss | 0.141941 |
-| entropy_loss | 2.678160 |
-| sparsity_loss | 0.089408 |
+| total_loss | 0.220524 |
+| task_loss | 0.131555 |
+| focal_loss | 0.131555 |
+| entropy_loss | 1.583947 |
+| sparsity_loss | 0.068783 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.406436 |
-| deep_supervision_loss | 0.176554 |
+| curriculum_loss | 2.409664 |
+| deep_supervision_loss | 0.164181 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039062 |
-| sparsity_entropy_pondering | 0.050346 |
-| expected_clues_used | 3.906248 |
-| stop_prob_from_loss | 0.023438 |
-| clues_used_std | 0.011235 |
+| sparsity_base_pondering | 0.039021 |
+| sparsity_entropy_pondering | 0.029762 |
+| expected_clues_used | 3.902135 |
+| stop_prob_from_loss | 0.024466 |
+| clues_used_std | 0.008811 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 97.40%
-- **BG Accuracy:** 97.26%
-- **FG Accuracy:** 97.83%
+- **Total Accuracy:** 96.88%
+- **BG Accuracy:** 95.89%
+- **FG Accuracy:** 100.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 93.8% | 85.7% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 1 | 100.0% | 100.0% | 100.0% | ✅ | [0, 5] | [0, 5] |
+| 2 | 90.6% | 78.6% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
 | 3 | 100.0% | 100.0% | 100.0% | ✅ | [0, 1, 2] | [0, 1, 2] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.89 | [0.033, 0.024, 0.022, 0.026] | [-3.38, -3.71, -3.79, -3.60] |
-| 2 | 3.91 | [0.020, 0.032, 0.020, 0.021] | [-3.87, -3.41, -3.89, -3.87] |
-| 3 | 3.92 | [0.021, 0.020, 0.021, 0.021] | [-3.86, -3.88, -3.85, -3.84] |
+| 1 | 3.90 | [0.023, 0.021, 0.030, 0.027] | [-3.75, -3.83, -3.46, -3.59] |
+| 2 | 3.90 | [0.028, 0.023, 0.025, 0.028] | [-3.54, -3.73, -3.66, -3.56] |
+| 3 | 3.91 | [0.020, 0.022, 0.025, 0.021] | [-3.88, -3.79, -3.67, -3.86] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.569 | 0.768 | 0.746 | 0.724 |
-| 2 | 0.484 | 0.162 | 0.771 | 0.531 |
-| 3 | 0.776 | 0.705 | 0.817 | 0.675 |
+| 1 | 0.687 | 0.392 | 0.021 | 0.142 |
+| 2 | 0.471 | 0.398 | 0.509 | 0.096 |
+| 3 | 0.703 | 0.544 | 0.186 | 0.422 |
 
 ### Gradient Norms (selected modules)
-- **encoder:** 0.026661
-- **feature_proj:** 0.046729
-- **context_encoder:** 0.026564
-- **context_injector:** 0.029293
-- **dsc:** 0.040160
-- **msre:** 0.066735
-- **solver:** 0.817953
+- **encoder:** 0.016923
+- **feature_proj:** 0.026538
+- **context_encoder:** 0.041109
+- **context_injector:** 0.017603
+- **dsc:** 0.017839
+- **msre:** 0.026241
+- **solver:** 0.710535
 
 ### Predictions vs Targets
 
@@ -1854,7 +1854,7 @@ Prediction:
 0 0 0 0
 0 0 0 0
 0 0 0 0
-0 0 0 0
+0 0 0 5
 ```
 
 **Example 2:**
@@ -1903,49 +1903,49 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.220504 |
-| task_loss | 0.134422 |
-| focal_loss | 0.134422 |
-| entropy_loss | 2.551668 |
-| sparsity_loss | 0.086916 |
+| total_loss | 0.216866 |
+| task_loss | 0.130478 |
+| focal_loss | 0.130478 |
+| entropy_loss | 1.710302 |
+| sparsity_loss | 0.071208 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.388570 |
-| deep_supervision_loss | 0.154780 |
+| curriculum_loss | 2.393344 |
+| deep_supervision_loss | 0.158534 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039025 |
-| sparsity_entropy_pondering | 0.047892 |
-| expected_clues_used | 3.902458 |
-| stop_prob_from_loss | 0.024385 |
-| clues_used_std | 0.014064 |
+| sparsity_base_pondering | 0.039068 |
+| sparsity_entropy_pondering | 0.032140 |
+| expected_clues_used | 3.906849 |
+| stop_prob_from_loss | 0.023288 |
+| clues_used_std | 0.007897 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
-- **Total Accuracy:** 98.96%
-- **BG Accuracy:** 99.32%
-- **FG Accuracy:** 97.83%
+- **Total Accuracy:** 93.75%
+- **BG Accuracy:** 91.78%
+- **FG Accuracy:** 100.00%
 
 ### Per-Example Metrics
 | Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
 |---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 98.4% | 96.4% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
+| 1 | 87.5% | 87.3% | 100.0% | ❌ | [0, 5] | [0, 2, 3, 5, 7, 8] |
+| 2 | 93.8% | 85.7% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
 | 3 | 100.0% | 100.0% | 100.0% | ✅ | [0, 1, 2] | [0, 1, 2] |
 
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.89 | [0.026, 0.034, 0.022, 0.030] | [-3.61, -3.36, -3.81, -3.49] |
-| 2 | 3.92 | [0.021, 0.020, 0.021, 0.021] | [-3.84, -3.91, -3.84, -3.82] |
-| 3 | 3.90 | [0.027, 0.024, 0.024, 0.022] | [-3.57, -3.69, -3.69, -3.79] |
+| 1 | 3.91 | [0.025, 0.020, 0.022, 0.022] | [-3.67, -3.88, -3.77, -3.82] |
+| 2 | 3.90 | [0.028, 0.025, 0.027, 0.022] | [-3.54, -3.67, -3.59, -3.78] |
+| 3 | 3.91 | [0.021, 0.024, 0.023, 0.021] | [-3.84, -3.72, -3.76, -3.86] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.578 | 0.595 | 0.877 | 0.466 |
-| 2 | 0.460 | 0.640 | 0.561 | 0.546 |
-| 3 | 0.718 | 0.652 | 0.642 | 0.630 |
+| 1 | 0.181 | 0.511 | 0.423 | 0.434 |
+| 2 | 0.664 | 0.236 | 0.256 | 0.506 |
+| 3 | 0.669 | 0.322 | 0.313 | 0.421 |
 
 
 ## Epoch 32
@@ -1955,282 +1955,22 @@ Prediction:
 ### Losses
 | Loss | Value |
 |------|-------|
-| total_loss | 0.212689 |
-| task_loss | 0.125319 |
-| focal_loss | 0.125319 |
-| entropy_loss | 2.145726 |
-| sparsity_loss | 0.079055 |
+| total_loss | 0.210462 |
+| task_loss | 0.122068 |
+| focal_loss | 0.122068 |
+| entropy_loss | 1.776805 |
+| sparsity_loss | 0.072581 |
 | predicate_loss | 0.000000 |
-| curriculum_loss | 2.348592 |
-| deep_supervision_loss | 0.158928 |
+| curriculum_loss | 2.391077 |
+| deep_supervision_loss | 0.162272 |
 | act_loss | 0.000000 |
 | loss_mode | weighted_stablemax |
 | sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038868 |
-| sparsity_entropy_pondering | 0.040186 |
-| expected_clues_used | 3.886849 |
-| stop_prob_from_loss | 0.028288 |
-| clues_used_std | 0.007335 |
-| per_sample_clue_penalty_mean | 0.000000 |
-
-### Metrics
-- **Total Accuracy:** 96.35%
-- **BG Accuracy:** 95.89%
-- **FG Accuracy:** 97.83%
-
-### Per-Example Metrics
-| Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
-|---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 92.2% | 82.1% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 98.4% | 98.2% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2] |
-
-### DSC Analysis
-| Example | Clues Used | Stop Probs | Stop Logits |
-|---------|------------|------------|-------------|
-| 1 | 3.88 | [0.046, 0.026, 0.027, 0.023] | [-3.03, -3.64, -3.60, -3.76] |
-| 2 | 3.89 | [0.026, 0.023, 0.021, 0.037] | [-3.63, -3.73, -3.85, -3.25] |
-| 3 | 3.89 | [0.027, 0.027, 0.027, 0.030] | [-3.58, -3.59, -3.59, -3.48] |
-
-### Attention Entropy (per clue)
-| Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
-|---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.188 | 0.555 | 0.639 | 0.723 |
-| 2 | 0.221 | 0.616 | 0.720 | 0.226 |
-| 3 | 0.497 | 0.663 | 0.693 | 0.451 |
-
-
-## Epoch 33
-
-**Temperature:** 0.8919
-
-### Losses
-| Loss | Value |
-|------|-------|
-| total_loss | 0.212705 |
-| task_loss | 0.128191 |
-| focal_loss | 0.128191 |
-| entropy_loss | 2.356764 |
-| sparsity_loss | 0.083263 |
-| predicate_loss | 0.000000 |
-| curriculum_loss | 2.350595 |
-| deep_supervision_loss | 0.152377 |
-| act_loss | 0.000000 |
-| loss_mode | weighted_stablemax |
-| sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038990 |
-| sparsity_entropy_pondering | 0.044273 |
-| expected_clues_used | 3.898968 |
-| stop_prob_from_loss | 0.025258 |
-| clues_used_std | 0.004596 |
-| per_sample_clue_penalty_mean | 0.000000 |
-
-### Metrics
-- **Total Accuracy:** 91.15%
-- **BG Accuracy:** 88.36%
-- **FG Accuracy:** 100.00%
-
-### Per-Example Metrics
-| Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
-|---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 100.0% | 100.0% | 100.0% | ✅ | [0, 5] | [0, 5] |
-| 2 | 76.6% | 46.4% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 96.9% | 96.4% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2] |
-
-### DSC Analysis
-| Example | Clues Used | Stop Probs | Stop Logits |
-|---------|------------|------------|-------------|
-| 1 | 3.89 | [0.033, 0.026, 0.023, 0.024] | [-3.38, -3.64, -3.73, -3.70] |
-| 2 | 3.90 | [0.026, 0.021, 0.020, 0.034] | [-3.64, -3.86, -3.91, -3.36] |
-| 3 | 3.90 | [0.031, 0.021, 0.023, 0.022] | [-3.43, -3.86, -3.73, -3.80] |
-
-### Attention Entropy (per clue)
-| Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
-|---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.310 | 0.721 | 0.665 | 0.669 |
-| 2 | 0.334 | 0.681 | 0.720 | 0.011 |
-| 3 | 0.293 | 0.902 | 0.719 | 0.776 |
-
-
-## Epoch 34
-
-**Temperature:** 0.8888
-
-### Losses
-| Loss | Value |
-|------|-------|
-| total_loss | 0.217312 |
-| task_loss | 0.132515 |
-| focal_loss | 0.132515 |
-| entropy_loss | 2.285685 |
-| sparsity_loss | 0.081677 |
-| predicate_loss | 0.000000 |
-| curriculum_loss | 2.324239 |
-| deep_supervision_loss | 0.153259 |
-| act_loss | 0.000000 |
-| loss_mode | weighted_stablemax |
-| sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038885 |
-| sparsity_entropy_pondering | 0.042792 |
-| expected_clues_used | 3.888488 |
-| stop_prob_from_loss | 0.027878 |
-| clues_used_std | 0.023253 |
-| per_sample_clue_penalty_mean | 0.000000 |
-
-### Metrics
-- **Total Accuracy:** 90.10%
-- **BG Accuracy:** 87.67%
-- **FG Accuracy:** 97.83%
-
-### Per-Example Metrics
-| Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
-|---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 98.4% | 100.0% | 0.0% | ❌ | [0, 5] | [0] |
-| 2 | 76.6% | 46.4% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 95.3% | 94.5% | 100.0% | ❌ | [0, 1, 2] | [0, 1, 2] |
-
-### DSC Analysis
-| Example | Clues Used | Stop Probs | Stop Logits |
-|---------|------------|------------|-------------|
-| 1 | 3.87 | [0.039, 0.029, 0.040, 0.025] | [-3.20, -3.52, -3.18, -3.68] |
-| 2 | 3.91 | [0.020, 0.020, 0.020, 0.026] | [-3.88, -3.89, -3.90, -3.61] |
-| 3 | 3.88 | [0.024, 0.037, 0.028, 0.028] | [-3.71, -3.27, -3.56, -3.55] |
-
-### Attention Entropy (per clue)
-| Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
-|---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.544 | 0.471 | 0.378 | 0.582 |
-| 2 | 0.643 | 0.567 | 0.816 | 0.249 |
-| 3 | 0.822 | 0.360 | 0.434 | 0.729 |
-
-
-## Epoch 35
-
-**Temperature:** 0.8858
-
-### Losses
-| Loss | Value |
-|------|-------|
-| total_loss | 0.197186 |
-| task_loss | 0.119145 |
-| focal_loss | 0.119145 |
-| entropy_loss | 2.377560 |
-| sparsity_loss | 0.083603 |
-| predicate_loss | 0.000000 |
-| curriculum_loss | 2.322134 |
-| deep_supervision_loss | 0.139362 |
-| act_loss | 0.000000 |
-| loss_mode | weighted_stablemax |
-| sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.038965 |
-| sparsity_entropy_pondering | 0.044638 |
-| expected_clues_used | 3.896474 |
-| stop_prob_from_loss | 0.025881 |
-| clues_used_std | 0.031132 |
-| per_sample_clue_penalty_mean | 0.000000 |
-
-### Metrics
-- **Total Accuracy:** 95.83%
-- **BG Accuracy:** 94.52%
-- **FG Accuracy:** 100.00%
-
-### Per-Example Metrics
-| Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
-|---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 100.0% | 100.0% | 100.0% | ✅ | [0, 5] | [0, 5] |
-| 2 | 87.5% | 71.4% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 100.0% | 100.0% | 100.0% | ✅ | [0, 1, 2] | [0, 1, 2] |
-
-### DSC Analysis
-| Example | Clues Used | Stop Probs | Stop Logits |
-|---------|------------|------------|-------------|
-| 1 | 3.92 | [0.022, 0.020, 0.022, 0.020] | [-3.79, -3.88, -3.79, -3.87] |
-| 2 | 3.91 | [0.020, 0.025, 0.022, 0.020] | [-3.90, -3.66, -3.79, -3.91] |
-| 3 | 3.86 | [0.026, 0.049, 0.033, 0.032] | [-3.63, -2.97, -3.39, -3.39] |
-
-### Attention Entropy (per clue)
-| Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
-|---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.601 | 0.570 | 0.616 | 0.736 |
-| 2 | 0.734 | 0.366 | 0.586 | 0.694 |
-| 3 | 0.705 | 0.131 | 0.774 | 0.346 |
-
-
-## Epoch 36
-
-**Temperature:** 0.8827
-
-### Losses
-| Loss | Value |
-|------|-------|
-| total_loss | 0.190220 |
-| task_loss | 0.114272 |
-| focal_loss | 0.114272 |
-| entropy_loss | 2.492689 |
-| sparsity_loss | 0.086050 |
-| predicate_loss | 0.000000 |
-| curriculum_loss | 2.329815 |
-| deep_supervision_loss | 0.134688 |
-| act_loss | 0.000000 |
-| loss_mode | weighted_stablemax |
-| sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039124 |
-| sparsity_entropy_pondering | 0.046925 |
-| expected_clues_used | 3.912441 |
-| stop_prob_from_loss | 0.021890 |
-| clues_used_std | 0.006467 |
-| per_sample_clue_penalty_mean | 0.000000 |
-
-### Metrics
-- **Total Accuracy:** 98.44%
-- **BG Accuracy:** 97.95%
-- **FG Accuracy:** 100.00%
-
-### Per-Example Metrics
-| Example | Accuracy | BG Acc | FG Acc | Exact Match | Target Classes | Pred Classes |
-|---------|----------|--------|--------|-------------|----------------|---------------|
-| 1 | 100.0% | 100.0% | 100.0% | ✅ | [0, 5] | [0, 5] |
-| 2 | 95.3% | 89.3% | 100.0% | ❌ | [0, 2, 3, 7, 8] | [0, 2, 3, 7, 8] |
-| 3 | 100.0% | 100.0% | 100.0% | ✅ | [0, 1, 2] | [0, 1, 2] |
-
-### DSC Analysis
-| Example | Clues Used | Stop Probs | Stop Logits |
-|---------|------------|------------|-------------|
-| 1 | 3.91 | [0.023, 0.025, 0.023, 0.021] | [-3.77, -3.65, -3.74, -3.86] |
-| 2 | 3.92 | [0.020, 0.020, 0.021, 0.019] | [-3.89, -3.88, -3.86, -3.94] |
-| 3 | 3.91 | [0.022, 0.020, 0.027, 0.021] | [-3.80, -3.87, -3.58, -3.83] |
-
-### Attention Entropy (per clue)
-| Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
-|---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.681 | 0.374 | 0.534 | 0.734 |
-| 2 | 0.619 | 0.739 | 0.512 | 0.784 |
-| 3 | 0.684 | 0.751 | 0.217 | 0.564 |
-
-
-## Epoch 37
-
-**Temperature:** 0.8796
-
-### Losses
-| Loss | Value |
-|------|-------|
-| total_loss | 0.190726 |
-| task_loss | 0.112158 |
-| focal_loss | 0.112158 |
-| entropy_loss | 2.743025 |
-| sparsity_loss | 0.090698 |
-| predicate_loss | 0.000000 |
-| curriculum_loss | 2.311955 |
-| deep_supervision_loss | 0.138995 |
-| act_loss | 0.000000 |
-| loss_mode | weighted_stablemax |
-| sparsity_min_clue_penalty | 0.000000 |
-| sparsity_base_pondering | 0.039102 |
-| sparsity_entropy_pondering | 0.051596 |
-| expected_clues_used | 3.910157 |
-| stop_prob_from_loss | 0.022461 |
-| clues_used_std | 0.006974 |
+| sparsity_base_pondering | 0.039133 |
+| sparsity_entropy_pondering | 0.033447 |
+| expected_clues_used | 3.913337 |
+| stop_prob_from_loss | 0.021666 |
+| clues_used_std | 0.007263 |
 | per_sample_clue_penalty_mean | 0.000000 |
 
 ### Metrics
@@ -2248,24 +1988,24 @@ Prediction:
 ### DSC Analysis
 | Example | Clues Used | Stop Probs | Stop Logits |
 |---------|------------|------------|-------------|
-| 1 | 3.91 | [0.025, 0.024, 0.023, 0.024] | [-3.68, -3.71, -3.76, -3.71] |
-| 2 | 3.92 | [0.019, 0.022, 0.020, 0.021] | [-3.92, -3.79, -3.91, -3.86] |
-| 3 | 3.91 | [0.022, 0.027, 0.021, 0.024] | [-3.81, -3.59, -3.86, -3.72] |
+| 1 | 3.92 | [0.020, 0.019, 0.021, 0.021] | [-3.90, -3.94, -3.85, -3.86] |
+| 2 | 3.91 | [0.024, 0.022, 0.028, 0.020] | [-3.70, -3.81, -3.53, -3.87] |
+| 3 | 3.91 | [0.022, 0.022, 0.021, 0.020] | [-3.81, -3.79, -3.83, -3.88] |
 
 ### Attention Entropy (per clue)
 | Example | Clue 0 | Clue 1 | Clue 2 | Clue 3 | Clue 4 | Clue 5 |
 |---------|--------|--------|--------|--------|--------|--------|
-| 1 | 0.630 | 0.518 | 0.715 | 0.547 |
-| 2 | 0.786 | 0.522 | 0.815 | 0.642 |
-| 3 | 0.739 | 0.363 | 0.801 | 0.836 |
+| 1 | 0.671 | 0.478 | 0.267 | 0.487 |
+| 2 | 0.674 | 0.405 | 0.229 | 0.478 |
+| 3 | 0.439 | 0.286 | 0.241 | 0.472 |
 
 
-## 🎉 SUCCESS: All examples solved at epoch 37!
+## 🎉 SUCCESS: All examples solved at epoch 32!
 
 ---
 
 # Final Summary
 
-- **Best Accuracy:** 100.00% (epoch 37)
+- **Best Accuracy:** 100.00% (epoch 32)
 - **All Exact Match:** ✅ Yes
 
