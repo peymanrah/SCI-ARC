@@ -1388,6 +1388,32 @@ Config Overrides:
     else:
         print("Starting fresh training")
     
+    # ================================================================
+    # VALIDATE num_classes vs use_trm_encoding CONSISTENCY
+    # ================================================================
+    # TRM encoding shifts colors by +1 and adds boundary class 0:
+    #   - Without TRM: classes 0-9 (10 colors) → num_classes=10
+    #   - With TRM: class 0 (boundary) + classes 1-10 (colors) → num_classes=11
+    # Mismatch causes CUDA scatter/gather index out of bounds errors!
+    data_cfg = config.get('data', {})
+    model_cfg = config.get('model', {})
+    use_trm_encoding = data_cfg.get('use_trm_encoding', True)  # Defaults to True
+    expected_classes = 11 if use_trm_encoding else 10
+    actual_classes = model_cfg.get('num_classes', 10)
+    
+    if actual_classes != expected_classes:
+        print(f"\n{'!'*60}")
+        print(f"WARNING: num_classes MISMATCH DETECTED!")
+        print(f"{'!'*60}")
+        print(f"  use_trm_encoding: {use_trm_encoding}")
+        print(f"  Expected num_classes: {expected_classes}")
+        print(f"  Config num_classes: {actual_classes}")
+        print(f"  AUTO-FIXING: Setting num_classes={expected_classes}")
+        print(f"{'!'*60}\n")
+        config['model']['num_classes'] = expected_classes
+    else:
+        print(f"\nnum_classes validation: OK (TRM={use_trm_encoding}, classes={actual_classes})")
+    
     # Create model
     model = create_model(config)
     model = model.to(device)

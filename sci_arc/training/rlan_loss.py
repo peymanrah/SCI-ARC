@@ -219,6 +219,19 @@ class WeightedStablemaxLoss(nn.Module):
         targets_valid = targets_flat[valid_mask]
         n_valid = targets_valid.numel()
         
+        # SAFETY CHECK: Clamp target values to valid range [0, C-1]
+        # This prevents CUDA scatter/gather index out of bounds errors if
+        # targets contain values >= C (e.g., from TRM encoding mismatch)
+        if targets_valid.max() >= C or targets_valid.min() < 0:
+            # Log warning for debugging (but don't crash)
+            import warnings
+            warnings.warn(
+                f"Target values out of range! min={targets_valid.min().item()}, "
+                f"max={targets_valid.max().item()}, expected [0, {C-1}]. "
+                f"Check num_classes matches use_trm_encoding setting."
+            )
+            targets_valid = targets_valid.clamp(0, C - 1)
+        
         # Compute DYNAMIC class weights based on batch statistics
         # Count each class in this batch
         class_counts = torch.bincount(targets_valid, minlength=C).float()  # (C,)

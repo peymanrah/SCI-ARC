@@ -25,7 +25,7 @@ model:
   type: "rlan"
   hidden_dim: 256   # Main capacity driver (~7.8M total params)
   num_colors: 10
-  num_classes: 10   # ARC colors 0-9 (0=black/background, 1-9=colors)
+  num_classes: 11   # TRM encoding: 0=boundary, 1-10=colors (shifted +1)
   max_grid_size: 30
   
   # Task-specific (NOT capacity-dependent) - fixed across configs
