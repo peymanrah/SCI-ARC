@@ -1120,19 +1120,32 @@ def evaluate(
     
     CRITICAL: temperature should match or be close to training temperature!
     Using temp=0.1 when training at temp=0.85 causes distribution shift.
+    
+    METRICS COMPUTED OVER VALID PIXELS ONLY (excluding -100 padding):
+    - pixel_accuracy: correct / total valid pixels
+    - task_accuracy: tasks where ALL valid pixels are correct
+    - non_bg_accuracy: accuracy on foreground pixels only (colors 1-9)
+    - fg_accuracy: same as non_bg_accuracy (TRM-aware)
     """
     model.eval()
     
     total_correct = 0
-    total_pixels = 0
+    total_valid_pixels = 0
     total_tasks = 0
     correct_tasks = 0
     
     # Additional metrics for debugging
-    total_non_bg_correct = 0
-    total_non_bg_pixels = 0
-    color_predictions = [0] * 10  # Count predictions per color (0-9)
-    color_targets = [0] * 10
+    total_fg_correct = 0  # Foreground (colors 1-9, not boundary/black)
+    total_fg_pixels = 0
+    total_boundary_correct = 0  # Boundary markers (class 0 with TRM)
+    total_boundary_pixels = 0
+    total_bg_correct = 0  # Background/black (class 1 with TRM, class 0 without)
+    total_bg_pixels = 0
+    
+    # Detect TRM encoding from model output (11 classes = TRM, 10 = original)
+    num_classes = None  # Will be set from first batch
+    color_predictions = None  # Will initialize after knowing num_classes
+    color_targets = None
     
     # Module-specific debugging metrics
     dsc_entropy_sum = 0.0
@@ -1164,28 +1177,66 @@ def evaluate(
             logits = outputs['logits']
             predictions = logits.argmax(dim=1)
             
-            # Pixel accuracy
-            correct = (predictions == test_outputs).float()
-            total_correct += correct.sum().item()
-            total_pixels += test_outputs.numel()
+            # Initialize color tracking on first batch (after we know num_classes)
+            if num_classes is None:
+                num_classes = logits.shape[1]  # 11 with TRM encoding, 10 without
+                color_predictions = [0] * num_classes
+                color_targets = [0] * num_classes
+                use_trm = (num_classes == 11)
+                # With TRM: 0=boundary, 1=black(bg), 2-10=colors 1-9 (fg)
+                # Without TRM: 0=black(bg), 1-9=colors 1-9 (fg)
+                fg_start = 2 if use_trm else 1
+                bg_class = 1 if use_trm else 0
+                boundary_class = 0 if use_trm else None
             
-            # Non-background accuracy (critical for detecting background collapse)
-            non_bg_mask = test_outputs > 0  # Non-background pixels
-            if non_bg_mask.any():
-                non_bg_correct = ((predictions == test_outputs) & non_bg_mask).float()
-                total_non_bg_correct += non_bg_correct.sum().item()
-                total_non_bg_pixels += non_bg_mask.sum().item()
+            # CRITICAL: Only evaluate on VALID pixels (exclude -100 padding)
+            valid_mask = test_outputs >= 0  # Exclude -100 padding
+            batch_valid_pixels = valid_mask.sum().item()
             
-            # Color distribution tracking (ARC colors 0-9)
-            for c in range(10):
-                color_predictions[c] += (predictions == c).sum().item()
-                color_targets[c] += (test_outputs == c).sum().item()
+            if batch_valid_pixels > 0:
+                # Pixel accuracy (over valid pixels only)
+                correct_mask = (predictions == test_outputs) & valid_mask
+                total_correct += correct_mask.sum().item()
+                total_valid_pixels += batch_valid_pixels
+                
+                # Foreground accuracy (colors 1-9, excluding boundary and black)
+                fg_mask = (test_outputs >= fg_start) & valid_mask
+                if fg_mask.any():
+                    fg_correct = (correct_mask & fg_mask).sum().item()
+                    total_fg_correct += fg_correct
+                    total_fg_pixels += fg_mask.sum().item()
+                
+                # Background accuracy (black/color 0)
+                bg_mask = (test_outputs == bg_class) & valid_mask
+                if bg_mask.any():
+                    bg_correct = (correct_mask & bg_mask).sum().item()
+                    total_bg_correct += bg_correct
+                    total_bg_pixels += bg_mask.sum().item()
+                
+                # Boundary accuracy (class 0 with TRM encoding)
+                if boundary_class is not None:
+                    boundary_mask = (test_outputs == boundary_class) & valid_mask
+                    if boundary_mask.any():
+                        boundary_correct = (correct_mask & boundary_mask).sum().item()
+                        total_boundary_correct += boundary_correct
+                        total_boundary_pixels += boundary_mask.sum().item()
+                
+                # Color distribution tracking (over valid pixels only)
+                valid_preds = predictions[valid_mask]
+                valid_targets = test_outputs[valid_mask]
+                for c in range(num_classes):
+                    color_predictions[c] += (valid_preds == c).sum().item()
+                    color_targets[c] += (valid_targets == c).sum().item()
             
-            # Task accuracy (all pixels correct)
+            # Task accuracy (all VALID pixels correct)
             batch_size = test_inputs.shape[0]
             for i in range(batch_size):
-                if (predictions[i] == test_outputs[i]).all():
-                    correct_tasks += 1
+                task_valid_mask = test_outputs[i] >= 0
+                if task_valid_mask.any():
+                    # Task is correct if ALL valid pixels match
+                    task_correct = ((predictions[i] == test_outputs[i]) | ~task_valid_mask).all()
+                    if task_correct:
+                        correct_tasks += 1
                 total_tasks += 1
             
             # DSC metrics (attention maps)
@@ -1217,17 +1268,37 @@ def evaluate(
             
             num_eval_samples += batch_size
     
-    pixel_accuracy = total_correct / max(total_pixels, 1)
+    # Compute final metrics (all over VALID pixels only)
+    pixel_accuracy = total_correct / max(total_valid_pixels, 1)
     task_accuracy = correct_tasks / max(total_tasks, 1)
-    non_bg_accuracy = total_non_bg_correct / max(total_non_bg_pixels, 1)
+    fg_accuracy = total_fg_correct / max(total_fg_pixels, 1)
+    bg_accuracy = total_bg_correct / max(total_bg_pixels, 1)
+    boundary_accuracy = total_boundary_correct / max(total_boundary_pixels, 1)
     
-    # Calculate background ratio in predictions
-    bg_ratio_pred = color_predictions[0] / max(sum(color_predictions), 1)
-    bg_ratio_target = color_targets[0] / max(sum(color_targets), 1)
+    # Calculate class distribution ratios (over valid pixels)
+    total_valid = sum(color_predictions) if color_predictions else 1
+    total_target = sum(color_targets) if color_targets else 1
     
-    # Color diversity (how many colors are actually predicted)
-    colors_used = sum(1 for c in color_predictions if c > 0)
-    colors_target = sum(1 for c in color_targets if c > 0)
+    # With TRM: class 0=boundary, class 1=bg/black
+    # Without TRM: class 0=bg/black
+    if num_classes == 11:  # TRM encoding
+        boundary_ratio_pred = color_predictions[0] / max(total_valid, 1)
+        boundary_ratio_target = color_targets[0] / max(total_target, 1)
+        bg_ratio_pred = color_predictions[1] / max(total_valid, 1)
+        bg_ratio_target = color_targets[1] / max(total_target, 1)
+        fg_ratio_pred = sum(color_predictions[2:]) / max(total_valid, 1)
+        fg_ratio_target = sum(color_targets[2:]) / max(total_target, 1)
+    else:  # Original encoding
+        boundary_ratio_pred = 0.0
+        boundary_ratio_target = 0.0
+        bg_ratio_pred = color_predictions[0] / max(total_valid, 1) if color_predictions else 0
+        bg_ratio_target = color_targets[0] / max(total_target, 1) if color_targets else 0
+        fg_ratio_pred = sum(color_predictions[1:]) / max(total_valid, 1) if color_predictions else 0
+        fg_ratio_target = sum(color_targets[1:]) / max(total_target, 1) if color_targets else 0
+    
+    # Color diversity (how many colors are actually predicted vs targets)
+    colors_used = sum(1 for c in color_predictions if c > 0) if color_predictions else 0
+    colors_target = sum(1 for c in color_targets if c > 0) if color_targets else 0
     
     # Handle stop_prob tracking (may not be in scope if no stop_logits)
     try:
@@ -1236,13 +1307,33 @@ def evaluate(
         eval_stop_prob = 0.0
 
     return {
+        # Primary metrics (computed over valid pixels only)
         'pixel_accuracy': pixel_accuracy,
         'task_accuracy': task_accuracy,
-        'non_bg_accuracy': non_bg_accuracy,
+        'fg_accuracy': fg_accuracy,  # Renamed from non_bg_accuracy for clarity
+        'bg_accuracy': bg_accuracy,
+        'boundary_accuracy': boundary_accuracy,
+        
+        # Class distribution ratios (over valid pixels)
+        'boundary_ratio_pred': boundary_ratio_pred,
+        'boundary_ratio_target': boundary_ratio_target,
         'bg_ratio_pred': bg_ratio_pred,
         'bg_ratio_target': bg_ratio_target,
+        'fg_ratio_pred': fg_ratio_pred,
+        'fg_ratio_target': fg_ratio_target,
+        
+        # Color diversity
         'colors_used': colors_used,
         'colors_target': colors_target,
+        'num_classes': num_classes,
+        
+        # Pixel counts for debugging
+        'total_valid_pixels': total_valid_pixels,
+        'total_fg_pixels': total_fg_pixels,
+        'total_bg_pixels': total_bg_pixels,
+        'total_boundary_pixels': total_boundary_pixels,
+        
+        # Module metrics
         'dsc_entropy': dsc_entropy_sum / max(num_eval_samples, 1),
         'dsc_clues_used': dsc_usage_sum / max(num_eval_samples, 1),
         'eval_stop_prob': eval_stop_prob,
@@ -2102,14 +2193,21 @@ Config Overrides:
                 print(f"  Pred %: [{pred_str}]")
                 print(f"  Target %: [{tgt_str}]")
                 
-                # Check for background collapse
-                bg_excess = pred_pcts[0] - target_pcts[0] if len(pred_pcts) > 0 and len(target_pcts) > 0 else 0
-                if bg_excess > 10:
-                    print(f"    [!] Over-predicting background by {bg_excess:.1f}%!")
+                # Check for background collapse (with TRM: class 0 is boundary, class 1 is black)
+                # Determine if TRM encoding based on number of classes
+                num_classes = len(pred_pcts)
+                use_trm = (num_classes == 11)
+                bg_class = 1 if use_trm else 0  # Black/background class
+                fg_start = 2 if use_trm else 1  # First foreground color class
+                
+                if len(pred_pcts) > bg_class and len(target_pcts) > bg_class:
+                    bg_excess = pred_pcts[bg_class] - target_pcts[bg_class]
+                    if bg_excess > 10:
+                        print(f"    [!] Over-predicting BG (class {bg_class}) by {bg_excess:.1f}%!")
                 
                 # Check which foreground colors are being missed
                 missed_colors = []
-                for c in range(1, 10):
+                for c in range(fg_start, num_classes):
                     if c < len(target_pcts) and c < len(pred_pcts):
                         if target_pcts[c] > 1.0 and pred_pcts[c] < 0.5:  # Target has >1%, pred <0.5%
                             missed_colors.append(c)
@@ -2121,7 +2219,8 @@ Config Overrides:
                 class_total = diagnostics.get('per_class_total', [])
                 if class_correct and class_total:
                     class_accs = []
-                    for c in range(10):
+                    num_classes = len(class_correct)  # Use actual num_classes (11 with TRM, 10 without)
+                    for c in range(num_classes):
                         if c < len(class_total) and class_total[c] > 0:
                             acc = class_correct[c] / class_total[c] * 100
                             class_accs.append(f"{acc:.0f}")
@@ -2251,17 +2350,29 @@ Config Overrides:
             # DIAGNOSTIC: Also eval training model to detect EMA lag
             if ema is not None:
                 train_model_metrics = evaluate(model, eval_loader, device, temperature=eval_temp)
-                train_non_bg = train_model_metrics['non_bg_accuracy']
-                ema_non_bg = eval_metrics['non_bg_accuracy']
-                if train_non_bg > ema_non_bg + 0.1:  # Training model significantly better
-                    print(f"\n  [!] EMA LAG: Training model Non-BG={train_non_bg:.1%} vs EMA Non-BG={ema_non_bg:.1%}")
+                train_fg = train_model_metrics['fg_accuracy']
+                ema_fg = eval_metrics['fg_accuracy']
+                if train_fg > ema_fg + 0.1:  # Training model significantly better
+                    print(f"\n  [!] EMA LAG: Training model FG={train_fg:.1%} vs EMA FG={ema_fg:.1%}")
                     print(f"      Training model is learning but EMA hasn't caught up yet")
             
-            # Core metrics
+            # Core metrics (all computed over VALID pixels only, excluding padding)
+            num_classes = eval_metrics.get('num_classes', 10)
+            use_trm = (num_classes == 11)
+            print(f"  --- Evaluation Metrics (Valid Pixels Only, TRM={use_trm}) ---")
             print(f"  Pixel Accuracy: {eval_metrics['pixel_accuracy']:.4f}")
             print(f"  Task Accuracy: {eval_metrics['task_accuracy']:.4f}")
-            print(f"  Non-BG Accuracy: {eval_metrics['non_bg_accuracy']:.4f}")
-            print(f"  BG Ratio (pred/target): {eval_metrics['bg_ratio_pred']:.2%} / {eval_metrics['bg_ratio_target']:.2%}")
+            print(f"  FG Accuracy (colors 1-9): {eval_metrics['fg_accuracy']:.4f}")
+            print(f"  BG Accuracy (black): {eval_metrics['bg_accuracy']:.4f}")
+            if use_trm:
+                print(f"  Boundary Accuracy: {eval_metrics['boundary_accuracy']:.4f}")
+            
+            # Class distribution ratios
+            print(f"  Class Ratios (pred/target):")
+            if use_trm:
+                print(f"    Boundary: {eval_metrics['boundary_ratio_pred']:.1%} / {eval_metrics['boundary_ratio_target']:.1%}")
+            print(f"    BG (black): {eval_metrics['bg_ratio_pred']:.1%} / {eval_metrics['bg_ratio_target']:.1%}")
+            print(f"    FG (colors): {eval_metrics['fg_ratio_pred']:.1%} / {eval_metrics['fg_ratio_target']:.1%}")
             print(f"  Colors Used (pred/target): {eval_metrics['colors_used']} / {eval_metrics['colors_target']}")
             
             # Module-specific metrics for debugging
@@ -2295,10 +2406,10 @@ Config Overrides:
                 is_collapsing = True
                 collapse_reasons.append(f"BG excess: {bg_excess:.1%}")
             
-            # Check 2: Zero non-background accuracy
-            if eval_metrics['non_bg_accuracy'] < 0.01 and epoch > 10:
+            # Check 2: Zero foreground accuracy (colors 1-9)
+            if eval_metrics['fg_accuracy'] < 0.01 and epoch > 10:
                 is_collapsing = True
-                collapse_reasons.append(f"Non-BG acc: {eval_metrics['non_bg_accuracy']:.1%}")
+                collapse_reasons.append(f"FG acc: {eval_metrics['fg_accuracy']:.1%}")
             
             # Check 3: Too few colors predicted
             if eval_metrics['colors_used'] < eval_metrics['colors_target'] - 3:
@@ -2351,10 +2462,13 @@ Config Overrides:
                     'sparsity_loss': train_losses.get('sparsity_loss', 0.0),
                     'predicate_loss': train_losses.get('predicate_loss', 0.0),
                     'curriculum_loss': train_losses.get('curriculum_loss', 0.0),
-                    # Evaluation metrics
+                    # Evaluation metrics (computed over valid pixels only)
                     'pixel_accuracy': eval_metrics['pixel_accuracy'],
                     'task_accuracy': eval_metrics['task_accuracy'],
-                    'non_bg_accuracy': eval_metrics['non_bg_accuracy'],
+                    'fg_accuracy': eval_metrics['fg_accuracy'],
+                    'bg_accuracy': eval_metrics['bg_accuracy'],
+                    'fg_ratio_pred': eval_metrics['fg_ratio_pred'],
+                    'fg_ratio_target': eval_metrics['fg_ratio_target'],
                     'bg_ratio_pred': eval_metrics['bg_ratio_pred'],
                     'bg_ratio_target': eval_metrics['bg_ratio_target'],
                     'colors_used': eval_metrics['colors_used'],
