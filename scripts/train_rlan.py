@@ -1015,17 +1015,30 @@ def train_epoch(
             with torch.no_grad():
                 preds = logits.argmax(dim=1)  # (B, H, W)
                 num_classes = logits.shape[1]  # 11 with TRM encoding, 10 without
-                pred_counts = [(preds == c).sum().item() for c in range(num_classes)]
                 total_pixels = preds.numel()
-                epoch_diagnostics['pred_class_counts'] = pred_counts
-                epoch_diagnostics['pred_class_pcts'] = [c / total_pixels * 100 for c in pred_counts]
                 
-                # Target distribution for comparison
-                # Note: targets may have -100 for padding (ignored in loss)
+                # Target distribution - use VALID pixels only (exclude -100 padding)
+                # This is what the loss actually sees
                 valid_mask = test_outputs >= 0  # Exclude -100 padding
-                target_counts = [(test_outputs == c).sum().item() for c in range(num_classes)]
+                valid_pixels = valid_mask.sum().item()
+                padding_pct = (total_pixels - valid_pixels) / total_pixels * 100
+                
+                # Count targets over VALID pixels only
+                valid_targets = test_outputs[valid_mask]
+                target_counts = [(valid_targets == c).sum().item() for c in range(num_classes)]
                 epoch_diagnostics['target_class_counts'] = target_counts
-                epoch_diagnostics['target_class_pcts'] = [c / total_pixels * 100 for c in target_counts]
+                epoch_diagnostics['target_class_pcts'] = [c / max(valid_pixels, 1) * 100 for c in target_counts]
+                epoch_diagnostics['padding_pct'] = padding_pct
+                
+                # Prediction distribution - also use VALID pixels only for fair comparison
+                valid_preds = preds[valid_mask]
+                pred_counts = [(valid_preds == c).sum().item() for c in range(num_classes)]
+                epoch_diagnostics['pred_class_counts'] = pred_counts
+                epoch_diagnostics['pred_class_pcts'] = [c / max(valid_pixels, 1) * 100 for c in pred_counts]
+                
+                # Also track predictions over ALL pixels (including padding) for debugging
+                all_pred_counts = [(preds == c).sum().item() for c in range(num_classes)]
+                epoch_diagnostics['pred_all_pcts'] = [c / total_pixels * 100 for c in all_pred_counts]
                 
                 # Per-class accuracy (which colors are we getting right/wrong?)
                 class_correct = []
@@ -2079,9 +2092,11 @@ Config Overrides:
             # Per-class prediction distribution (detect which colors model is predicting)
             pred_pcts = diagnostics.get('pred_class_pcts', [])
             target_pcts = diagnostics.get('target_class_pcts', [])
+            padding_pct = diagnostics.get('padding_pct', 0)
             if pred_pcts and target_pcts:
-                print(f"  --- Per-Class Distribution (Training Batch) ---")
-                # Show compact comparison: [0:bg, 1-9:colors]
+                print(f"  --- Per-Class Distribution (Valid Pixels Only) ---")
+                print(f"  Padding: {padding_pct:.1f}% of grid (ignored in loss)")
+                # Show compact comparison: [0:boundary, 1:black, 2-10:colors 1-9]
                 pred_str = ', '.join(f"{p:.1f}" for p in pred_pcts)
                 tgt_str = ', '.join(f"{t:.1f}" for t in target_pcts)
                 print(f"  Pred %: [{pred_str}]")
