@@ -10,6 +10,7 @@ Features matching CISL production training:
 - File logging for reproducibility
 - WandB integration (optional)
 - Cache samples mode for testing vs infinite diversity for competitive training
+- Proper memory cleanup on exit (RAM + GPU)
 
 Usage:
     python scripts/train_rlan.py --config configs/rlan_base.yaml
@@ -24,6 +25,9 @@ import sys
 import time
 import random
 import math
+import gc
+import signal
+import atexit
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List
@@ -52,6 +56,45 @@ try:
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
+
+
+# Global cleanup flag
+_cleanup_done = False
+
+
+def cleanup_memory():
+    """Clean up GPU and RAM memory."""
+    global _cleanup_done
+    if _cleanup_done:
+        return
+    _cleanup_done = True
+    
+    print("\nCleaning up memory...")
+    
+    # Clear CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    print("Memory cleanup complete.")
+
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C and other termination signals."""
+    print(f"\n\nReceived signal {signum}, cleaning up...")
+    cleanup_memory()
+    sys.exit(0)
+
+
+# Register cleanup handlers
+atexit.register(cleanup_memory)
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+if hasattr(signal, 'SIGBREAK'):  # Windows-specific
+    signal.signal(signal.SIGBREAK, signal_handler)
 
 
 class TeeLogger:
@@ -2562,6 +2605,9 @@ Config Overrides:
     # Cleanup
     if tee_logger:
         tee_logger.close()
+    
+    # Explicit memory cleanup (also called by atexit, but good to be explicit)
+    cleanup_memory()
 
 
 if __name__ == "__main__":
