@@ -69,11 +69,17 @@ def gumbel_softmax_2d(
         H, W = logits.shape[1], logits.shape[2]
         flat = noisy_logits.view(B, -1)
         soft = F.softmax(flat, dim=-1)
+        # CRITICAL: Clamp softmax output to prevent near-zero values
+        # Near-zero attention causes gradient explosion in log(attention) during backward
+        # Using 1e-6 / (H*W) ensures sum is still close to 1 after clamping
+        soft = soft.clamp(min=1e-8)
         soft = soft.view(B, H, W)
     elif logits.dim() == 4:  # (B, K, H, W)
         K, H, W = logits.shape[1], logits.shape[2], logits.shape[3]
         flat = noisy_logits.view(B, K, -1)
         soft = F.softmax(flat, dim=-1)
+        # CRITICAL: Clamp softmax output to prevent near-zero values
+        soft = soft.clamp(min=1e-8)
         soft = soft.view(B, K, H, W)
     else:
         raise ValueError(f"Expected 3D or 4D tensor, got {logits.dim()}D")
@@ -366,8 +372,17 @@ class DynamicSaliencyController(nn.Module):
             # Low entropy = sharp attention (confident) → can stop
             # High entropy = diffuse attention (uncertain) → need more clues
             # This couples attention quality directly to stopping decision!
-            attn_clamped = attention.view(B, -1).clamp(min=1e-10)  # (B, H*W)
-            attn_entropy = -(attn_clamped * torch.log(attn_clamped)).sum(dim=-1, keepdim=True)  # (B, 1)
+            #
+            # CRITICAL: Use 1e-6 minimum, NOT 1e-10!
+            # Softmax can produce values as small as 1e-26 for large grids with sharp peaks
+            # log(1e-26) = -60, and gradient = 1/(1e-26) = 1e26 → NaN!
+            # With 1e-6: log(1e-6) = -13.8, gradient = 1e6 which is manageable
+            attn_clamped = attention.view(B, -1).clamp(min=1e-6, max=1.0)  # (B, H*W)
+            # Use log-space computation for numerical stability
+            log_attn = torch.log(attn_clamped)
+            # Clamp entropy contribution to prevent extreme values
+            entropy_contrib = attn_clamped * log_attn  # Range: 0 to -1e-6 * (-13.8) ≈ 0
+            attn_entropy = -entropy_contrib.sum(dim=-1, keepdim=True)  # (B, 1)
             
             # Normalize entropy to [0, 1] range for stable learning
             # Max entropy for uniform distribution over H*W pixels = log(H*W)
