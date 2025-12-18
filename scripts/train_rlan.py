@@ -769,6 +769,7 @@ def train_epoch(
     initial_lrs = [pg.get('lr', base_lr) for pg in optimizer.param_groups]
     
     optimizer.zero_grad()
+    nan_batches = 0  # Track NaN occurrences for diagnostics
     
     for batch_idx, batch in enumerate(dataloader):
         # Apply warmup with per-group LR preservation
@@ -822,6 +823,13 @@ def train_epoch(
                 
                 # Scale loss for gradient accumulation
                 loss = losses['total_loss'] / grad_accumulation_steps
+            
+            # NaN detection: skip batch if loss is NaN
+            if not torch.isfinite(loss):
+                print(f"[WARNING] NaN/Inf loss at batch {batch_idx}, skipping...")
+                optimizer.zero_grad()  # Clear any partial gradients
+                nan_batches += 1
+                continue
             
             scaler.scale(loss).backward()
             
@@ -884,6 +892,14 @@ def train_epoch(
             )
             
             loss = losses['total_loss'] / grad_accumulation_steps
+            
+            # NaN detection: skip batch if loss is NaN
+            if not torch.isfinite(loss):
+                print(f"[WARNING] NaN/Inf loss at batch {batch_idx}, skipping...")
+                optimizer.zero_grad()  # Clear any partial gradients
+                nan_batches += 1
+                continue
+            
             loss.backward()
             
             if (batch_idx + 1) % grad_accumulation_steps == 0:
@@ -1173,6 +1189,11 @@ def train_epoch(
     # Add epoch-level statistics
     total_losses['total_samples'] = total_samples
     total_losses['num_batches'] = num_batches
+    total_losses['nan_batches'] = nan_batches  # Track NaN occurrences
+    
+    # Log NaN batches if any occurred
+    if nan_batches > 0:
+        print(f"[WARNING] {nan_batches} batches had NaN loss and were skipped this epoch")
     
     # Add augmentation diversity stats (CRITICAL for debugging)
     total_losses['aug_stats'] = epoch_aug_stats

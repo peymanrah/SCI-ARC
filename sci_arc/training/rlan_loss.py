@@ -38,20 +38,32 @@ def stablemax(x: torch.Tensor, epsilon: float = 1e-30) -> torch.Tensor:
         epsilon: Small constant for stability
         
     Returns:
-        Stablemax activations
+        Stablemax activations (always positive)
     """
     # Clamp input to prevent extreme values that could cause overflow
     x = x.clamp(min=-1000, max=1000)
-    return torch.where(
+    
+    # Handle NaN/Inf inputs by replacing with 0
+    x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
+    
+    result = torch.where(
         x < 0,
         1 / (1 - x + epsilon),
         x + 1
     )
+    
+    # Clamp output to ensure positivity and prevent overflow
+    result = result.clamp(min=1e-10, max=1e10)
+    
+    return result
 
 
 def log_stablemax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     """
     Log stablemax for stable cross entropy computation.
+    
+    Uses log-space computation for numerical stability:
+    log(s_i / sum(s)) = log(s_i) - log(sum(s))
     
     Args:
         x: Input logits
@@ -60,13 +72,29 @@ def log_stablemax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     Returns:
         Log probabilities using stablemax normalization
     """
-    # Clamp input first
+    # Clamp input first to prevent extreme values
     x = x.clamp(min=-1000, max=1000)
+    
+    # Handle NaN/Inf inputs by replacing with 0
+    x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
+    
     s_x = stablemax(x)
-    # Add epsilon to prevent log(0)
-    log_probs = torch.log(s_x / (torch.sum(s_x, dim=dim, keepdim=True) + 1e-10))
+    
+    # Clamp stablemax output to ensure positivity
+    s_x = s_x.clamp(min=1e-10)
+    
+    # Use log-space computation for stability
+    log_s_x = torch.log(s_x)
+    log_sum_s = torch.log(torch.sum(s_x, dim=dim, keepdim=True) + 1e-10)
+    log_probs = log_s_x - log_sum_s
+    
     # Clamp output to reasonable range
-    return log_probs.clamp(min=-100, max=0)
+    log_probs = log_probs.clamp(min=-100, max=0)
+    
+    # Final NaN check - replace any NaN with -100 (equivalent to ~0 probability)
+    log_probs = torch.where(torch.isfinite(log_probs), log_probs, torch.full_like(log_probs, -100.0))
+    
+    return log_probs
 
 
 class StablemaxCrossEntropy(nn.Module):
@@ -257,8 +285,24 @@ class WeightedStablemaxLoss(nn.Module):
         ce_loss = -torch.gather(logprobs, 1, targets_valid.unsqueeze(1)).squeeze(1)
         ce_loss = ce_loss.clamp(max=100.0)  # Numerical stability
         
+        # NaN safety: replace any NaN losses with 0 (skip those pixels)
+        nan_mask = ~torch.isfinite(ce_loss)
+        if nan_mask.any():
+            import warnings
+            num_nan = nan_mask.sum().item()
+            warnings.warn(f"WeightedStablemaxLoss: {num_nan} NaN values detected in ce_loss, replacing with 0")
+            ce_loss = torch.where(nan_mask, torch.zeros_like(ce_loss), ce_loss)
+        
         # Apply class weights
         weighted_loss = pixel_weights * ce_loss
+        
+        # Final NaN check on weighted_loss
+        weighted_nan_mask = ~torch.isfinite(weighted_loss)
+        if weighted_nan_mask.any():
+            import warnings
+            num_nan = weighted_nan_mask.sum().item()
+            warnings.warn(f"WeightedStablemaxLoss: {num_nan} NaN values in weighted_loss, replacing with 0")
+            weighted_loss = torch.where(weighted_nan_mask, torch.zeros_like(weighted_loss), weighted_loss)
         
         if self.reduction == "mean":
             return weighted_loss.mean()
@@ -981,11 +1025,25 @@ class RLANLoss(nn.Module):
         # This is the key: each sample's clue penalty affects its own gradient
         B, C, H, W = logits.shape
         
+        # NaN detection on input logits (helps debug source of NaN)
+        if not torch.isfinite(logits).all():
+            import warnings
+            num_nan = (~torch.isfinite(logits)).sum().item()
+            warnings.warn(f"RLANLoss: {num_nan} NaN/Inf values in input logits! Clamping...")
+            logits = torch.where(torch.isfinite(logits), logits, torch.zeros_like(logits))
+        
         # Temporarily change reduction to get per-pixel loss
         saved_reduction = self.task_loss.reduction
         self.task_loss.reduction = "none"
         per_pixel_task_loss = self.task_loss(logits, targets)  # (B, H, W)
         self.task_loss.reduction = saved_reduction
+        
+        # NaN check on per_pixel_task_loss
+        if not torch.isfinite(per_pixel_task_loss).all():
+            import warnings
+            num_nan = (~torch.isfinite(per_pixel_task_loss)).sum().item()
+            warnings.warn(f"RLANLoss: {num_nan} NaN/Inf in per_pixel_task_loss, replacing with 0")
+            per_pixel_task_loss = torch.where(torch.isfinite(per_pixel_task_loss), per_pixel_task_loss, torch.zeros_like(per_pixel_task_loss))
         
         # Per-sample task loss (mean over spatial dims)
         per_sample_task_loss = per_pixel_task_loss.mean(dim=(1, 2))  # (B,)
