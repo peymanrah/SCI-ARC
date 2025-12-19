@@ -2790,6 +2790,170 @@ Config Overrides:
                         elif n > 5:
                             print(f"  ✓ Learning trajectory looks healthy!")
                 print(f"  {'='*50}")
+            
+            # ================================================================
+            # 🚦 TRAINING HEALTH CHECK - CONSOLIDATED GO/STOP SIGNAL
+            # ================================================================
+            # This gives you a QUICK answer: Is training healthy or not?
+            # Check this to decide if you should continue or stop early.
+            # ================================================================
+            
+            print(f"\n  {'#'*60}")
+            print(f"  🚦 TRAINING HEALTH CHECK - Epoch {epoch + 1}")
+            print(f"  {'#'*60}")
+            
+            health_checks = []
+            health_warnings = []
+            health_critical = []
+            
+            n = len(learning_trajectory['epochs'])
+            
+            # === CHECK 1: Attention Entropy (should DECREASE) ===
+            # Normalized entropy: 0=sharp (good), 1=uniform (bad)
+            # For 30x30 grid, max entropy = log(900) ≈ 6.8
+            max_entropy = 6.8  # log(30*30)
+            normalized_entropy = mean_entropy / max_entropy if max_entropy > 0 else 1.0
+            
+            if normalized_entropy < 0.7:
+                health_checks.append(f"✓ Attention sharpening ({normalized_entropy:.2f} < 0.7)")
+            elif normalized_entropy < 0.9:
+                health_warnings.append(f"⚠ Attention still diffuse ({normalized_entropy:.2f})")
+            else:
+                if epoch > 5:
+                    health_critical.append(f"✗ Attention uniform ({normalized_entropy:.2f} ≈ 1.0)")
+                else:
+                    health_warnings.append(f"⚠ Attention uniform ({normalized_entropy:.2f}) - early epoch OK")
+            
+            # === CHECK 2: Stop Probabilities (should adapt, not uniform) ===
+            per_clue_stop = diagnostics.get('per_clue_stop_prob', [])
+            if per_clue_stop:
+                stop_std = (sum((s - stop_prob)**2 for s in per_clue_stop) / len(per_clue_stop))**0.5
+                if stop_std > 0.1:
+                    health_checks.append(f"✓ Stop probs adapting (std={stop_std:.2f})")
+                elif stop_std > 0.03:
+                    health_warnings.append(f"⚠ Stop probs nearly uniform (std={stop_std:.2f})")
+                else:
+                    if epoch > 10:
+                        health_critical.append(f"✗ Stop probs frozen uniform (std={stop_std:.3f})")
+                    else:
+                        health_warnings.append(f"⚠ Stop probs uniform (std={stop_std:.3f}) - early epoch OK")
+            
+            # === CHECK 3: Centroid Spread (should be spread, not clustered) ===
+            centroid_spread = diagnostics.get('centroid_spread', 0)
+            if centroid_spread > 5.0:
+                health_checks.append(f"✓ Centroids spread out ({centroid_spread:.1f} > 5)")
+            elif centroid_spread > 2.0:
+                health_warnings.append(f"⚠ Centroids moderately spread ({centroid_spread:.1f})")
+            else:
+                if epoch > 10:
+                    health_critical.append(f"✗ Centroids clustered ({centroid_spread:.1f} < 2)")
+                else:
+                    health_warnings.append(f"⚠ Centroids clustered ({centroid_spread:.1f}) - early epoch OK")
+            
+            # === CHECK 4: Entropy-Stop Coupling (should be positive) ===
+            clue_loss_corr = diagnostics.get('clue_loss_correlation', 0)
+            if clue_loss_corr > 0.3:
+                health_checks.append(f"✓ Good entropy-stop coupling (r={clue_loss_corr:.2f})")
+            elif clue_loss_corr > 0:
+                health_warnings.append(f"⚠ Weak entropy-stop coupling (r={clue_loss_corr:.2f})")
+            else:
+                if epoch > 15:
+                    health_critical.append(f"✗ No entropy-stop coupling (r={clue_loss_corr:.2f})")
+                else:
+                    health_warnings.append(f"⚠ Negative coupling (r={clue_loss_corr:.2f}) - early epoch OK")
+            
+            # === CHECK 5: Loss Decreasing ===
+            if n >= 3:
+                tl = learning_trajectory['task_loss']
+                if tl[-1] < tl[0] * 0.8:
+                    health_checks.append(f"✓ Loss decreasing ({tl[0]:.3f} → {tl[-1]:.3f})")
+                elif tl[-1] < tl[0]:
+                    health_warnings.append(f"⚠ Loss slowly decreasing ({tl[0]:.3f} → {tl[-1]:.3f})")
+                else:
+                    if epoch > 10:
+                        health_critical.append(f"✗ Loss not decreasing ({tl[0]:.3f} → {tl[-1]:.3f})")
+                    else:
+                        health_warnings.append(f"⚠ Loss flat ({tl[0]:.3f} → {tl[-1]:.3f}) - early epoch")
+            
+            # === CHECK 6: Training Accuracy Improving ===
+            if n >= 3:
+                ta = learning_trajectory['train_accuracy']
+                if ta[-1] > ta[0] + 0.1:  # 10pp improvement
+                    health_checks.append(f"✓ Accuracy improving ({ta[0]:.1%} → {ta[-1]:.1%})")
+                elif ta[-1] > ta[0]:
+                    health_warnings.append(f"⚠ Accuracy slowly improving ({ta[0]:.1%} → {ta[-1]:.1%})")
+                else:
+                    if epoch > 10:
+                        health_critical.append(f"✗ Accuracy not improving ({ta[0]:.1%} → {ta[-1]:.1%})")
+                    else:
+                        health_warnings.append(f"⚠ Accuracy flat ({ta[0]:.1%} → {ta[-1]:.1%}) - early epoch")
+            
+            # === CHECK 7: No NaN/Inf Issues ===
+            nan_batches = train_losses.get('nan_batches', 0)
+            if nan_batches == 0:
+                health_checks.append(f"✓ No NaN/Inf issues")
+            elif nan_batches < 5:
+                health_warnings.append(f"⚠ {nan_batches} NaN batches (minor)")
+            else:
+                health_critical.append(f"✗ {nan_batches} NaN batches (numerical instability!)")
+            
+            # === CHECK 8: Color Mode Collapse ===
+            fg_pred_mode_pct = diagnostics.get('fg_pred_mode_pct', 0)
+            if fg_pred_mode_pct < 30:
+                health_checks.append(f"✓ No color mode collapse")
+            elif fg_pred_mode_pct < 50:
+                health_warnings.append(f"⚠ Color preference ({fg_pred_mode_pct:.0f}% one color)")
+            else:
+                health_critical.append(f"✗ Color mode collapse ({fg_pred_mode_pct:.0f}% one color)")
+            
+            # === PRINT RESULTS ===
+            total_checks = len(health_checks) + len(health_warnings) + len(health_critical)
+            passed = len(health_checks)
+            
+            for check in health_checks:
+                print(f"  {check}")
+            for warn in health_warnings:
+                print(f"  {warn}")
+            for crit in health_critical:
+                print(f"  {crit}")
+            
+            print(f"  {'-'*56}")
+            
+            # === OVERALL VERDICT ===
+            if len(health_critical) == 0 and len(health_warnings) <= 2:
+                verdict = "🟢 HEALTHY"
+                verdict_msg = "Training is progressing well. Continue!"
+            elif len(health_critical) == 0:
+                verdict = "🟡 MONITOR"
+                verdict_msg = "Some concerns but not critical. Watch next few epochs."
+            elif len(health_critical) <= 2:
+                verdict = "🟠 WARNING"
+                verdict_msg = "Multiple issues detected. Consider intervention soon."
+            else:
+                verdict = "🔴 UNHEALTHY"
+                verdict_msg = "Training likely failing. STOP and investigate!"
+            
+            print(f"  RESULT: {passed}/{total_checks} checks passed")
+            print(f"  STATUS: {verdict}")
+            print(f"  → {verdict_msg}")
+            
+            # === ACTIONABLE ADVICE ===
+            if len(health_critical) > 0:
+                print(f"\n  RECOMMENDED ACTIONS:")
+                if any("Attention" in c for c in health_critical):
+                    print(f"    - Increase lambda_entropy to sharpen attention")
+                if any("Stop probs" in c for c in health_critical):
+                    print(f"    - Check stop_predictor gradient flow")
+                if any("Centroids" in c for c in health_critical):
+                    print(f"    - DSC may not be learning - check DSC gradients")
+                if any("Loss" in c for c in health_critical):
+                    print(f"    - Reduce learning rate or check data pipeline")
+                if any("NaN" in c for c in health_critical):
+                    print(f"    - Enable bfloat16, reduce learning rate, check for div by zero")
+                if any("collapse" in c for c in health_critical):
+                    print(f"    - Increase focal_alpha, check class weights")
+            
+            print(f"  {'#'*60}")
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:
