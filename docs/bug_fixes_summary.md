@@ -102,6 +102,32 @@ After investigating alternatives to WeightedStablemaxLoss, we found:
 | Constrained Learnable | ❌ Converge to lower bound |
 | Class-Balanced (Cui et al. 2019) | ⚠️ Downweights BG (opposite of what we want) |
 | Temperature Blending | ✓ Learned t=0.989 → confirms freq-based is optimal |
+| **FocalWeightedStablemaxLoss** | ❌ **FAILED** - causes BG collapse in practice! |
+| **WeightedStablemaxLoss** | ✅ **RECOMMENDED** - proven stable |
+
+### ⚠️ WARNING: FocalWeightedStablemaxLoss Causes BG Collapse!
+
+**What we observed in training:**
+```
+Batch 0-3:  FG=9.5%, BG=1.0%   (learning FG, ignoring BG)
+Batch 4-7:  FG=0.0%, BG=100%   (COLLAPSED to all-BG!) ← Loss spikes to 5.9!
+Batch 8+:   FG=0-4%, BG=98-100% (stuck predicting all-BG)
+```
+
+**Why focal modulation fails for ARC:**
+1. Model discovers "predict all BG" → gets ~50% accuracy "for free"
+2. BG pixels become "easy" → focal weight `(1-p_t)^gamma → 0`
+3. FG errors get high focal weight but they're minority pixels
+4. Net: Model punished for FG mistakes, rewarded for BG → collapse!
+
+**Recommendation: Use `weighted_stablemax` (no focal)**
+- Maintains constant gradient regardless of confidence
+- Prevents model from "locking in" to local minima
+- Proven stable in all testing
+| Pure Learnable Weights | ❌ Collapse to near-zero (model "cheats") |
+| Constrained Learnable | ❌ Converge to lower bound |
+| Class-Balanced (Cui et al. 2019) | ⚠️ Downweights BG (opposite of what we want) |
+| Temperature Blending | ✓ Learned t=0.989 → confirms freq-based is optimal |
 | **FocalWeightedStablemaxLoss** | ✅ **RECOMMENDED** - keeps BG/FG balance + dynamic focus |
 
 ### FocalWeightedStablemaxLoss (NEW - RECOMMENDED)

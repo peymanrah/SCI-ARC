@@ -78,20 +78,18 @@ training:
   # LOSS CONFIGURATION (Validated by Ablation)
   # ============================================================
   # ============================================================
-  # LOSS CONFIGURATION - FOCAL WEIGHTED (RECOMMENDED)
+  # LOSS CONFIGURATION - PURE STABLEMAX (TRM PROVEN)
   # ============================================================
-  # FocalWeightedStablemaxLoss = our weights + focal modulation
-  # Combines BG/FG gradient balance with dynamic hard-pixel focusing
+  # TRM uses pure stablemax with NO class weighting.
+  # Class balance handled via 100% color permutation.
   # ============================================================
-  loss_mode: 'focal_weighted'  # RECOMMENDED: weights + focal modulation
+  loss_mode: 'stablemax'  # TRM-proven: pure cross-entropy
   
-  # BG/FG weight caps (validated by ablation)
-  bg_weight_cap: 2.0               # BG weight (ensures ~52% gradient to BG)
-  fg_weight_cap: 5.0               # Max FG weight (rarest class = 5.0)
+  bg_weight_cap: 2.0      # Not used with stablemax
+  fg_weight_cap: 5.0      # Not used with stablemax
   
-  # Focal params
-  focal_gamma: 2.0                 # Focusing parameter (higher = more focus on hard)
-  focal_alpha: 0.75                # Only used for legacy focal modes
+  focal_gamma: 2.0        # Not used with stablemax
+  focal_alpha: 0.75       # Not used with stablemax
   
   # ============================================================
   # MINIMAL AUXILIARY LOSSES (Ablation Validated)

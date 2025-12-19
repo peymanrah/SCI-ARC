@@ -71,17 +71,15 @@ training:
   temperature_start: 5.0
   temperature_end: 0.1
   
-  # Loss configuration - FOCAL WEIGHTED (RECOMMENDED)
-  # FocalWeightedStablemaxLoss = our weights + focal modulation
-  loss_mode: 'focal_weighted'
-  bg_weight_cap: 2.0
-  fg_weight_cap: 5.0
+  # Loss configuration - PURE STABLEMAX (TRM PROVEN)
+  loss_mode: 'stablemax'
+  bg_weight_cap: 2.0      # Not used
+  fg_weight_cap: 5.0      # Not used
   
-  # Focal/loss params
   focal_gamma: 2.0
   focal_alpha: 0.25
   lambda_entropy: 0.01
-  lambda_sparsity: 0.001   # REDUCED from 0.005 to prevent DSC collapse
+  lambda_sparsity: 0.001
   lambda_predicate: 0.001
   lambda_curriculum: 0.01
   lambda_deep_supervision: 0.3

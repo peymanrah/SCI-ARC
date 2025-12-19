@@ -64,10 +64,10 @@ training:
   temperature_start: 0.7  # Start lower (model is pretrained)
   temperature_end: 0.5
   
-  # LOSS: focal_weighted = our weights + focal modulation (RECOMMENDED)
-  loss_mode: 'focal_weighted'
-  bg_weight_cap: 2.0
-  fg_weight_cap: 5.0
+  # LOSS: pure stablemax (TRM-proven)
+  loss_mode: 'stablemax'
+  bg_weight_cap: 2.0      # Not used
+  fg_weight_cap: 5.0      # Not used
   
   focal_gamma: 2.0
   focal_alpha: 0.75

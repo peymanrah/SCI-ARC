@@ -100,31 +100,17 @@ training:
   temperature_end: 0.1
   
   # =============================================================
-  # LOSS CONFIGURATION - FOCAL WEIGHTED (RECOMMENDED)
+  # LOSS CONFIGURATION - PURE STABLEMAX (TRM PROVEN)
   # =============================================================
-  # FocalWeightedStablemaxLoss combines:
-  #   1. Our weight philosophy: BG=cap, FG scaled 1.0-cap (gradient balance)
-  #   2. Focal modulation: (1-p_t)^gamma (dynamic focus on hard pixels)
-  #   3. Stablemax: Numerically stable softmax alternative
-  #
-  # Benefits:
-  #   - Same BG/FG gradient balance as weighted_stablemax
-  #   - PLUS: Easy pixels automatically down-weighted as training progresses
-  #   - Early training: All pixels hard → all get attention
-  #   - Later training: Easy pixels → focus shifts to hard pixels
-  #
-  # Loss Modes:
-  #   'focal_weighted': RECOMMENDED (our weights + focal + stablemax)
-  #   'weighted_stablemax': Our weights only (no focal)
-  #   'stablemax': Pure stablemax CE (TRM-style)
-  #   'focal_stablemax': Legacy focal + stablemax
+  # TRM uses pure stablemax with NO class weighting.
+  # Class balance handled via 100% color permutation in cache.
   # =============================================================
-  loss_mode: 'focal_weighted'  # RECOMMENDED: weights + focal modulation
+  loss_mode: 'stablemax'  # TRM-proven: pure cross-entropy
   
-  focal_gamma: 2.0        # Focusing parameter (higher = more focus on hard pixels)
-  focal_alpha: 0.5        # Only used for legacy focal modes
-  bg_weight_cap: 2.0      # BG weight (ensures ~52% gradient to BG)
-  fg_weight_cap: 5.0      # Max FG weight (rarest class = 5.0)
+  focal_gamma: 2.0        # Not used with stablemax
+  focal_alpha: 0.5        # Not used with stablemax
+  bg_weight_cap: 2.0      # Not used with stablemax
+  fg_weight_cap: 5.0      # Not used with stablemax
   
   # Regularization weights (for RLAN-specific modules)
   lambda_entropy: 0.1    # Force DSC attention sharpening

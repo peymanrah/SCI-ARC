@@ -119,18 +119,13 @@ training:
   temperature_end: 0.1
   
   # =============================================================
-  # LOSS: FOCAL_WEIGHTED (RECOMMENDED)
+  # LOSS: PURE STABLEMAX (TRM-Proven Approach)
   # =============================================================
-  # FocalWeightedStablemaxLoss combines:
-  #   1. Our weight philosophy: BG=cap, FG scaled 1.0-cap
-  #   2. Focal modulation: (1-p_t)^gamma (dynamic hard-pixel focus)
-  #   3. Stablemax: Numerically stable softmax alternative
-  #
-  # Benefits over pure weighted_stablemax:
-  #   - Same BG/FG gradient balance
-  #   - PLUS: Easy pixels auto down-weighted as training progresses
+  # Following TRM's proven training: pure stablemax with NO weighting
+  # Combined with 100% color permutation for natural class balancing
+  # If RLAN architecture is superior, it should learn faster
   # =============================================================
-  loss_mode: 'focal_weighted'  # RECOMMENDED: weights + focal modulation
+  loss_mode: 'stablemax'  # Pure stablemax, no class weighting
   bg_weight_cap: 2.0           # BG weight (ensures ~52% gradient to BG)
   fg_weight_cap: 5.0           # Max FG weight (rarest class = 5.0)
   
@@ -255,7 +250,7 @@ data:
     flip: true
     transpose: true
     color_permutation: true
-    color_permutation_prob: 0.3  # CRITICAL: Only 30% to preserve color identity learning!
+    color_permutation_prob: 1.0  # TRM-style: 100% color permutation for class balancing
     translational: true
 
 evaluation:

@@ -81,23 +81,27 @@ training:
   temperature_end: 0.5    # Don't go below 0.5
   
   # =============================================================
-  # LOSS CONFIGURATION - FOCAL WEIGHTED (RECOMMENDED)
+  # LOSS CONFIGURATION - PURE STABLEMAX (TRM PROVEN)
   # =============================================================
-  # FocalWeightedStablemaxLoss combines:
-  #   1. Our weight philosophy: BG=cap, FG scaled 1.0-cap (gradient balance)
-  #   2. Focal modulation: (1-p_t)^gamma (dynamic focus on hard pixels)
-  #   3. Stablemax: Numerically stable softmax alternative
+  # TRM uses PURE stablemax_cross_entropy with NO class weighting.
+  # They handle class imbalance through:
+  #   1. Color permutation on every sample (shuffles which color is rare)
+  #   2. Large pre-generated cache (1000x augmentation per task)
+  #   3. Long training (100K epochs)
   #
-  # Benefits:
-  #   - Same BG/FG gradient balance as weighted_stablemax
-  #   - PLUS: Easy pixels automatically down-weighted as training progresses
+  # For RLAN, we adopt the same approach:
+  #   - Pure stablemax (no weighting, no focal)
+  #   - 100% color permutation (shuffles class distribution)
+  #   - 400K cached samples (500 per task)
+  #
+  # If RLAN's architecture is superior, it should learn faster!
   # =============================================================
-  loss_mode: 'focal_weighted'  # RECOMMENDED: weights + focal modulation
-  bg_weight_cap: 2.0           # BG weight (ensures ~52% gradient to BG)
-  fg_weight_cap: 5.0           # Max FG weight (rarest class = 5.0)
+  loss_mode: 'stablemax'  # TRM-proven: pure cross-entropy, no weighting
+  bg_weight_cap: 2.0      # Not used with stablemax mode
+  fg_weight_cap: 5.0      # Not used with stablemax mode
   
-  focal_gamma: 2.0             # Focusing parameter (higher = more focus on hard pixels)
-  focal_alpha: 0.75            # Only used for legacy focal modes
+  focal_gamma: 2.0        # Not used with stablemax mode
+  focal_alpha: 0.75       # Not used with stablemax mode
   
   # AUXILIARY LOSSES (minimized for stability)
   lambda_entropy: 0.01          # Light attention sharpness
@@ -146,21 +150,25 @@ data:
   persistent_workers: true
   
   # ==========================================================================
-  # TWO-PHASE TRAINING STRATEGY
+  # CACHING + AUGMENTATION STRATEGY (TRM-INSPIRED)
   # ==========================================================================
-  # Phase 1 (cache_samples=true):  Memorization with cached data
-  # Phase 2 (cache_samples=false): Generalization with infinite augmentation
+  # TRM uses 1000x pre-generated augmentation per task with:
+  #   - 8 dihedral transforms
+  #   - Random color permutation (color 0 fixed, 1-9 shuffled)
+  #   - Translational offset
   #
-  # TRM uses 1000x pre-generated augmentation = 800,000 samples
-  # We use on-the-fly augmentation = INFINITE unique samples
+  # We do the same with 400K cached samples:
+  #   - Each sample has RANDOM augmentation baked in
+  #   - color_permutation_prob: 1.0 = EVERY sample color-permuted (like TRM!)
+  #   - This naturally balances class distribution over training
   #
-  # For Phase 1: Use cache to stabilize learning (model sees same data)
-  # For Phase 2: Set cache_samples=false and resume training
+  # CRITICAL: If you change augmentation settings, DELETE the cache!
+  #   rm ./cache/rlan_stable_400k.pkl
   # ==========================================================================
   
   cache_samples: true
-  num_cached_samples: 400000  # 500 per task (closer to TRM's 1000x)
-  cache_path: "./cache/rlan_stable_400k.pkl"  # Save/load for persistence
+  num_cached_samples: 400000  # 500 per task (TRM uses 1000x)
+  cache_path: "./cache/rlan_stable_400k_trm.pkl"  # NEW cache with full color perm
   
   augmentation:
     enabled: true
@@ -168,7 +176,7 @@ data:
     flip: true
     transpose: true
     color_permutation: true
-    color_permutation_prob: 0.3
+    color_permutation_prob: 1.0  # TRM STYLE: ALWAYS apply (was 0.3, now 1.0)
     translational: true
 
 evaluation:
