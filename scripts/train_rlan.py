@@ -732,6 +732,7 @@ def train_epoch(
     # ======================================================
     # These metrics help identify WHY training succeeds or fails
     # ======================================================
+    num_classes = 10  # Colors 0-9
     epoch_diagnostics = {
         # Gradient flow (are gradients reaching each module?)
         'dsc_grad_norm_sum': 0.0,           # Gradient norm flowing to DSC
@@ -766,6 +767,13 @@ def train_epoch(
         'fg_accuracy_sum': 0.0,        # Sum of FG accuracy across batches
         'bg_accuracy_sum': 0.0,        # Sum of BG accuracy across batches
         'running_accuracy_window': [], # Last N batch accuracies for trend
+        
+        # =============================================================
+        # PER-CLASS ACCURACY (which colors are being learned?)
+        # =============================================================
+        'per_class_correct': [0] * num_classes,   # Correct predictions per class
+        'per_class_total': [0] * num_classes,     # Total pixels per class
+        'per_class_predicted': [0] * num_classes, # How often each class is predicted
     }
     
     temperature = get_temperature(epoch, config)
@@ -1331,6 +1339,17 @@ def train_epoch(
                         bg_correct = ((pred_i == target_i) & bg_mask).sum().item()
                         batch_bg_acc_sum += bg_correct / bg_pixels
                         batch_bg_samples += 1
+                    
+                    # Per-class accuracy (colors 0-9)
+                    for c in range(10):
+                        class_mask = (target_i == c) & valid_mask
+                        class_pixels = class_mask.sum().item()
+                        if class_pixels > 0:
+                            epoch_diagnostics['per_class_total'][c] += class_pixels
+                            class_correct = ((pred_i == c) & class_mask).sum().item()
+                            epoch_diagnostics['per_class_correct'][c] += class_correct
+                        # Track how often this class is predicted
+                        epoch_diagnostics['per_class_predicted'][c] += ((pred_i == c) & valid_mask).sum().item()
             
             # Update epoch-level diagnostics
             epoch_diagnostics['total_samples'] += B
@@ -2674,6 +2693,70 @@ Config Overrides:
                         print(f"    Consider: Check loss function, reduce LR, or verify data pipeline")
                     elif epoch > 20 and running_acc < 0.2:
                         print(f"    [WARNING] Accuracy stuck below 20% after {epoch+1} epochs - may need intervention")
+                
+                # ================================================================
+                # PER-CLASS (COLOR) ACCURACY - Which colors are being learned?
+                # ================================================================
+                per_class_correct = diagnostics.get('per_class_correct', [])
+                per_class_total = diagnostics.get('per_class_total', [])
+                per_class_predicted = diagnostics.get('per_class_predicted', [])
+                
+                if per_class_total and sum(per_class_total) > 0:
+                    print(f"\n  --- PER-COLOR ACCURACY (10 classes) ---")
+                    # Color names for readability
+                    color_names = ['Black', 'Blue', 'Red', 'Green', 'Yellow', 
+                                   'Gray', 'Pink', 'Orange', 'Cyan', 'Brown']
+                    
+                    # Compute per-class accuracy
+                    class_accs = []
+                    for c in range(10):
+                        if per_class_total[c] > 0:
+                            acc = per_class_correct[c] / per_class_total[c]
+                            class_accs.append(acc)
+                        else:
+                            class_accs.append(None)
+                    
+                    # Display as compact table
+                    print(f"  Color:  ", end="")
+                    for c in range(10):
+                        print(f"{c:>6}", end="")
+                    print()
+                    
+                    print(f"  Acc%:   ", end="")
+                    for c in range(10):
+                        if class_accs[c] is not None:
+                            print(f"{class_accs[c]*100:>5.0f}%", end="")
+                        else:
+                            print(f"    - ", end="")
+                    print()
+                    
+                    print(f"  Target: ", end="")
+                    total_pixels = sum(per_class_total)
+                    for c in range(10):
+                        pct = per_class_total[c] / total_pixels * 100 if total_pixels > 0 else 0
+                        print(f"{pct:>5.1f}%", end="")
+                    print()
+                    
+                    print(f"  Pred:   ", end="")
+                    total_pred = sum(per_class_predicted)
+                    for c in range(10):
+                        pct = per_class_predicted[c] / total_pred * 100 if total_pred > 0 else 0
+                        print(f"{pct:>5.1f}%", end="")
+                    print()
+                    
+                    # Identify weak colors (low accuracy)
+                    weak_colors = [c for c in range(10) if class_accs[c] is not None and class_accs[c] < 0.5]
+                    if weak_colors:
+                        weak_str = ', '.join(f"{c}({color_names[c]})" for c in weak_colors)
+                        print(f"  [!] Weak colors (<50% acc): {weak_str}")
+                    
+                    # Check for over/under prediction
+                    for c in range(1, 10):  # Skip background
+                        if per_class_total[c] > 0:
+                            target_pct = per_class_total[c] / total_pixels
+                            pred_pct = per_class_predicted[c] / total_pred if total_pred > 0 else 0
+                            if target_pct > 0.01 and pred_pct < target_pct * 0.5:
+                                print(f"  [!] Under-predicting color {c} ({color_names[c]}): {pred_pct*100:.1f}% vs target {target_pct*100:.1f}%")
                 
                 print(f"  {'='*50}")
             
