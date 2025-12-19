@@ -753,6 +753,19 @@ def train_epoch(
         
         # Per-step loss (is deep supervision working?)
         'per_step_loss': [],           # Loss at each solver step
+        
+        # =============================================================
+        # PER-SAMPLE ACCURACY TRACKING (for early stopping decisions)
+        # =============================================================
+        'total_samples': 0,            # Total samples processed
+        'exact_match_count': 0,        # Samples with 100% pixel accuracy
+        'high_accuracy_count': 0,      # Samples with >=90% pixel accuracy
+        'per_sample_accuracies': [],   # List of per-sample accuracies (sampled)
+        'batch_accuracies': [],        # Accuracy per batch (for trend analysis)
+        'batch_exact_matches': [],     # Exact matches per batch
+        'fg_accuracy_sum': 0.0,        # Sum of FG accuracy across batches
+        'bg_accuracy_sum': 0.0,        # Sum of BG accuracy across batches
+        'running_accuracy_window': [], # Last N batch accuracies for trend
     }
     
     temperature = get_temperature(epoch, config)
@@ -1261,16 +1274,110 @@ def train_epoch(
                     spread = ((centroids - centroid_mean) ** 2).sum(dim=-1).sqrt().mean()
                     epoch_diagnostics['centroid_spread'] = spread.item()
         
+        # ================================================================
+        # PER-SAMPLE ACCURACY TRACKING (every batch, not just batch_idx==0)
+        # ================================================================
+        # This runs EVERY batch to track training progress sample-by-sample
+        with torch.no_grad():
+            logits = outputs['logits']  # (B, C, H, W)
+            preds = logits.argmax(dim=1)  # (B, H, W)
+            targets = test_outputs  # (B, H, W)
+            
+            B = logits.shape[0]
+            
+            # Track per-sample metrics
+            batch_exact_match_count = 0
+            batch_high_acc_count = 0
+            batch_sample_accuracies = []
+            batch_fg_acc_sum = 0.0
+            batch_bg_acc_sum = 0.0
+            batch_fg_samples = 0
+            batch_bg_samples = 0
+            
+            for i in range(B):
+                pred_i = preds[i]  # (H, W)
+                target_i = targets[i]  # (H, W)
+                
+                # Valid mask (exclude padding)
+                valid_mask = target_i != -100
+                valid_pixels = valid_mask.sum().item()
+                
+                if valid_pixels > 0:
+                    # Per-sample accuracy
+                    correct = ((pred_i == target_i) & valid_mask).sum().item()
+                    sample_acc = correct / valid_pixels
+                    batch_sample_accuracies.append(sample_acc)
+                    
+                    # Exact match (100% correct)
+                    if correct == valid_pixels:
+                        batch_exact_match_count += 1
+                    
+                    # High accuracy (>=90% correct)
+                    if sample_acc >= 0.9:
+                        batch_high_acc_count += 1
+                    
+                    # FG accuracy (colors 1-9)
+                    fg_mask = (target_i > 0) & valid_mask
+                    fg_pixels = fg_mask.sum().item()
+                    if fg_pixels > 0:
+                        fg_correct = ((pred_i == target_i) & fg_mask).sum().item()
+                        batch_fg_acc_sum += fg_correct / fg_pixels
+                        batch_fg_samples += 1
+                    
+                    # BG accuracy (color 0)
+                    bg_mask = (target_i == 0) & valid_mask
+                    bg_pixels = bg_mask.sum().item()
+                    if bg_pixels > 0:
+                        bg_correct = ((pred_i == target_i) & bg_mask).sum().item()
+                        batch_bg_acc_sum += bg_correct / bg_pixels
+                        batch_bg_samples += 1
+            
+            # Update epoch-level diagnostics
+            epoch_diagnostics['total_samples'] += B
+            epoch_diagnostics['exact_match_count'] += batch_exact_match_count
+            epoch_diagnostics['high_accuracy_count'] += batch_high_acc_count
+            
+            # Store batch-level metrics
+            batch_accuracy = sum(batch_sample_accuracies) / len(batch_sample_accuracies) if batch_sample_accuracies else 0.0
+            epoch_diagnostics['batch_accuracies'].append(batch_accuracy)
+            epoch_diagnostics['batch_exact_matches'].append(batch_exact_match_count)
+            
+            # Update FG/BG sums
+            if batch_fg_samples > 0:
+                epoch_diagnostics['fg_accuracy_sum'] += batch_fg_acc_sum / batch_fg_samples
+            if batch_bg_samples > 0:
+                epoch_diagnostics['bg_accuracy_sum'] += batch_bg_acc_sum / batch_bg_samples
+            
+            # Running accuracy window (last 50 batches)
+            epoch_diagnostics['running_accuracy_window'].append(batch_accuracy)
+            if len(epoch_diagnostics['running_accuracy_window']) > 50:
+                epoch_diagnostics['running_accuracy_window'].pop(0)
+            
+            # Sample some per-sample accuracies for detailed logging (every 10th batch)
+            if batch_idx % 10 == 0:
+                epoch_diagnostics['per_sample_accuracies'].extend(batch_sample_accuracies[:4])  # First 4 samples
+        
         # Log progress
         if batch_idx % log_every == 0:
             current_lr = optimizer.param_groups[0]['lr']
             loss_mode = losses.get('loss_mode', 'task')
             task_loss_val = losses.get('task_loss', losses.get('focal_loss', torch.tensor(0.0)))
             task_loss_val = task_loss_val.item() if hasattr(task_loss_val, 'item') else task_loss_val
+            
+            # Enhanced batch logging with accuracy metrics
+            running_window = epoch_diagnostics['running_accuracy_window']
+            running_acc = sum(running_window) / len(running_window) if running_window else 0.0
+            total_exact = epoch_diagnostics['exact_match_count']
+            total_processed = epoch_diagnostics['total_samples']
+            exact_pct = (total_exact / total_processed * 100) if total_processed > 0 else 0.0
+            
             print(f"  Batch {batch_idx}/{len(dataloader)}: "
                   f"loss={losses['total_loss'].item():.4f}, "
                   f"{loss_mode}={task_loss_val:.4f}, "
-                  f"temp={temperature:.3f}, lr={current_lr:.2e}")
+                  f"batch_acc={batch_accuracy:.1%}, "
+                  f"exact={total_exact}/{total_processed} ({exact_pct:.1f}%), "
+                  f"running_acc={running_acc:.1%}, "
+                  f"lr={current_lr:.2e}")
     
     # Average losses
     for key in total_losses:
@@ -1929,6 +2036,49 @@ Config Overrides:
             print("  → bfloat16 has same exponent range as fp32 - less likely to overflow/underflow")
         elif amp_dtype_str == 'float16':
             print("  → WARNING: float16 has limited range - may cause NaN with very small/large values")
+        
+        # ================================================================
+        # CRITICAL: DTYPE VALIDATION CHECK
+        # ================================================================
+        # Verify dtype configuration is consistent to prevent NaN issues
+        print(f"\n{'='*60}")
+        print("DTYPE VALIDATION CHECK")
+        print(f"{'='*60}")
+        
+        # Check 1: Config dtype
+        print(f"  Config dtype: {amp_dtype_str}")
+        
+        # Check 2: Actual PyTorch dtype
+        if amp_dtype_str == 'bfloat16':
+            expected_dtype = torch.bfloat16
+        else:
+            expected_dtype = torch.float16
+        print(f"  PyTorch dtype: {expected_dtype}")
+        
+        # Check 3: GPU bfloat16 support
+        if amp_dtype_str == 'bfloat16':
+            bf16_supported = torch.cuda.is_bf16_supported()
+            print(f"  GPU bfloat16 support: {bf16_supported}")
+            if not bf16_supported:
+                print(f"  ⚠️  WARNING: GPU does not support bfloat16! Falling back to float16.")
+                print(f"     Consider using dtype: float16 in config to avoid issues.")
+        
+        # Check 4: Verify autocast will use correct dtype
+        with autocast('cuda', dtype=expected_dtype):
+            test_tensor = torch.randn(1, device=device)
+            actual_dtype = test_tensor.dtype
+        print(f"  Autocast test dtype: {actual_dtype}")
+        
+        # Check 5: Numerical range limits
+        if expected_dtype == torch.float16:
+            print(f"  float16 range: [{torch.finfo(torch.float16).min:.0e}, {torch.finfo(torch.float16).max:.0e}]")
+            print(f"  float16 tiny: {torch.finfo(torch.float16).tiny:.0e}")
+        else:
+            print(f"  bfloat16 range: [{torch.finfo(torch.bfloat16).min:.0e}, {torch.finfo(torch.bfloat16).max:.0e}]")
+            print(f"  bfloat16 tiny: {torch.finfo(torch.bfloat16).tiny:.0e}")
+        
+        print(f"  ✓ Dtype validation passed")
+        print(f"{'='*60}")
     
     # Initialize wandb if enabled (disabled by default - not installed in production)
     wandb_enabled = False
@@ -1993,6 +2143,8 @@ Config Overrides:
         'task_loss': [],           # Main loss (should decrease)
         'best_step': [],           # Best refinement step (should be later steps)
         'fg_coverage': [],         # Foreground prediction (should approach target)
+        'train_accuracy': [],      # Training accuracy (should increase)
+        'exact_match_pct': [],     # Exact match percentage (should increase)
     }
     
     for epoch in range(start_epoch, max_epochs):
@@ -2446,6 +2598,86 @@ Config Overrides:
                         print(f"  [WARN] FG color preference: {fg_pred_mode_pct:.0f}% are color {fg_pred_mode}")
             
             # ================================================================
+            # PER-SAMPLE ACCURACY SUMMARY (CRITICAL for early stopping decision)
+            # ================================================================
+            total_samples_processed = diagnostics.get('total_samples', 0)
+            exact_match_count = diagnostics.get('exact_match_count', 0)
+            high_accuracy_count = diagnostics.get('high_accuracy_count', 0)
+            batch_accuracies = diagnostics.get('batch_accuracies', [])
+            fg_accuracy_epoch = diagnostics.get('fg_accuracy_sum', 0)
+            bg_accuracy_epoch = diagnostics.get('bg_accuracy_sum', 0)
+            per_sample_accs = diagnostics.get('per_sample_accuracies', [])
+            
+            if total_samples_processed > 0:
+                print(f"  {'='*50}")
+                print(f"  PER-SAMPLE TRAINING ACCURACY (Epoch {epoch + 1})")
+                print(f"  {'='*50}")
+                
+                # Overall epoch accuracy
+                epoch_mean_acc = sum(batch_accuracies) / len(batch_accuracies) if batch_accuracies else 0.0
+                print(f"  ★ Mean Accuracy: {epoch_mean_acc:.1%}")
+                print(f"  ★ Exact Match: {exact_match_count}/{total_samples_processed} ({exact_match_count/total_samples_processed*100:.1f}%)")
+                print(f"  ★ High Acc (≥90%): {high_accuracy_count}/{total_samples_processed} ({high_accuracy_count/total_samples_processed*100:.1f}%)")
+                
+                # FG/BG accuracy breakdown
+                n_batches = len(batch_accuracies)
+                if n_batches > 0:
+                    fg_acc_mean = fg_accuracy_epoch / n_batches
+                    bg_acc_mean = bg_accuracy_epoch / n_batches
+                    print(f"  FG Accuracy: {fg_acc_mean:.1%}")
+                    print(f"  BG Accuracy: {bg_acc_mean:.1%}")
+                
+                # Batch-level trend analysis
+                if len(batch_accuracies) >= 5:
+                    first_quarter = batch_accuracies[:len(batch_accuracies)//4]
+                    last_quarter = batch_accuracies[-len(batch_accuracies)//4:]
+                    first_mean = sum(first_quarter) / len(first_quarter)
+                    last_mean = sum(last_quarter) / len(last_quarter)
+                    acc_trend = last_mean - first_mean
+                    
+                    trend_str = "↑" if acc_trend > 0.01 else ("↓" if acc_trend < -0.01 else "→")
+                    print(f"  Batch Trend: {first_mean:.1%} → {last_mean:.1%} ({trend_str} {abs(acc_trend)*100:.1f}pp)")
+                    
+                    if acc_trend < -0.05:
+                        print(f"    [!] ACCURACY DECLINING within epoch - potential overfitting or instability!")
+                    elif acc_trend > 0.02:
+                        print(f"    ✓ Accuracy improving within epoch - learning is active!")
+                
+                # Sample some per-sample accuracies for insight
+                if per_sample_accs:
+                    # Distribution of accuracies
+                    acc_buckets = {
+                        '0-25%': sum(1 for a in per_sample_accs if a < 0.25),
+                        '25-50%': sum(1 for a in per_sample_accs if 0.25 <= a < 0.50),
+                        '50-75%': sum(1 for a in per_sample_accs if 0.50 <= a < 0.75),
+                        '75-90%': sum(1 for a in per_sample_accs if 0.75 <= a < 0.90),
+                        '90-100%': sum(1 for a in per_sample_accs if a >= 0.90),
+                    }
+                    total_sampled = len(per_sample_accs)
+                    bucket_strs = [f"{k}:{v/total_sampled*100:.0f}%" for k, v in acc_buckets.items()]
+                    print(f"  Accuracy Distribution: {', '.join(bucket_strs)}")
+                    
+                    # Check for stuck samples (always wrong)
+                    if acc_buckets['0-25%'] / total_sampled > 0.5:
+                        print(f"    [!] Many samples stuck at low accuracy - check data/model!")
+                
+                # Running window for early stopping
+                running_window = diagnostics.get('running_accuracy_window', [])
+                if running_window:
+                    running_acc = sum(running_window) / len(running_window)
+                    window_std = (sum((a - running_acc)**2 for a in running_window) / len(running_window))**0.5
+                    print(f"  Running Window (last {len(running_window)} batches): {running_acc:.1%} ± {window_std:.1%}")
+                    
+                    # Early stopping recommendation
+                    if epoch > 10 and running_acc < 0.1:
+                        print(f"    [CRITICAL] Accuracy stuck below 10% after {epoch+1} epochs!")
+                        print(f"    Consider: Check loss function, reduce LR, or verify data pipeline")
+                    elif epoch > 20 and running_acc < 0.2:
+                        print(f"    [WARNING] Accuracy stuck below 20% after {epoch+1} epochs - may need intervention")
+                
+                print(f"  {'='*50}")
+            
+            # ================================================================
             # UPDATE LEARNING TRAJECTORY - Track key metrics epoch-by-epoch
             # ================================================================
             # Extract key metrics for trajectory tracking
@@ -2456,6 +2688,13 @@ Config Overrides:
             per_step_loss = diagnostics.get('per_step_loss', [])
             pred_pcts = diagnostics.get('pred_class_pcts', [])
             target_pcts = diagnostics.get('target_class_pcts', [])
+            
+            # Training accuracy from batch tracking
+            batch_accuracies = diagnostics.get('batch_accuracies', [])
+            epoch_train_acc = sum(batch_accuracies) / len(batch_accuracies) if batch_accuracies else 0.0
+            total_samples_processed = diagnostics.get('total_samples', 0)
+            exact_match_count = diagnostics.get('exact_match_count', 0)
+            epoch_exact_match_pct = (exact_match_count / total_samples_processed * 100) if total_samples_processed > 0 else 0.0
             
             # Find best step
             valid_losses = [(i, l) for i, l in enumerate(per_step_loss) if l < 100 and l == l]
@@ -2473,6 +2712,8 @@ Config Overrides:
             learning_trajectory['task_loss'].append(task_loss_val)
             learning_trajectory['best_step'].append(best_step)
             learning_trajectory['fg_coverage'].append(fg_pred / max(fg_target, 1) * 100)
+            learning_trajectory['train_accuracy'].append(epoch_train_acc)
+            learning_trajectory['exact_match_pct'].append(epoch_exact_match_pct)
             
             # Print learning trajectory summary every 5 epochs (or first 10)
             if (epoch + 1) <= 10 or (epoch + 1) % 5 == 0:
@@ -2511,6 +2752,14 @@ Config Overrides:
                     tl = learning_trajectory['task_loss']
                     print(f"  Task Loss:   {tl[-1]:.4f} {trend_arrow(tl, higher_is_better=False)}")
                     
+                    # Training accuracy: should INCREASE
+                    ta = learning_trajectory['train_accuracy']
+                    print(f"  Train Acc:   {ta[-1]:.1%} {trend_arrow(ta, higher_is_better=True)}")
+                    
+                    # Exact match: should INCREASE
+                    em = learning_trajectory['exact_match_pct']
+                    print(f"  Exact Match: {em[-1]:.1f}% {trend_arrow(em, higher_is_better=True)}")
+                    
                     # Best step: should be LATER steps (4-5 for 6-step solver)
                     bs = learning_trajectory['best_step']
                     print(f"  Best Step:   {bs[-1]} (later=better refinement)")
@@ -2524,6 +2773,7 @@ Config Overrides:
                         sp_improving = sp[-1] > sp[0] + 0.05
                         ae_improving = ae[-1] < ae[0] - 0.2
                         tl_improving = tl[-1] < tl[0] * 0.9
+                        ta_improving = ta[-1] > ta[0] + 0.05  # 5pp improvement
                         
                         issues = []
                         if not sp_improving and n > 5:
@@ -2532,6 +2782,8 @@ Config Overrides:
                             issues.append("attention not sharpening")
                         if not tl_improving and n > 5:
                             issues.append("task_loss not decreasing")
+                        if not ta_improving and n > 5:
+                            issues.append("train_accuracy not improving")
                         
                         if issues:
                             print(f"  [!] Potential issues: {', '.join(issues)}")
@@ -2666,6 +2918,9 @@ Config Overrides:
                     'sparsity_loss': train_losses.get('sparsity_loss', 0.0),
                     'predicate_loss': train_losses.get('predicate_loss', 0.0),
                     'curriculum_loss': train_losses.get('curriculum_loss', 0.0),
+                    # Training accuracy metrics (per-sample tracking)
+                    'train_accuracy': epoch_train_acc,
+                    'train_exact_match_pct': epoch_exact_match_pct,
                     # Evaluation metrics (computed over valid pixels only)
                     'pixel_accuracy': eval_metrics['pixel_accuracy'],
                     'task_accuracy': eval_metrics['task_accuracy'],
