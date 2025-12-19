@@ -100,22 +100,31 @@ training:
   temperature_end: 0.1
   
   # =============================================================
-  # LOSS CONFIGURATION - TRM-MATCHED
+  # LOSS CONFIGURATION - FOCAL WEIGHTED (RECOMMENDED)
   # =============================================================
-  # TRM uses PURE stablemax cross-entropy (no focal loss!)
-  # Focal loss may have caused background collapse by:
-  #   1. Unstable gradients from (1-p)^gamma
-  #   2. Alpha weighting conflicts with task learning
+  # FocalWeightedStablemaxLoss combines:
+  #   1. Our weight philosophy: BG=cap, FG scaled 1.0-cap (gradient balance)
+  #   2. Focal modulation: (1-p_t)^gamma (dynamic focus on hard pixels)
+  #   3. Stablemax: Numerically stable softmax alternative
+  #
+  # Benefits:
+  #   - Same BG/FG gradient balance as weighted_stablemax
+  #   - PLUS: Easy pixels automatically down-weighted as training progresses
+  #   - Early training: All pixels hard → all get attention
+  #   - Later training: Easy pixels → focus shifts to hard pixels
   #
   # Loss Modes:
-  #   'stablemax': Pure stablemax CE (TRM uses this - RECOMMENDED)
-  #   'focal_stablemax': Focal + stablemax (original RLAN)
-  #   'focal': Standard focal loss
+  #   'focal_weighted': RECOMMENDED (our weights + focal + stablemax)
+  #   'weighted_stablemax': Our weights only (no focal)
+  #   'stablemax': Pure stablemax CE (TRM-style)
+  #   'focal_stablemax': Legacy focal + stablemax
   # =============================================================
-  loss_mode: 'stablemax'  # TRM-style: pure stablemax cross-entropy
+  loss_mode: 'focal_weighted'  # RECOMMENDED: weights + focal modulation
   
-  focal_gamma: 2.0        # Only used if loss_mode='focal*'
-  focal_alpha: 0.5        # Only used if loss_mode='focal*'
+  focal_gamma: 2.0        # Focusing parameter (higher = more focus on hard pixels)
+  focal_alpha: 0.5        # Only used for legacy focal modes
+  bg_weight_cap: 2.0      # BG weight (ensures ~52% gradient to BG)
+  fg_weight_cap: 5.0      # Max FG weight (rarest class = 5.0)
   
   # Regularization weights (for RLAN-specific modules)
   lambda_entropy: 0.1    # Force DSC attention sharpening

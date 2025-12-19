@@ -64,6 +64,11 @@ training:
   temperature_start: 5.0
   temperature_end: 0.1
   
+  # Loss configuration - FOCAL WEIGHTED (RECOMMENDED)
+  loss_mode: 'focal_weighted'
+  bg_weight_cap: 2.0
+  fg_weight_cap: 5.0
+  
   focal_gamma: 2.0
   focal_alpha: 0.25
   lambda_entropy: 0.0    # No DSC

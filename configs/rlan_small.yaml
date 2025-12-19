@@ -64,8 +64,13 @@ training:
   temperature_start: 5.0
   temperature_end: 0.1
   
-  # Loss weights
-  # NOTE: lambda_sparsity reduced to prevent DSC collapse
+  # Loss configuration - FOCAL WEIGHTED (RECOMMENDED)
+  # FocalWeightedStablemaxLoss = our weights + focal modulation
+  loss_mode: 'focal_weighted'
+  bg_weight_cap: 2.0
+  fg_weight_cap: 5.0
+  
+  # Focal/loss params
   focal_gamma: 2.0
   focal_alpha: 0.25
   lambda_entropy: 0.01     # REDUCED from 0.1 to match fair config

@@ -64,7 +64,8 @@ training:
   temperature_start: 0.7  # Start lower (model is pretrained)
   temperature_end: 0.5
   
-  loss_mode: 'weighted_stablemax'
+  # LOSS: focal_weighted = our weights + focal modulation (RECOMMENDED)
+  loss_mode: 'focal_weighted'
   bg_weight_cap: 2.0
   fg_weight_cap: 5.0
   

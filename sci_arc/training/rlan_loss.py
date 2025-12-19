@@ -260,19 +260,29 @@ class WeightedStablemaxLoss(nn.Module):
         # Add epsilon to avoid division by zero
         class_freq = class_counts / (n_valid + 1e-6)
         
-        # Compute weights as inverse of frequency (normalized)
-        # More frequent = lower weight, less frequent = higher weight
-        raw_weights = 1.0 / (class_freq + 1e-6)
+        # BALANCED GRADIENT APPROACH:
+        # - BG (color 0) always gets bg_weight_cap to ensure strong gradient
+        # - FG (colors 1-9) use inverse-freq rescaled to [1.0, fg_weight_cap]
+        # This gives roughly balanced total gradient between BG and FG categories
         
-        # Apply different caps for background vs foreground
-        # 10-class encoding: 0=color0(BG/black), 1-9=colors1-9(FG)
-        weights = torch.zeros_like(raw_weights)
-        weights[0] = raw_weights[0].clamp(self.min_class_weight, self.bg_weight_cap)  # Background (black)
+        weights = torch.zeros(C, device=logits.device, dtype=logits.dtype)
+        
+        # BG: fixed at bg_weight_cap (strong, not crushed by normalization)
+        weights[0] = self.bg_weight_cap
+        
+        # FG: inverse frequency rescaled to range [1.0, fg_weight_cap]
         if C > 1:
-            weights[1:] = raw_weights[1:].clamp(self.min_class_weight, self.fg_weight_cap)  # Foreground (colors 1-9)
-        
-        # Normalize weights so they sum to C (preserves loss magnitude)
-        weights = weights * (C / (weights.sum() + 1e-6))
+            fg_freq = class_freq[1:]  # FG class frequencies
+            fg_raw = 1.0 / (fg_freq + 1e-6)  # Inverse frequency
+            fg_min = fg_raw.min()
+            fg_max = fg_raw.max()
+            # Rescale to [1.0, fg_weight_cap] - more frequent FG=1.0, rarest=fg_cap
+            if fg_max > fg_min:
+                fg_scaled = 1.0 + (self.fg_weight_cap - 1.0) * (fg_raw - fg_min) / (fg_max - fg_min + 1e-6)
+            else:
+                # All FG classes have same frequency
+                fg_scaled = torch.ones_like(fg_raw) * (1.0 + self.fg_weight_cap) / 2.0
+            weights[1:] = fg_scaled.clamp(self.min_class_weight, self.fg_weight_cap)
         
         # Get per-pixel weights
         pixel_weights = weights[targets_valid]
@@ -314,9 +324,156 @@ class WeightedStablemaxLoss(nn.Module):
             return full_loss.view(B, H, W)
 
 
+class FocalWeightedStablemaxLoss(nn.Module):
+    """
+    Focal Loss + Our Weight Philosophy + Stablemax.
+    
+    THE RECOMMENDED LOSS for RLAN training.
+    
+    Combines:
+    1. Our weight philosophy: BG=cap, FG scaled 1.0-cap (maintains BG/FG gradient balance)
+    2. Focal modulation: (1-p_t)^gamma per pixel (dynamic focus on hard pixels)
+    3. Stablemax: Numerically stable alternative to softmax
+    
+    Benefits over WeightedStablemaxLoss:
+    - Same BG/FG gradient balance
+    - PLUS: Dynamic adaptation - easy pixels get down-weighted as training progresses
+    - Early training: All pixels hard → focal≈1.0 → all get attention
+    - Later training: Easy pixels → focal→0 → focus on hard pixels
+    
+    Args:
+        bg_weight_cap: Weight for background class (default 2.0)
+        fg_weight_cap: Maximum weight for foreground classes (default 5.0)
+        gamma: Focal loss focusing parameter (default 2.0)
+        min_class_weight: Minimum weight for any class
+        reduction: 'mean', 'sum', or 'none'
+        ignore_index: Label to ignore
+    """
+    
+    def __init__(
+        self,
+        bg_weight_cap: float = 2.0,
+        fg_weight_cap: float = 5.0,
+        gamma: float = 2.0,
+        min_class_weight: float = 0.1,
+        reduction: str = "mean",
+        ignore_index: int = -100,
+    ):
+        super().__init__()
+        self.bg_weight_cap = bg_weight_cap
+        self.fg_weight_cap = fg_weight_cap
+        self.gamma = gamma
+        self.min_class_weight = min_class_weight
+        self.reduction = reduction
+        self.ignore_index = ignore_index
+    
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Forward pass.
+        
+        Args:
+            logits: Shape (B, C, H, W) unnormalized logits
+            targets: Shape (B, H, W) target class indices
+            
+        Returns:
+            loss: Scalar or per-pixel loss
+        """
+        B, C, H, W = logits.shape
+        
+        # Flatten for loss computation
+        logits_flat = logits.permute(0, 2, 3, 1).reshape(-1, C)  # (B*H*W, C)
+        targets_flat = targets.reshape(-1)  # (B*H*W,)
+        
+        # Create mask for valid positions
+        valid_mask = targets_flat != self.ignore_index
+        
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+        
+        # Filter to valid positions
+        logits_valid = logits_flat[valid_mask]
+        targets_valid = targets_flat[valid_mask]
+        n_valid = targets_valid.numel()
+        
+        # SAFETY CHECK: Clamp target values to valid range [0, C-1]
+        if targets_valid.max() >= C or targets_valid.min() < 0:
+            import warnings
+            warnings.warn(
+                f"Target values out of range! min={targets_valid.min().item()}, "
+                f"max={targets_valid.max().item()}, expected [0, {C-1}]."
+            )
+            targets_valid = targets_valid.clamp(0, C - 1)
+        
+        # ========== PART 1: Class weights (our philosophy) ==========
+        class_counts = torch.bincount(targets_valid, minlength=C).float()
+        class_freq = class_counts / (n_valid + 1e-6)
+        
+        weights = torch.zeros(C, device=logits.device, dtype=logits.dtype)
+        weights[0] = self.bg_weight_cap  # BG fixed
+        
+        # FG: inverse frequency rescaled to [1.0, fg_weight_cap]
+        if C > 1:
+            fg_freq = class_freq[1:]
+            fg_raw = 1.0 / (fg_freq + 1e-6)
+            fg_min = fg_raw.min()
+            fg_max = fg_raw.max()
+            if fg_max > fg_min:
+                fg_scaled = 1.0 + (self.fg_weight_cap - 1.0) * (fg_raw - fg_min) / (fg_max - fg_min + 1e-6)
+            else:
+                fg_scaled = torch.ones_like(fg_raw) * (1.0 + self.fg_weight_cap) / 2.0
+            weights[1:] = fg_scaled.clamp(self.min_class_weight, self.fg_weight_cap)
+        
+        # ========== PART 2: Stablemax probabilities ==========
+        # Use stablemax for numerical stability
+        s_x = stablemax(logits_valid.to(torch.float64))
+        probs = s_x / s_x.sum(dim=-1, keepdim=True)
+        probs = probs.to(logits.dtype).clamp(min=1e-7, max=1.0 - 1e-7)
+        
+        # ========== PART 3: Focal modulation (dynamic per-pixel) ==========
+        p_t = probs[range(n_valid), targets_valid]  # Prob of true class
+        focal_weight = (1 - p_t) ** self.gamma  # Down-weight easy pixels
+        
+        # ========== PART 4: Combined loss ==========
+        pixel_weights = weights[targets_valid] * focal_weight
+        
+        # Log probabilities for CE
+        logprobs = log_stablemax(logits_valid.to(torch.float64), dim=-1).to(logits.dtype)
+        ce_loss = -torch.gather(logprobs, 1, targets_valid.unsqueeze(1)).squeeze(1)
+        ce_loss = ce_loss.clamp(max=100.0)  # Numerical stability
+        
+        # NaN safety
+        nan_mask = ~torch.isfinite(ce_loss)
+        if nan_mask.any():
+            import warnings
+            warnings.warn(f"FocalWeightedStablemaxLoss: {nan_mask.sum().item()} NaN values, replacing with 0")
+            ce_loss = torch.where(nan_mask, torch.zeros_like(ce_loss), ce_loss)
+        
+        weighted_loss = pixel_weights * ce_loss
+        
+        # Final NaN check
+        weighted_nan_mask = ~torch.isfinite(weighted_loss)
+        if weighted_nan_mask.any():
+            import warnings
+            warnings.warn(f"FocalWeightedStablemaxLoss: {weighted_nan_mask.sum().item()} NaN in weighted_loss")
+            weighted_loss = torch.where(weighted_nan_mask, torch.zeros_like(weighted_loss), weighted_loss)
+        
+        if self.reduction == "mean":
+            return weighted_loss.mean()
+        elif self.reduction == "sum":
+            return weighted_loss.sum()
+        else:
+            full_loss = torch.zeros(B * H * W, device=logits.device)
+            full_loss[valid_mask] = weighted_loss
+            return full_loss.view(B, H, W)
+
+
 class FocalStablemaxLoss(nn.Module):
     """
-    Focal Loss with Stablemax denominator.
+    Focal Loss with Stablemax denominator (LEGACY - use FocalWeightedStablemaxLoss instead).
     
     Combines the class-balancing benefits of Focal Loss
     with the numerical stability of Stablemax.
@@ -843,9 +1000,9 @@ class RLANLoss(nn.Module):
         entropy_ponder_weight: float = 0.02,  # Extra cost for diffuse attention (REDUCED)
         max_clues: int = 5,
         use_stablemax: bool = True,  # Stablemax for numerical stability
-        loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_stablemax', or 'focal'
-        bg_weight_cap: float = 2.0,  # Max weight for BG in weighted_stablemax (increased from 1.0)
-        fg_weight_cap: float = 5.0,  # Max weight for FG in weighted_stablemax (reduced from 10.0)
+        loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_weighted', 'focal_stablemax', or 'focal'
+        bg_weight_cap: float = 2.0,  # Max weight for BG in weighted losses
+        fg_weight_cap: float = 5.0,  # Max weight for FG in weighted losses
     ):
         """
         Args:
@@ -865,11 +1022,13 @@ class RLANLoss(nn.Module):
             use_stablemax: DEPRECATED - use loss_mode instead
             loss_mode: Loss function mode:
                 - 'stablemax': Pure stablemax CE (for numerical stability)
-                - 'weighted_stablemax': Inverse frequency weighting (BEST for ARC)
-                - 'focal_stablemax': Focal loss + stablemax
+                - 'weighted_stablemax': Inverse frequency weighting
+                - 'focal_weighted': RECOMMENDED - our weights + focal modulation
+                - 'focal_stablemax': Focal loss + stablemax (legacy)
                 - 'focal': Standard focal loss
-            bg_weight_cap: Max weight for background in weighted_stablemax (default=2.0)
-            fg_weight_cap: Max weight for foreground in weighted_stablemax (default=5.0)
+            focal_gamma: Focal focusing parameter (higher = more focus on hard pixels)
+            bg_weight_cap: Max weight for background in weighted losses (default=2.0)
+            fg_weight_cap: Max weight for foreground in weighted losses (default=5.0)
                            Ratio of 5:2=2.5x FG emphasis (reduced from 10:1 to prevent collapse)
         """
         super().__init__()
@@ -896,7 +1055,7 @@ class RLANLoss(nn.Module):
             self.task_loss = StablemaxCrossEntropy()
             print(f"  Loss Mode: STABLEMAX (pure cross-entropy)")
         elif loss_mode == 'weighted_stablemax':
-            # Inverse frequency weighted stablemax (BEST for ARC class imbalance)
+            # Inverse frequency weighted stablemax
             # Use configurable caps to prevent BG/FG collapse
             self.task_loss = WeightedStablemaxLoss(
                 bg_weight_cap=bg_weight_cap,
@@ -904,6 +1063,16 @@ class RLANLoss(nn.Module):
                 min_class_weight=0.1,
             )
             print(f"  Loss Mode: WEIGHTED_STABLEMAX (inverse frequency, bg_cap={bg_weight_cap}, fg_cap={fg_weight_cap})")
+        elif loss_mode == 'focal_weighted':
+            # RECOMMENDED: Our weights + focal modulation (BEST for ARC)
+            # Combines BG/FG balance with dynamic hard-pixel focusing
+            self.task_loss = FocalWeightedStablemaxLoss(
+                bg_weight_cap=bg_weight_cap,
+                fg_weight_cap=fg_weight_cap,
+                gamma=focal_gamma,
+                min_class_weight=0.1,
+            )
+            print(f"  Loss Mode: FOCAL_WEIGHTED (bg_cap={bg_weight_cap}, fg_cap={fg_weight_cap}, gamma={focal_gamma}) [RECOMMENDED]")
         elif loss_mode == 'focal_stablemax':
             # Focal loss with stablemax (original RLAN)
             self.task_loss = FocalStablemaxLoss(gamma=focal_gamma, alpha=focal_alpha)

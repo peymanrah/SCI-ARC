@@ -65,8 +65,8 @@ model:
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
   
-  batch_size: 32   # RTX 3090 24GB VRAM can handle this with bfloat16
-  grad_accumulation_steps: 1  # No accumulation needed with batch 32
+  batch_size: 75   # Larger batch for TRM-competitive effective batch size
+  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -80,14 +80,24 @@ training:
   temperature_start: 1.0
   temperature_end: 0.5    # Don't go below 0.5
   
-  # LOSS (validated by ablation)
-  loss_mode: 'weighted_stablemax'
-  bg_weight_cap: 2.0
-  fg_weight_cap: 5.0
+  # =============================================================
+  # LOSS CONFIGURATION - FOCAL WEIGHTED (RECOMMENDED)
+  # =============================================================
+  # FocalWeightedStablemaxLoss combines:
+  #   1. Our weight philosophy: BG=cap, FG scaled 1.0-cap (gradient balance)
+  #   2. Focal modulation: (1-p_t)^gamma (dynamic focus on hard pixels)
+  #   3. Stablemax: Numerically stable softmax alternative
+  #
+  # Benefits:
+  #   - Same BG/FG gradient balance as weighted_stablemax
+  #   - PLUS: Easy pixels automatically down-weighted as training progresses
+  # =============================================================
+  loss_mode: 'focal_weighted'  # RECOMMENDED: weights + focal modulation
+  bg_weight_cap: 2.0           # BG weight (ensures ~52% gradient to BG)
+  fg_weight_cap: 5.0           # Max FG weight (rarest class = 5.0)
   
-  # Focal params (not used with weighted_stablemax)
-  focal_gamma: 2.0
-  focal_alpha: 0.75
+  focal_gamma: 2.0             # Focusing parameter (higher = more focus on hard pixels)
+  focal_alpha: 0.75            # Only used for legacy focal modes
   
   # AUXILIARY LOSSES (minimized for stability)
   lambda_entropy: 0.01          # Light attention sharpness
@@ -174,7 +184,7 @@ logging:
   keep_last_n: 3
   checkpoint_dir: "checkpoints/rlan_stable"
   log_to_file: true
-  track_augmentation: false  # Reduce logging
+  track_augmentation: true  # Enable to verify augmentation diversity
   
   use_wandb: false
   wandb_project: "rlan-arc"

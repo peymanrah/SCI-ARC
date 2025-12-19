@@ -767,6 +767,10 @@ def train_epoch(
         'fg_accuracy_sum': 0.0,        # Sum of FG accuracy across batches
         'bg_accuracy_sum': 0.0,        # Sum of BG accuracy across batches
         'running_accuracy_window': [], # Last N batch accuracies for trend
+        'fg_running_window': [],       # Last 50 FG accuracies for trend
+        'bg_running_window': [],       # Last 50 BG accuracies for trend
+        'fg_batch_count': 0,           # Number of batches with FG pixels
+        'bg_batch_count': 0,           # Number of batches with BG pixels
         
         # =============================================================
         # PER-CLASS ACCURACY (which colors are being learned?)
@@ -774,6 +778,12 @@ def train_epoch(
         'per_class_correct': [0] * num_classes,   # Correct predictions per class
         'per_class_total': [0] * num_classes,     # Total pixels per class
         'per_class_predicted': [0] * num_classes, # How often each class is predicted
+        
+        # =============================================================
+        # PER-BATCH PER-CLASS TRACKING (for fine-grained color analysis)
+        # =============================================================
+        'batch_class_accuracies': [],             # List of per-class acc dicts per batch
+        'per_class_running_window': [[] for _ in range(num_classes)],  # Last 50 batch accuracies per class
     }
     
     temperature = get_temperature(epoch, config)
@@ -935,13 +945,16 @@ def train_epoch(
                 if has_nan_grad:
                     print(f"[WARNING] NaN/Inf gradients at batch {batch_idx}, skipping optimizer step...")
                     optimizer.zero_grad()
+                    # CRITICAL: Must call scaler.update() after unscale_() even when skipping step
+                    # Otherwise next iteration's unscale_() will fail
+                    scaler.update()
                     nan_batches += 1
                     consecutive_nan += 1
                     if consecutive_nan >= max_consecutive_nan:
                         print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
                         print(f"[ERROR] Aborting epoch to prevent further corruption.")
                         break
-                    # Skip scaler.step and scaler.update to avoid corrupting model
+                    # Skip scaler.step to avoid corrupting model
                     continue
                 
                 # Reset consecutive NaN counter on successful step
@@ -1286,6 +1299,9 @@ def train_epoch(
         # PER-SAMPLE ACCURACY TRACKING (every batch, not just batch_idx==0)
         # ================================================================
         # This runs EVERY batch to track training progress sample-by-sample
+        batch_class_acc = {}  # Initialize for logging access
+        batch_fg_acc = 0.0    # Initialize for logging access
+        batch_bg_acc = 0.0    # Initialize for logging access
         with torch.no_grad():
             logits = outputs['logits']  # (B, C, H, W)
             preds = logits.argmax(dim=1)  # (B, H, W)
@@ -1301,6 +1317,10 @@ def train_epoch(
             batch_bg_acc_sum = 0.0
             batch_fg_samples = 0
             batch_bg_samples = 0
+            
+            # Per-batch per-class tracking
+            batch_class_correct = [0] * 10
+            batch_class_total = [0] * 10
             
             for i in range(B):
                 pred_i = preds[i]  # (H, W)
@@ -1348,8 +1368,26 @@ def train_epoch(
                             epoch_diagnostics['per_class_total'][c] += class_pixels
                             class_correct = ((pred_i == c) & class_mask).sum().item()
                             epoch_diagnostics['per_class_correct'][c] += class_correct
+                            # Also track for this batch
+                            batch_class_total[c] += class_pixels
+                            batch_class_correct[c] += class_correct
                         # Track how often this class is predicted
                         epoch_diagnostics['per_class_predicted'][c] += ((pred_i == c) & valid_mask).sum().item()
+            
+            # Compute batch-level per-class accuracies
+            batch_class_acc = {}
+            for c in range(10):
+                if batch_class_total[c] > 0:
+                    batch_class_acc[c] = batch_class_correct[c] / batch_class_total[c]
+                else:
+                    batch_class_acc[c] = None  # Class not present in batch
+            
+            # Update per-class running windows (last 50 batches)
+            for c in range(10):
+                if batch_class_acc[c] is not None:
+                    epoch_diagnostics['per_class_running_window'][c].append(batch_class_acc[c])
+                    if len(epoch_diagnostics['per_class_running_window'][c]) > 50:
+                        epoch_diagnostics['per_class_running_window'][c].pop(0)
             
             # Update epoch-level diagnostics
             epoch_diagnostics['total_samples'] += B
@@ -1361,11 +1399,21 @@ def train_epoch(
             epoch_diagnostics['batch_accuracies'].append(batch_accuracy)
             epoch_diagnostics['batch_exact_matches'].append(batch_exact_match_count)
             
-            # Update FG/BG sums
+            # Update FG/BG sums and running windows
+            batch_fg_acc = batch_fg_acc_sum / batch_fg_samples if batch_fg_samples > 0 else 0.0
+            batch_bg_acc = batch_bg_acc_sum / batch_bg_samples if batch_bg_samples > 0 else 0.0
             if batch_fg_samples > 0:
-                epoch_diagnostics['fg_accuracy_sum'] += batch_fg_acc_sum / batch_fg_samples
+                epoch_diagnostics['fg_accuracy_sum'] += batch_fg_acc
+                epoch_diagnostics['fg_batch_count'] += 1
+                epoch_diagnostics['fg_running_window'].append(batch_fg_acc)
+                if len(epoch_diagnostics['fg_running_window']) > 50:
+                    epoch_diagnostics['fg_running_window'].pop(0)
             if batch_bg_samples > 0:
-                epoch_diagnostics['bg_accuracy_sum'] += batch_bg_acc_sum / batch_bg_samples
+                epoch_diagnostics['bg_accuracy_sum'] += batch_bg_acc
+                epoch_diagnostics['bg_batch_count'] += 1
+                epoch_diagnostics['bg_running_window'].append(batch_bg_acc)
+                if len(epoch_diagnostics['bg_running_window']) > 50:
+                    epoch_diagnostics['bg_running_window'].pop(0)
             
             # Running accuracy window (last 50 batches)
             epoch_diagnostics['running_accuracy_window'].append(batch_accuracy)
@@ -1397,6 +1445,34 @@ def train_epoch(
                   f"exact={total_exact}/{total_processed} ({exact_pct:.1f}%), "
                   f"running_acc={running_acc:.1%}, "
                   f"lr={current_lr:.2e}")
+            
+            # FG/BG accuracy for this batch and running averages
+            fg_window = epoch_diagnostics['fg_running_window']
+            bg_window = epoch_diagnostics['bg_running_window']
+            fg_running = sum(fg_window) / len(fg_window) if fg_window else 0.0
+            bg_running = sum(bg_window) / len(bg_window) if bg_window else 0.0
+            print(f"    FG: batch={batch_fg_acc:.1%} run50={fg_running:.1%} | "
+                  f"BG: batch={batch_bg_acc:.1%} run50={bg_running:.1%}")
+            
+            # Per-class accuracy for this batch
+            batch_class_strs = []
+            for c in range(10):
+                if batch_class_acc.get(c) is not None:
+                    batch_class_strs.append(f"{c}:{batch_class_acc[c]:.0%}")
+                else:
+                    batch_class_strs.append(f"{c}:-")
+            print(f"    Per-Color: [{' '.join(batch_class_strs)}]")
+            
+            # Per-class running averages (last 50 batches where class appeared)
+            running_class_strs = []
+            for c in range(10):
+                window = epoch_diagnostics['per_class_running_window'][c]
+                if len(window) > 0:
+                    avg = sum(window) / len(window)
+                    running_class_strs.append(f"{c}:{avg:.0%}")
+                else:
+                    running_class_strs.append(f"{c}:-")
+            print(f"    Running50: [{' '.join(running_class_strs)}]")
     
     # Average losses
     for key in total_losses:

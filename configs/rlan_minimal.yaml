@@ -77,18 +77,21 @@ training:
   # ============================================================
   # LOSS CONFIGURATION (Validated by Ablation)
   # ============================================================
-  # weighted_stablemax with proper ignore_index=-100 is CRITICAL
-  # This prevents NaN and allows proper gradient flow for FG colors
   # ============================================================
-  loss_mode: 'weighted_stablemax'  # BEST for ARC class imbalance
+  # LOSS CONFIGURATION - FOCAL WEIGHTED (RECOMMENDED)
+  # ============================================================
+  # FocalWeightedStablemaxLoss = our weights + focal modulation
+  # Combines BG/FG gradient balance with dynamic hard-pixel focusing
+  # ============================================================
+  loss_mode: 'focal_weighted'  # RECOMMENDED: weights + focal modulation
   
   # BG/FG weight caps (validated by ablation)
-  bg_weight_cap: 2.0               # Moderate BG weight
-  fg_weight_cap: 5.0               # Moderate FG emphasis (reduced from 10)
+  bg_weight_cap: 2.0               # BG weight (ensures ~52% gradient to BG)
+  fg_weight_cap: 5.0               # Max FG weight (rarest class = 5.0)
   
-  # Focal loss params (not used with weighted_stablemax)
-  focal_gamma: 2.0
-  focal_alpha: 0.75
+  # Focal params
+  focal_gamma: 2.0                 # Focusing parameter (higher = more focus on hard)
+  focal_alpha: 0.75                # Only used for legacy focal modes
   
   # ============================================================
   # MINIMAL AUXILIARY LOSSES (Ablation Validated)
