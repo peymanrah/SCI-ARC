@@ -167,7 +167,7 @@ class StablemaxCrossEntropy(nn.Module):
         elif self.reduction == "sum":
             return loss.sum()
         else:
-            full_loss = torch.zeros(B * H * W, device=logits.device)
+            full_loss = torch.zeros(B * H * W, device=logits.device, dtype=logits.dtype)
             full_loss[valid_mask] = loss
             return full_loss.view(B, H, W)
 
