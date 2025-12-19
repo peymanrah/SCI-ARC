@@ -770,6 +770,8 @@ def train_epoch(
     
     optimizer.zero_grad()
     nan_batches = 0  # Track NaN occurrences for diagnostics
+    consecutive_nan = 0  # Track consecutive NaN for detecting model corruption
+    max_consecutive_nan = 10  # Abort if this many consecutive NaN (model is corrupted)
     
     for batch_idx, batch in enumerate(dataloader):
         # Apply warmup with per-group LR preservation
@@ -826,18 +828,47 @@ def train_epoch(
             
             # NaN detection: skip batch if loss is NaN
             if not torch.isfinite(loss):
-                print(f"[WARNING] NaN/Inf loss at batch {batch_idx}, skipping...")
+                # Detailed diagnostics on first NaN
+                if consecutive_nan == 0:
+                    print(f"\n[WARNING] First NaN/Inf loss at batch {batch_idx}!")
+                    print(f"  Loss components: {', '.join(f'{k}={v.item():.4f}' if torch.is_tensor(v) else f'{k}={v}' for k,v in losses.items() if k != 'total_loss')}")
+                    # Check model weights for NaN
+                    nan_params = []
+                    for name, param in model.named_parameters():
+                        if not torch.isfinite(param).all():
+                            nan_params.append(name)
+                    if nan_params:
+                        print(f"  NaN/Inf in model parameters: {nan_params[:5]}...")  # First 5
+                    else:
+                        print(f"  Model parameters are finite - NaN likely from forward computation")
+                    # Check outputs
+                    if torch.is_tensor(outputs.get('logits')) and not torch.isfinite(outputs['logits']).all():
+                        print(f"  Logits contain NaN/Inf! range=[{outputs['logits'].min():.4f}, {outputs['logits'].max():.4f}]")
+                    if torch.is_tensor(outputs.get('attention_maps')) and not torch.isfinite(outputs['attention_maps']).all():
+                        print(f"  Attention maps contain NaN/Inf!")
+                    print()
+                else:
+                    print(f"[WARNING] NaN/Inf loss at batch {batch_idx}, skipping...")
+                
                 optimizer.zero_grad()  # Clear any partial gradients
                 nan_batches += 1
+                consecutive_nan += 1
+                if consecutive_nan >= max_consecutive_nan:
+                    print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
+                    print(f"[ERROR] Aborting epoch to prevent further corruption.")
+                    break
                 continue
+            
+            # Loss is finite - but only reset consecutive counter after successful optimizer step
             
             scaler.scale(loss).backward()
             
             # Step optimizer after accumulation
             if (batch_idx + 1) % grad_accumulation_steps == 0:
+                # Always unscale gradients first for NaN checking
+                scaler.unscale_(optimizer)
+                
                 if gradient_clip > 0:
-                    scaler.unscale_(optimizer)
-                    
                     # Compute total grad norm before clipping
                     total_grad_norm_before = 0.0
                     for p in model.parameters():
@@ -861,6 +892,29 @@ def train_epoch(
                         epoch_diagnostics['grad_was_clipped'] = total_grad_norm_before > gradient_clip
                     
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                
+                # Check for NaN/Inf gradients AFTER unscaling but BEFORE optimizer step
+                # This is critical because GradScaler can produce inf gradients on overflow
+                has_nan_grad = False
+                for p in model.parameters():
+                    if p.grad is not None and not torch.isfinite(p.grad).all():
+                        has_nan_grad = True
+                        break
+                
+                if has_nan_grad:
+                    print(f"[WARNING] NaN/Inf gradients at batch {batch_idx}, skipping optimizer step...")
+                    optimizer.zero_grad()
+                    nan_batches += 1
+                    consecutive_nan += 1
+                    if consecutive_nan >= max_consecutive_nan:
+                        print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
+                        print(f"[ERROR] Aborting epoch to prevent further corruption.")
+                        break
+                    # Skip scaler.step and scaler.update to avoid corrupting model
+                    continue
+                
+                # Reset consecutive NaN counter on successful step
+                consecutive_nan = 0
                 
                 scaler.step(optimizer)
                 scaler.update()
@@ -898,6 +952,11 @@ def train_epoch(
                 print(f"[WARNING] NaN/Inf loss at batch {batch_idx}, skipping...")
                 optimizer.zero_grad()  # Clear any partial gradients
                 nan_batches += 1
+                consecutive_nan += 1
+                if consecutive_nan >= max_consecutive_nan:
+                    print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
+                    print(f"[ERROR] Aborting epoch to prevent further corruption.")
+                    break
                 continue
             
             loss.backward()
@@ -926,6 +985,27 @@ def train_epoch(
                 
                 if gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                
+                # Check for NaN/Inf gradients BEFORE optimizer step
+                has_nan_grad = False
+                for p in model.parameters():
+                    if p.grad is not None and not torch.isfinite(p.grad).all():
+                        has_nan_grad = True
+                        break
+                
+                if has_nan_grad:
+                    print(f"[WARNING] NaN/Inf gradients at batch {batch_idx}, skipping optimizer step...")
+                    optimizer.zero_grad()
+                    nan_batches += 1
+                    consecutive_nan += 1
+                    if consecutive_nan >= max_consecutive_nan:
+                        print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
+                        print(f"[ERROR] Aborting epoch to prevent further corruption.")
+                        break
+                    continue
+                
+                # Reset consecutive NaN counter on successful step
+                consecutive_nan = 0
                 
                 optimizer.step()
                 optimizer.zero_grad()
