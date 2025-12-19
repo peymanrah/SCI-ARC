@@ -760,6 +760,16 @@ def train_epoch(
     gradient_clip = config['training']['gradient_clip']
     grad_accumulation_steps = config['training'].get('grad_accumulation_steps', 1)
     use_amp = config['device'].get('mixed_precision', False) and device.type == 'cuda'
+    
+    # Get AMP dtype from config (default to bfloat16 which is more stable than float16)
+    amp_dtype_str = config['device'].get('dtype', 'bfloat16')
+    if amp_dtype_str == 'bfloat16':
+        amp_dtype = torch.bfloat16
+    elif amp_dtype_str == 'float16':
+        amp_dtype = torch.float16
+    else:
+        amp_dtype = torch.bfloat16  # Safe default
+    
     log_every = config['logging'].get('log_every', 10)
     warmup_epochs = config['training'].get('warmup_epochs', 10)
     warmup_steps = warmup_epochs * len(dataloader)
@@ -801,7 +811,7 @@ def train_epoch(
         
         # Forward pass with optional mixed precision
         if use_amp and scaler is not None:
-            with autocast('cuda'):
+            with autocast('cuda', dtype=amp_dtype):
                 outputs = model(
                     test_inputs,
                     train_inputs=train_inputs,
@@ -1909,9 +1919,16 @@ Config Overrides:
     
     # Setup mixed precision
     scaler = None
+    amp_dtype_str = config['device'].get('dtype', 'bfloat16')
     if config['device'].get('mixed_precision', False) and device.type == 'cuda':
+        # Note: GradScaler is not needed for bfloat16 (same exponent range as fp32)
+        # but we keep it for compatibility and it works fine with bfloat16
         scaler = GradScaler('cuda')
-        print("Using mixed precision training (AMP)")
+        print(f"Using mixed precision training (AMP) with dtype={amp_dtype_str}")
+        if amp_dtype_str == 'bfloat16':
+            print("  → bfloat16 has same exponent range as fp32 - less likely to overflow/underflow")
+        elif amp_dtype_str == 'float16':
+            print("  → WARNING: float16 has limited range - may cause NaN with very small/large values")
     
     # Initialize wandb if enabled (disabled by default - not installed in production)
     wandb_enabled = False
