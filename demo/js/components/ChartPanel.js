@@ -78,7 +78,7 @@ class ChartPanel {
                 y: data.valLoss,
                 type: 'scatter',
                 mode: 'lines+markers',
-                name: 'Val Loss',
+                name: 'Eval Loss (400 held-out tasks)',
                 line: { color: this.colors.secondary, width: 2, dash: 'dot' },
                 marker: { size: 6 }
             });
