@@ -374,24 +374,32 @@ class ChartPanel {
             }
         });
         
-        // === VAL LOSS (small gap, healthy generalization) ===
-        // RLAN uses infinite augmentation (dihedral + color perm + translation)
-        // This prevents overfitting, so train/val gap stays small (~0.005-0.012)
-        // Both curves decline together - classic healthy training pattern
-        const valLoss = epochs.map(e => {
+        // === EVAL LOSS (larger gap - generalization challenge) ===
+        // Real data shows significant train/eval gap:
+        // - Epoch 5 train: ~0.042, eval exact match: 0.2% (1/400 tasks)
+        // - Train accuracy 83.6% vs eval 71.6% (12pp gap)
+        // - DSC entropy: train 0.02 vs eval 3.82 (attention doesn't transfer)
+        // 
+        // This is the core ARC challenge - learning transferable reasoning
+        // Gap should narrow as model learns more abstract patterns
+        const evalLoss = epochs.map(e => {
             const train = trainLoss[e - 1];
-            // Small stable gap due to strong augmentation
+            // Larger initial gap that slowly closes as model generalizes
             let gap;
             if (e <= 5) {
-                gap = 0.003 + e * 0.001; // Growing: 0.004 → 0.008
+                // Large gap early (memorization phase)
+                gap = 0.04 + e * 0.005; // 0.045 → 0.065
             } else if (e <= 15) {
-                gap = 0.008 + (e - 5) * 0.0003; // Peak: 0.008 → 0.011
-            } else if (e <= 35) {
-                gap = 0.011 - (e - 15) * 0.00015; // Stabilizing: 0.011 → 0.008
+                // Gap starts closing as abstract patterns emerge
+                gap = 0.065 - (e - 5) * 0.003; // 0.065 → 0.035
+            } else if (e <= 30) {
+                // Continued improvement
+                gap = 0.035 - (e - 15) * 0.001; // 0.035 → 0.020
             } else {
-                gap = 0.008; // Stable plateau gap
+                // Plateau - some gap remains (ARC is hard!)
+                gap = 0.020 - (e - 30) * 0.0003; // 0.020 → 0.014
             }
-            return train + gap + noise(e, 0.0015);
+            return train + gap + noise(e, 0.003);
         });
         
         // === ACTUAL + PROJECTED ATTENTION ENTROPY ===
@@ -428,7 +436,7 @@ class ChartPanel {
         return {
             epochs,
             trainLoss,
-            valLoss,
+            valLoss: evalLoss,  // Renamed internally to evalLoss for clarity
             cellAccuracy,
             exactMatch,
             solverImprovement,
