@@ -1123,7 +1123,7 @@ def train_epoch(
                 attn = outputs['attention_maps']  # (B, K, H, W)
                 B, K, H, W = attn.shape
                 attn_flat = attn.view(B, K, -1)
-                attn_clamp = attn_flat.clamp(min=1e-10)
+                attn_clamp = attn_flat.clamp(min=1e-6)  # Match DSC entropy clamp threshold
                 per_clue_entropy = -(attn_clamp * attn_clamp.log()).sum(dim=-1).mean(dim=0)  # (K,)
                 epoch_diagnostics['per_clue_entropy'] = per_clue_entropy.tolist()
                 
@@ -1617,7 +1617,7 @@ def evaluate(
                 attn = outputs['attention_maps']  # (B, K, H, W)
                 attn_flat = attn.view(attn.shape[0], attn.shape[1], -1)
                 # Entropy of attention (lower = sharper = better)
-                attn_clamp = attn_flat.clamp(min=1e-10)
+                attn_clamp = attn_flat.clamp(min=1e-6)  # Match DSC entropy clamp threshold
                 entropy = -(attn_clamp * attn_clamp.log()).sum(dim=-1).mean()
                 dsc_entropy_sum += entropy.item() * batch_size
             

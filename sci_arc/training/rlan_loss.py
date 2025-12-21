@@ -41,7 +41,9 @@ def stablemax(x: torch.Tensor, epsilon: float = 1e-30) -> torch.Tensor:
         Stablemax activations (always positive)
     """
     # Clamp input to prevent extreme values that could cause overflow
-    x = x.clamp(min=-1000, max=1000)
+    # Use ±50 to match logit clamping in solver output and DSC attention
+    # At |x|=50, stablemax values are well-defined: s(50)=51, s(-50)≈0.02
+    x = x.clamp(min=-50, max=50)
     
     # Handle NaN/Inf inputs by replacing with 0
     x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
@@ -73,7 +75,9 @@ def log_stablemax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
         Log probabilities using stablemax normalization
     """
     # Clamp input first to prevent extreme values
-    x = x.clamp(min=-1000, max=1000)
+    # Use ±50 to match logit clamping in solver output and DSC attention
+    # This ensures consistency: logits arrive already clamped, but we re-clamp for safety
+    x = x.clamp(min=-50, max=50)
     
     # Handle NaN/Inf inputs by replacing with 0
     x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
@@ -693,7 +697,9 @@ class EntropyRegularization(nn.Module):
         attention_flat = attention_maps.view(B, K, -1)  # (B, K, H*W)
         
         # Clamp attention for numerical stability
-        attention_clamped = attention_flat.clamp(min=1e-10, max=1.0)
+        # Use 1e-6 minimum (not 1e-10) to prevent gradient explosion: grad of log(1e-10) = 1e10!
+        # At 1e-6: log(1e-6) = -13.8, grad = 1e6 (manageable with grad clipping)
+        attention_clamped = attention_flat.clamp(min=1e-6, max=1.0)
         
         # Compute entropy for each attention map
         # H(p) = -Σ p log(p)
@@ -802,7 +808,8 @@ class SparsityRegularization(nn.Module):
             B, K, H, W = attention_maps.shape
             
             # Compute per-clue entropy
-            attn_flat = attention_maps.view(B, K, -1).clamp(min=1e-10)  # (B, K, H*W)
+            # Use 1e-6 minimum (not 1e-10) to prevent gradient explosion in log()
+            attn_flat = attention_maps.view(B, K, -1).clamp(min=1e-6)  # (B, K, H*W)
             per_clue_entropy = -(attn_flat * torch.log(attn_flat)).sum(dim=-1)  # (B, K)
             
             # Normalize by max entropy for stable values [0, 1]

@@ -631,7 +631,10 @@ class RecursiveSolver(nn.Module):
                 h = h_new
             
             # Predict output
-            logits = self.output_head(h)  # (B, num_classes, H, W)
+            # Clamp logits to prevent numerical instability in softmax/stablemax
+            # At ±50, softmax already saturates (~1.0), so no loss of expressiveness
+            # Matches DSC attention clamping convention
+            logits = self.output_head(h).clamp(-50, 50)  # (B, num_classes, H, W)
             all_logits.append(logits)
             
             # Optional: Use prediction to update input embedding (feedback)

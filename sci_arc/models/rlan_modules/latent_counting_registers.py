@@ -304,6 +304,7 @@ class LatentCountingRegisters(nn.Module):
         color_masks = F.one_hot(grid_clamped, num_classes=C).float()  # (B, H, W, C)
         
         counts = color_masks.sum(dim=(1, 2))  # (B, C)
-        probs = counts / counts.sum(dim=-1, keepdim=True)
+        # Add epsilon to prevent division by zero when grid is empty (shouldn't happen, but defensive)
+        probs = counts / (counts.sum(dim=-1, keepdim=True) + 1e-6)
         
         return probs
