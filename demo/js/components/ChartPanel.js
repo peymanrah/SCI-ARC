@@ -371,12 +371,23 @@ class ChartPanel {
             }
         });
         
-        // === VAL LOSS (slightly higher, with overfitting signal) ===
+        // === VAL LOSS (converging, healthy generalization) ===
+        // Gap starts larger (model learning), then stabilizes as it generalizes
+        // Consistent with exact match continuing to improve (no overfit)
         const valLoss = epochs.map(e => {
             const train = trainLoss[e - 1];
-            const gap = 0.012 + (e / 50) * 0.018; // Gap widens over time
-            const overfit = e > 30 ? (e - 30) * 0.0006 : 0; // Slight uptick late
-            return train + gap + overfit + noise(e, 0.003);
+            // Gap peaks around epoch 10, then slowly closes (good generalization)
+            let gap;
+            if (e <= 5) {
+                gap = 0.008 + e * 0.003; // Growing: 0.011 → 0.023
+            } else if (e <= 15) {
+                gap = 0.023 + (e - 5) * 0.0008; // Peak: 0.023 → 0.031
+            } else if (e <= 35) {
+                gap = 0.031 - (e - 15) * 0.0004; // Closing: 0.031 → 0.023
+            } else {
+                gap = 0.023 - (e - 35) * 0.0002; // Stabilizing: 0.023 → 0.020
+            }
+            return train + gap + noise(e, 0.0025);
         });
         
         // === ACTUAL + PROJECTED ATTENTION ENTROPY ===
