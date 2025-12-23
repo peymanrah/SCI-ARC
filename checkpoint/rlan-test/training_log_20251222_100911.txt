@@ -1,0 +1,532 @@
+Logging to: checkpoint\rlan-test\training_log_20251222_100911.txt
+Timestamp: 2025-12-22T10:09:11.209400
+Python: 3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:37:03) [MSC v.1929 64 bit (AMD64)]
+PyTorch: 2.9.1+cpu
+Starting fresh training
+
+num_classes validation: OK (10 classes for colors 0-9)
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT]
+
+Model parameters:
+  encoder: 17,472
+  feature_proj: 16,768
+  context_encoder: 1,078,720
+  context_injector: 33,024
+  dsc: 166,338
+  msre: 27,952
+  lcr: 0
+  sph: 0
+  solver: 1,765,386
+  total: 3,105,660
+
+============================================================
+MODULE ABLATION STATUS
+============================================================
+  ContextEncoder: ENABLED (task signal from demos)
+  DSC:            ENABLED (dynamic spatial clues - CORE)
+  MSRE:           ENABLED (multi-scale relative encoding - CORE)
+  LCR:            DISABLED (latent counting registers)
+  SPH:            DISABLED (symbolic predicate heads)
+  ACT:            DISABLED (adaptive computation time)
+  Pos Encoding:   SINUSOIDAL
+
+  >>> CORE ABLATION MODE: Testing DSC + MSRE novelty <<<
+============================================================
+
+============================================================
+RLAN TRAINING REGIME
+============================================================
+  Batch Size: 4
+  Grad Accumulation: 1
+  Effective Batch: 4
+  Learning Rate: 5.0e-04
+  Weight Decay: 0.01
+  Optimizer: adamw (beta1=0.9, beta2=0.95)
+  Scheduler: none
+  Warmup Epochs: 0
+  Max Epochs: 3
+
+Loss Configuration:
+  Loss Mode: STABLEMAX
+
+Auxiliary Loss Weights (only non-zero shown):
+  lambda_entropy=0.01 (DSC attention sharpness)
+  lambda_sparsity=0.5 (clue efficiency)
+    min_clues=2.5 (min clues before penalty)
+    min_clue_weight=5.0 (penalty strength)
+    ponder_weight=0.02 (cost per clue)
+  lambda_predicate=0.01 (predicate diversity)
+
+Temperature Schedule (Gumbel-Softmax):
+  Start: 1.0, End: 0.5
+============================================================
+  Loss Mode: STABLEMAX (pure cross-entropy)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+
+Loading data from: ./data/arc-agi/data/training
+Cache samples: False
+
+============================================================
+AUGMENTATION CONFIGURATION
+============================================================
+  1. Dihedral (D4 group): ENABLED
+     - 8 transforms: identity, rot90, rot180, rot270, flipLR, flipUD, transpose, anti-transpose
+  2. Color Permutation:   ENABLED
+     - 9! = 362,880 permutations (colors 1-9 shuffled, 0 fixed)
+     - Probability: 100% (CRITICAL: 100% breaks color identity learning!)
+  3. Translational:       ENABLED
+     - Random offset within 30x30 canvas (~100 positions)
+
+  Total Diversity: 8 x 362,880 x ~100 = ~290,304,000 unique per task
+  Mode: On-the-fly (EACH sample is NEW random augmentation)
+  Advantage: Infinite diversity vs TRM's fixed 1000 samples
+============================================================
+
+Curriculum learning DISABLED (using all data from epoch 1, like TRM)
+  Limited to 10 random tasks (max_tasks=10)
+Loaded 10 tasks from ./data/arc-agi/data/training
+Loaded 400 tasks from ./data/arc-agi/data/evaluation
+Train samples: 10, batches: 2
+Eval samples: 400, batches: 100
+  Optimizer param groups:
+    DSC: 23 params @ 1.0x LR (5.00e-04)
+    MSRE: 10 params @ 1.0x LR (5.00e-04)
+    Other: 79 params @ 1x LR (5.00e-04)
+WandB logging disabled (use_wandb=false or wandb not installed)
+
+Starting training from epoch 0 to 3
+============================================================
+
+Epoch 1/3
+----------------------------------------
+  Batch 0/2: loss=0.8543, stablemax=0.7438, batch_acc=9.1%, exact=0/4 (0.0%), running_acc=9.1%, lr=5.00e-04
+    FG: batch=19.7% run50=19.7% | BG: batch=6.7% run50=6.7%
+    Per-Color: [0:2% 1:36% 2:17% 3:- 4:- 5:- 6:- 7:0% 8:37% 9:1%]
+    Running50: [0:2% 1:36% 2:17% 3:- 4:- 5:- 6:- 7:0% 8:37% 9:1%]
+
+Epoch 1 Summary:
+  Total Loss: 2.1989
+  Task Loss (focal): 2.1150
+  Entropy Loss: 4.5974 (weight=0.01)
+  Sparsity Loss: 0.0759 (weight=0.5)
+  Predicate Loss: 0.0000 (weight=0.01)
+  Time: 2.8s, LR: 5.00e-04
+    Per-module LRs: DSC:5.00e-04, MSRE:5.00e-04, Other:5.00e-04
+  Temperature: 1.0000 (lower=sharper attention)
+  Samples Processed: 8 (2 batches)
+  Color Permutation: 0.0% (0/8)
+  Translational Aug: 0.0% (0/8), unique offsets: 0
+  Aug Quality: NONE
+  --- Training Diagnostics ---
+  Solver Steps: 4 (deep supervision active)
+  Per-Step Loss: [2.358, 2.424, 2.445, 2.445]
+    [!] SOLVER DEGRADATION: Step 0 is best! Later steps 3.7% worse!
+    [!] Best: step 0 (2.358), Worst: step 3 (2.445)
+  Grad Norms: DSC=0.1334, StopPred=0.1000, Encoder=0.0732, Solver=9.4479
+              ContextEnc=0.3506, MSRE=0.0487
+  Attention: max=0.0112, min=0.000000
+  Stop Prob: 0.186 (approx 3.3 clues active)
+  Clues Used: mean=3.26, std=0.24, range=[3.0, 3.5]
+  Clue-Loss Correlation: +0.661 (EXCELLENT: per-sample coupling working!)
+  Stop Logits: mean=-1.52, std=0.40, range=[-2.2, -0.7]
+  Per-Clue Entropy: [5.24, 5.26, 5.25, 5.26] (mean=5.25, max=6.80)
+    [!] Clues have uniform entropy (std=0.008) - not differentiating!
+    [!] High entropy (5.25) - attention still diffuse!
+  Centroid Spread: 0.30 (higher=more diverse)
+    [!] Clues clustered (spread < 2) - should spread out
+  --- Stop Predictor Coupling ---
+  Entropy Input to Stop: 0.7721 (normalized, lower=sharper)
+  Per-Clue Entropy Input: [0.770, 0.773, 0.772, 0.773]
+  Per-Clue Stop Prob: [0.219, 0.171, 0.173, 0.180]
+  --- Sparsity Loss Breakdown (Per-Sample Coupled) ---
+  Min Clue Penalty: 0.0000 (per-sample avg)
+  Per-Sample Clue Penalty (scaled): 0.0000
+  Base Pondering: 0.0651 (clues=3.26)
+  Entropy Pondering: 0.0508
+  --- Context Encoder ---
+  Context Magnitude: 12.0454 (should be > 0.5)
+  Context Batch Std: 0.3696 (should vary)
+  --- Gradient Clipping ---
+  Grad Norm (before clip): 9.4568
+    [!] Gradients were clipped! (threshold=1.0)
+  --- Per-Class Distribution (Valid Pixels Only) ---
+  Padding: 69.6% of grid (ignored in loss)
+  Pred %: [3.4, 18.3, 15.0, 14.1, 5.6, 10.7, 2.0, 0.5, 30.1, 0.5]
+  Target %: [81.5, 2.6, 1.1, 0.0, 0.0, 0.0, 0.0, 2.3, 5.9, 6.7]
+    [!] Missing foreground colors: [7, 9]
+  Per-Class Acc %: [9, 31, 17, 0, 0, -, 0, 0, 36, 1]
+  ==================================================
+  PER-SAMPLE TRAINING ACCURACY (Epoch 1)
+  ==================================================
+  ★ Mean Accuracy: 21.6%
+  ★ Exact Match: 0/8 (0.0%)
+  ★ High Acc (≥90%): 1/8 (12.5%)
+  FG Accuracy: 9.9%
+  BG Accuracy: 53.4%
+  Accuracy Distribution: 0-25%:100%, 25-50%:0%, 50-75%:0%, 75-90%:0%, 90-100%:0%
+    [!] Many samples stuck at low accuracy - check data/model!
+  Running Window (last 2 batches): 21.6% ± 12.5%
+
+  --- PER-COLOR ACCURACY (10 classes) ---
+  Color:       0     1     2     3     4     5     6     7     8     9
+  Acc%:       9%   31%   17%    0%    0%    -     0%    0%   36%    1%
+  Target:  79.9%  2.7%  1.0%  0.3%  0.4%  0.0%  0.2%  2.1%  5.6%  7.8%
+  Pred:    18.4% 15.4% 12.6% 11.9%  4.7%  9.0%  1.7%  0.4% 25.4%  0.4%
+  [!] Weak colors (<50% acc): 0(Black), 1(Blue), 2(Red), 3(Green), 4(Yellow), 6(Pink), 7(Orange), 8(Cyan), 9(Brown)
+  [!] Under-predicting color 7 (Orange): 0.4% vs target 2.1%
+  [!] Under-predicting color 9 (Brown): 0.4% vs target 7.8%
+  ==================================================
+
+  ==================================================
+  LEARNING TRAJECTORY (Epoch 1)
+  ==================================================
+  ==================================================
+
+  ############################################################
+  🚦 TRAINING HEALTH CHECK - Epoch 1
+  ############################################################
+  ✓ Good entropy-stop coupling (r=0.66)
+  ✓ No NaN/Inf issues
+  ✓ No color mode collapse
+  ⚠ Attention still diffuse (0.77)
+  ⚠ Stop probs uniform (std=0.020) - early epoch OK
+  ⚠ Centroids clustered (0.3) - early epoch OK
+  --------------------------------------------------------
+  RESULT: 3/6 checks passed
+  STATUS: 🟡 MONITOR
+  → Some concerns but not critical. Watch next few epochs.
+  ############################################################
+
+  --- TRM-Style TTA Evaluation (8 dihedral views, voting) ---
+  ★ TTA Exact Match: 0/50 (0.0%)
+  Avg Unique Predictions: 1.0 / 8
+  Avg Winner Votes: 8.0 / 8
+
+  --- Generalization Health ---
+  Train Exact Match: 0.0%
+  Eval Exact Match (TTA): 0.0%
+  Delta (Train - Eval): 0.0%
+  ✅ Healthy gap: 0.0% - Good generalization!
+  ✅ Good consensus: 100%
+  --- Evaluation Metrics (Valid Pixels Only) ---
+  ★ EXACT MATCH: 1/400 tasks (0.2%)
+  Pixel Accuracy: 0.5288
+  FG Accuracy (colors 1-9): 0.0000
+  BG Accuracy (black): 1.0000
+  Class Ratios (pred/target):
+    BG (black): 100.0% / 52.9%
+    FG (colors): 0.0% / 47.1%
+  Colors Used (pred/target): 1 / 10
+  DSC Entropy: 5.1158 (lower=sharper)
+  DSC Clues Used: 3.50
+  Eval Stop Prob: 0.124
+  Predicate Activation: 0.0000
+  Eval Temperature: 1.000 (matched to training)
+
+  ⚠️  [WARNING] BACKGROUND COLLAPSE DETECTED! (1/5)
+      Reasons: BG excess: 47.1%, Colors: 1/10
+      Consider: Lower learning rate, increase focal_alpha, check ContextEncoder
+  Saved checkpoint to checkpoint\rlan-test\best.pt
+  ★★★ NEW BEST: 1/400 exact matches (0.2%) ★★★
+  Saved checkpoint to checkpoint\rlan-test\latest.pt
+
+Epoch 2/3
+----------------------------------------
+  Batch 0/2: loss=0.4841, stablemax=0.3720, batch_acc=66.4%, exact=0/4 (0.0%), running_acc=66.4%, lr=5.00e-04
+    FG: batch=0.0% run50=0.0% | BG: batch=100.0% run50=100.0%
+    Per-Color: [0:100% 1:0% 2:0% 3:0% 4:0% 5:- 6:0% 7:0% 8:- 9:-]
+    Running50: [0:100% 1:0% 2:0% 3:0% 4:0% 5:- 6:0% 7:0% 8:- 9:-]
+
+Epoch 2 Summary:
+  Total Loss: 0.3697
+  Task Loss (focal): 0.2621
+  Entropy Loss: 4.8043 (weight=0.01)
+  Sparsity Loss: 0.1190 (weight=0.5)
+  Predicate Loss: 0.0000 (weight=0.01)
+  Time: 1.6s, LR: 5.00e-04
+    Per-module LRs: DSC:5.00e-04, MSRE:5.00e-04, Other:5.00e-04
+  Temperature: 0.7937 (lower=sharper attention)
+  Samples Processed: 8 (2 batches)
+  Color Permutation: 0.0% (0/8)
+  Translational Aug: 0.0% (0/8), unique offsets: 0
+  Aug Quality: NONE
+  --- Training Diagnostics ---
+  Solver Steps: 4 (deep supervision active)
+  Per-Step Loss: [1.332, 1.279, 1.256, 1.245]
+    Step improvement: 6.6% (later steps better - GOOD!)
+  Grad Norms: DSC=0.1088, StopPred=0.0791, Encoder=0.0451, Solver=1.1180
+              ContextEnc=0.1084, MSRE=0.0036
+  Attention: max=0.0143, min=0.000000
+  Stop Prob: 0.144 (approx 3.4 clues active)
+  Clues Used: mean=3.42, std=0.05, range=[3.4, 3.5]
+  Clue-Loss Correlation: -0.247 (unexpected negative - check gradient flow)
+  Stop Logits: mean=-1.81, std=0.29, range=[-2.5, -1.3]
+    [!] Low variance - clue count not adapting per-task!
+  Per-Clue Entropy: [5.13, 5.19, 5.19, 5.19] (mean=5.18, max=6.80)
+    [!] Clues have uniform entropy (std=0.029) - not differentiating!
+    [!] High entropy (5.18) - attention still diffuse!
+  Centroid Spread: 0.61 (higher=more diverse)
+    [!] Clues clustered (spread < 2) - should spread out
+  --- Stop Predictor Coupling ---
+  Entropy Input to Stop: 0.7611 (normalized, lower=sharper)
+  Per-Clue Entropy Input: [0.754, 0.763, 0.764, 0.764]
+  Per-Clue Stop Prob: [0.170, 0.114, 0.136, 0.157]
+  --- Sparsity Loss Breakdown (Per-Sample Coupled) ---
+  Min Clue Penalty: 0.0000 (per-sample avg)
+  Per-Sample Clue Penalty (scaled): 0.0000
+  Base Pondering: 0.0685 (clues=3.42)
+  Entropy Pondering: 0.0521
+  --- Context Encoder ---
+  Context Magnitude: 12.7800 (should be > 0.5)
+  Context Batch Std: 0.3333 (should vary)
+  --- Gradient Clipping ---
+  Grad Norm (before clip): 1.1329
+    [!] Gradients were clipped! (threshold=1.0)
+  --- Per-Class Distribution (Valid Pixels Only) ---
+  Padding: 70.1% of grid (ignored in loss)
+  Pred %: [100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  Target %: [78.7, 1.1, 2.3, 10.3, 1.7, 0.0, 0.5, 5.4, 0.0, 0.0]
+    [!] Over-predicting BG (class 0) by 21.3%!
+    [!] Missing foreground colors: [1, 2, 3, 4, 7]
+  Per-Class Acc %: [100, 0, 0, 0, 0, 0, 0, 0, -, 0]
+  [!] COLOR MODE COLLAPSE: 100% of FG preds are color 0
+      Model is defaulting to single FG color instead of learning per-class!
+  ==================================================
+  PER-SAMPLE TRAINING ACCURACY (Epoch 2)
+  ==================================================
+  ★ Mean Accuracy: 59.9%
+  ★ Exact Match: 0/8 (0.0%)
+  ★ High Acc (≥90%): 1/8 (12.5%)
+  FG Accuracy: 0.0%
+  BG Accuracy: 100.0%
+  Accuracy Distribution: 0-25%:0%, 25-50%:25%, 50-75%:25%, 75-90%:50%, 90-100%:0%
+  Running Window (last 2 batches): 59.9% ± 6.5%
+
+  --- PER-COLOR ACCURACY (10 classes) ---
+  Color:       0     1     2     3     4     5     6     7     8     9
+  Acc%:     100%    0%    0%    0%    0%    0%    0%    0%    -     0%
+  Target:  76.1%  0.9%  2.4% 11.4%  1.9%  2.2%  0.4%  4.5%  0.0%  0.2%
+  Pred:   100.0%  0.0%  0.0%  0.0%  0.0%  0.0%  0.0%  0.0%  0.0%  0.0%
+  [!] Weak colors (<50% acc): 1(Blue), 2(Red), 3(Green), 4(Yellow), 5(Gray), 6(Pink), 7(Orange), 9(Brown)
+  [!] Under-predicting color 2 (Red): 0.0% vs target 2.4%
+  [!] Under-predicting color 3 (Green): 0.0% vs target 11.4%
+  [!] Under-predicting color 4 (Yellow): 0.0% vs target 1.9%
+  [!] Under-predicting color 5 (Gray): 0.0% vs target 2.2%
+  [!] Under-predicting color 7 (Orange): 0.0% vs target 4.5%
+  ==================================================
+
+  ==================================================
+  LEARNING TRAJECTORY (Epoch 2)
+  ==================================================
+  Stop Prob:   0.144 ↓ (init=0.27, task-dependent)
+  Exp. Clues:  3.42 (latent variable, task-dependent)
+  Attn Entropy: 5.18 ↓ (max=6.8, sharper=better)
+  Task Loss:   0.2621 ↓
+  Train Acc:   59.9% ↑
+  Exact Match: 0.0% →
+  Best Step:   3 (later=better refinement)
+  FG Coverage: 0.0% of target ↓
+  ==================================================
+
+  ############################################################
+  🚦 TRAINING HEALTH CHECK - Epoch 2
+  ############################################################
+  ✓ No NaN/Inf issues
+  ⚠ Attention still diffuse (0.76)
+  ⚠ Stop probs uniform (std=0.021) - early epoch OK
+  ⚠ Centroids clustered (0.6) - early epoch OK
+  ⚠ Negative coupling (r=-0.25) - early epoch OK
+  ✗ Color mode collapse (100% one color)
+  --------------------------------------------------------
+  RESULT: 1/6 checks passed
+  STATUS: 🟠 WARNING
+  → Multiple issues detected. Consider intervention soon.
+
+  RECOMMENDED ACTIONS:
+    - Increase focal_alpha, check class weights
+  ############################################################
+
+  --- TRM-Style TTA Evaluation (8 dihedral views, voting) ---
+  ★ TTA Exact Match: 0/50 (0.0%)
+  Avg Unique Predictions: 1.6 / 8
+  Avg Winner Votes: 7.4 / 8
+
+  --- Generalization Health ---
+  Train Exact Match: 0.0%
+  Eval Exact Match (TTA): 0.0%
+  Delta (Train - Eval): 0.0%
+  ✅ Healthy gap: 0.0% - Good generalization!
+  ✅ Good consensus: 93%
+  --- Evaluation Metrics (Valid Pixels Only) ---
+  ★ EXACT MATCH: 1/400 tasks (0.2%)
+  Pixel Accuracy: 0.5288
+  FG Accuracy (colors 1-9): 0.0000
+  BG Accuracy (black): 1.0000
+  Class Ratios (pred/target):
+    BG (black): 100.0% / 52.9%
+    FG (colors): 0.0% / 47.1%
+  Colors Used (pred/target): 1 / 10
+  DSC Entropy: 5.0686 (lower=sharper)
+  DSC Clues Used: 3.55
+  Eval Stop Prob: 0.112
+  Predicate Activation: 0.0000
+  Eval Temperature: 0.794 (matched to training)
+
+  ⚠️  [WARNING] BACKGROUND COLLAPSE DETECTED! (2/5)
+      Reasons: BG excess: 47.1%, Colors: 1/10
+      Consider: Lower learning rate, increase focal_alpha, check ContextEncoder
+  Saved checkpoint to checkpoint\rlan-test\latest.pt
+
+Epoch 3/3
+----------------------------------------
+  Batch 0/2: loss=0.2864, stablemax=0.1798, batch_acc=77.6%, exact=0/4 (0.0%), running_acc=77.6%, lr=5.00e-04
+    FG: batch=0.0% run50=0.0% | BG: batch=100.0% run50=100.0%
+    Per-Color: [0:100% 1:- 2:0% 3:0% 4:- 5:0% 6:- 7:0% 8:0% 9:0%]
+    Running50: [0:100% 1:- 2:0% 3:0% 4:- 5:0% 6:- 7:0% 8:0% 9:0%]
+
+Epoch 3 Summary:
+  Total Loss: 0.3870
+  Task Loss (focal): 0.2800
+  Entropy Loss: 4.8222 (weight=0.01)
+  Sparsity Loss: 0.1175 (weight=0.5)
+  Predicate Loss: 0.0000 (weight=0.01)
+  Time: 1.5s, LR: 5.00e-04
+    Per-module LRs: DSC:5.00e-04, MSRE:5.00e-04, Other:5.00e-04
+  Temperature: 0.6300 (lower=sharper attention)
+  Samples Processed: 8 (2 batches)
+  Color Permutation: 0.0% (0/8)
+  Translational Aug: 0.0% (0/8), unique offsets: 0
+  Aug Quality: NONE
+  --- Training Diagnostics ---
+  Solver Steps: 4 (deep supervision active)
+  Per-Step Loss: [1.033, 0.986, 0.974, 0.972]
+    Step improvement: 5.9% (later steps better - GOOD!)
+  Grad Norms: DSC=0.0826, StopPred=0.0611, Encoder=0.0303, Solver=0.3734
+              ContextEnc=0.0575, MSRE=0.0050
+  Attention: max=0.0235, min=0.000000
+  Stop Prob: 0.127 (approx 3.5 clues active)
+  Clues Used: mean=3.49, std=0.03, range=[3.5, 3.5]
+  Clue-Loss Correlation: +0.057 (weak - per-sample coupling may need tuning)
+  Stop Logits: mean=-1.94, std=0.19, range=[-2.2, -1.6]
+    [!] Low variance - clue count not adapting per-task!
+  Per-Clue Entropy: [4.61, 4.78, 4.78, 4.79] (mean=4.74, max=6.80)
+    [!] Clues have uniform entropy (std=0.074) - not differentiating!
+  Centroid Spread: 0.90 (higher=more diverse)
+    [!] Clues clustered (spread < 2) - should spread out
+  --- Stop Predictor Coupling ---
+  Entropy Input to Stop: 0.6968 (normalized, lower=sharper)
+  Per-Clue Entropy Input: [0.678, 0.703, 0.703, 0.704]
+  Per-Clue Stop Prob: [0.129, 0.142, 0.110, 0.129]
+  --- Sparsity Loss Breakdown (Per-Sample Coupled) ---
+  Min Clue Penalty: 0.0000 (per-sample avg)
+  Per-Sample Clue Penalty (scaled): 0.0000
+  Base Pondering: 0.0698 (clues=3.49)
+  Entropy Pondering: 0.0486
+  --- Context Encoder ---
+  Context Magnitude: 13.0839 (should be > 0.5)
+  Context Batch Std: 0.2979 (should vary)
+  --- Gradient Clipping ---
+  Grad Norm (before clip): 0.3923
+    Gradients within bounds
+  --- Per-Class Distribution (Valid Pixels Only) ---
+  Padding: 81.5% of grid (ignored in loss)
+  Pred %: [100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  Target %: [81.2, 0.0, 0.6, 8.7, 0.0, 2.6, 0.0, 1.8, 3.3, 1.8]
+    [!] Over-predicting BG (class 0) by 18.8%!
+    [!] Missing foreground colors: [3, 5, 7, 8, 9]
+  Per-Class Acc %: [100, 0, 0, 0, -, 0, 0, 0, 0, 0]
+  [!] COLOR MODE COLLAPSE: 100% of FG preds are color 0
+      Model is defaulting to single FG color instead of learning per-class!
+  ==================================================
+  PER-SAMPLE TRAINING ACCURACY (Epoch 3)
+  ==================================================
+  ★ Mean Accuracy: 59.9%
+  ★ Exact Match: 0/8 (0.0%)
+  ★ High Acc (≥90%): 1/8 (12.5%)
+  FG Accuracy: 0.0%
+  BG Accuracy: 100.0%
+  Accuracy Distribution: 0-25%:0%, 25-50%:0%, 50-75%:25%, 75-90%:50%, 90-100%:25%
+  Running Window (last 2 batches): 59.9% ± 17.7%
+
+  --- PER-COLOR ACCURACY (10 classes) ---
+  Color:       0     1     2     3     4     5     6     7     8     9
+  Acc%:     100%    0%    0%    0%    -     0%    0%    0%    0%    0%
+  Target:  73.3%  5.0%  0.4%  7.7%  0.0%  2.4%  1.8%  1.1%  7.2%  1.1%
+  Pred:   100.0%  0.0%  0.0%  0.0%  0.0%  0.0%  0.0%  0.0%  0.0%  0.0%
+  [!] Weak colors (<50% acc): 1(Blue), 2(Red), 3(Green), 5(Gray), 6(Pink), 7(Orange), 8(Cyan), 9(Brown)
+  [!] Under-predicting color 1 (Blue): 0.0% vs target 5.0%
+  [!] Under-predicting color 3 (Green): 0.0% vs target 7.7%
+  [!] Under-predicting color 5 (Gray): 0.0% vs target 2.4%
+  [!] Under-predicting color 6 (Pink): 0.0% vs target 1.8%
+  [!] Under-predicting color 7 (Orange): 0.0% vs target 1.1%
+  [!] Under-predicting color 8 (Cyan): 0.0% vs target 7.2%
+  [!] Under-predicting color 9 (Brown): 0.0% vs target 1.1%
+  ==================================================
+
+  ==================================================
+  LEARNING TRAJECTORY (Epoch 3)
+  ==================================================
+  Stop Prob:   0.127 ↓ (init=0.27, task-dependent)
+  Exp. Clues:  3.49 (latent variable, task-dependent)
+  Attn Entropy: 4.74 ↓ (max=6.8, sharper=better)
+  Task Loss:   0.2800 ↑
+  Train Acc:   59.9% →
+  Exact Match: 0.0% →
+  Best Step:   3 (later=better refinement)
+  FG Coverage: 0.0% of target →
+  ==================================================
+
+  ############################################################
+  🚦 TRAINING HEALTH CHECK - Epoch 3
+  ############################################################
+  ✓ Attention sharpening (0.70 < 0.7)
+  ✓ Loss decreasing (2.115 → 0.280)
+  ✓ Accuracy improving (21.6% → 59.9%)
+  ✓ No NaN/Inf issues
+  ⚠ Stop probs uniform (std=0.012) - early epoch OK
+  ⚠ Centroids clustered (0.9) - early epoch OK
+  ⚠ Weak entropy-stop coupling (r=0.06)
+  ✗ Color mode collapse (100% one color)
+  --------------------------------------------------------
+  RESULT: 4/8 checks passed
+  STATUS: 🟠 WARNING
+  → Multiple issues detected. Consider intervention soon.
+
+  RECOMMENDED ACTIONS:
+    - Increase focal_alpha, check class weights
+  ############################################################
+
+  --- TRM-Style TTA Evaluation (8 dihedral views, voting) ---
+  ★ TTA Exact Match: 0/50 (0.0%)
+  Avg Unique Predictions: 7.3 / 8
+  Avg Winner Votes: 1.7 / 8
+
+  --- Generalization Health ---
+  Train Exact Match: 0.0%
+  Eval Exact Match (TTA): 0.0%
+  Delta (Train - Eval): 0.0%
+  ✅ Healthy gap: 0.0% - Good generalization!
+  🚨 LOW CONSENSUS: 21% - Model not dihedral-invariant!
+  --- Evaluation Metrics (Valid Pixels Only) ---
+  ★ EXACT MATCH: 1/400 tasks (0.2%)
+  Pixel Accuracy: 0.5057
+  FG Accuracy (colors 1-9): 0.0045
+  BG Accuracy (black): 0.9523
+  Class Ratios (pred/target):
+    BG (black): 95.5% / 52.9%
+    FG (colors): 4.5% / 47.1%
+  Colors Used (pred/target): 5 / 10
+  DSC Entropy: 4.8718 (lower=sharper)
+  DSC Clues Used: 3.06
+  Eval Stop Prob: 0.234
+  Predicate Activation: 0.0000
+  Eval Temperature: 0.630 (matched to training)
+
+  ⚠️  [WARNING] BACKGROUND COLLAPSE DETECTED! (3/5)
+      Reasons: BG excess: 42.7%, Colors: 5/10
+      Consider: Lower learning rate, increase focal_alpha, check ContextEncoder
+  Saved checkpoint to checkpoint\rlan-test\latest.pt
+
+============================================================
+Training complete! Best task accuracy: 0.0025

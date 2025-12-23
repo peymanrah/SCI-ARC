@@ -1,0 +1,205 @@
+Logging to: checkpoint\rlan-cpu-test\training_log_20251222_102308.txt
+Timestamp: 2025-12-22T10:23:08.608724
+Python: 3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:37:03) [MSC v.1929 64 bit (AMD64)]
+PyTorch: 2.9.1+cpu
+Starting fresh training
+
+num_classes validation: OK (10 classes for colors 0-9)
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT]
+
+Model parameters:
+  encoder: 67,712
+  feature_proj: 66,304
+  context_encoder: 4,189,056
+  context_injector: 131,584
+  dsc: 660,866
+  msre: 109,152
+  lcr: 0
+  sph: 0
+  solver: 7,053,322
+  total: 12,277,996
+
+============================================================
+MODULE ABLATION STATUS
+============================================================
+  ContextEncoder: ENABLED (task signal from demos)
+  DSC:            ENABLED (dynamic spatial clues - CORE)
+  MSRE:           ENABLED (multi-scale relative encoding - CORE)
+  LCR:            DISABLED (latent counting registers)
+  SPH:            DISABLED (symbolic predicate heads)
+  ACT:            DISABLED (adaptive computation time)
+  Pos Encoding:   SINUSOIDAL
+
+  >>> CORE ABLATION MODE: Testing DSC + MSRE novelty <<<
+============================================================
+
+============================================================
+RLAN TRAINING REGIME
+============================================================
+  Batch Size: 8
+  Grad Accumulation: 1
+  Effective Batch: 8
+  Learning Rate: 5.0e-04
+  Weight Decay: 0.01
+  Optimizer: adamw (beta1=0.9, beta2=0.95)
+  Scheduler: none
+  Warmup Epochs: 0
+  Max Epochs: 5
+
+Loss Configuration:
+  Loss Mode: STABLEMAX
+
+Auxiliary Loss Weights (only non-zero shown):
+  lambda_entropy=0.01 (DSC attention sharpness)
+  lambda_sparsity=0.5 (clue efficiency)
+    min_clues=2.5 (min clues before penalty)
+    min_clue_weight=5.0 (penalty strength)
+    ponder_weight=0.02 (cost per clue)
+  lambda_predicate=0.01 (predicate diversity)
+
+Temperature Schedule (Gumbel-Softmax):
+  Start: 1.0, End: 0.5
+============================================================
+  Loss Mode: STABLEMAX (pure cross-entropy)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+
+Loading data from: ./data/arc-agi/data/training
+Cache samples: False
+
+============================================================
+AUGMENTATION CONFIGURATION
+============================================================
+  1. Dihedral (D4 group): ENABLED
+     - 8 transforms: identity, rot90, rot180, rot270, flipLR, flipUD, transpose, anti-transpose
+  2. Color Permutation:   ENABLED
+     - 9! = 362,880 permutations (colors 1-9 shuffled, 0 fixed)
+     - Probability: 100% (CRITICAL: 100% breaks color identity learning!)
+  3. Translational:       ENABLED
+     - Random offset within 30x30 canvas (~100 positions)
+
+  Total Diversity: 8 x 362,880 x ~100 = ~290,304,000 unique per task
+  Mode: On-the-fly (EACH sample is NEW random augmentation)
+  Advantage: Infinite diversity vs TRM's fixed 1000 samples
+============================================================
+
+Curriculum learning DISABLED (using all data from epoch 1, like TRM)
+  Limited to 10 random tasks (max_tasks=10)
+Loaded 10 tasks from ./data/arc-agi/data/training
+Loaded 400 tasks from ./data/arc-agi/data/evaluation
+Train samples: 10, batches: 1
+Eval samples: 400, batches: 50
+  Optimizer param groups:
+    DSC: 23 params @ 1.0x LR (5.00e-04)
+    MSRE: 10 params @ 1.0x LR (5.00e-04)
+    Other: 79 params @ 1x LR (5.00e-04)
+WandB logging disabled (use_wandb=false or wandb not installed)
+
+Starting training from epoch 0 to 5
+============================================================
+
+Epoch 1/5
+----------------------------------------
+  Batch 0/1: loss=0.6102, stablemax=0.4798, batch_acc=6.9%, exact=0/8 (0.0%), running_acc=6.9%, lr=5.00e-04
+    FG: batch=12.8% run50=12.8% | BG: batch=1.4% run50=1.4%
+    Per-Color: [0:0% 1:17% 2:17% 3:3% 4:24% 5:20% 6:14% 7:30% 8:3% 9:34%]
+    Running50: [0:0% 1:17% 2:17% 3:3% 4:24% 5:20% 6:14% 7:30% 8:3% 9:34%]
+
+Epoch 1 Summary:
+  Total Loss: 0.6102
+  Task Loss (focal): 0.4798
+  Entropy Loss: 4.4332 (weight=0.01)
+  Sparsity Loss: 0.1720 (weight=0.5)
+  Predicate Loss: 0.0000 (weight=0.01)
+  Time: 8.3s, LR: 5.00e-04
+    Per-module LRs: DSC:5.00e-04, MSRE:5.00e-04, Other:5.00e-04
+  Temperature: 1.0000 (lower=sharper attention)
+  Samples Processed: 8 (1 batches)
+  Dihedral Distribution: [37.5%, 0.0%, 12.5%, 0.0%, 0.0%, 12.5%, 25.0%, 12.5%]
+    [!] Non-uniform dihedral distribution (max dev: 25.0%)
+  Color Permutation: 100.0% (8/8)
+  Translational Aug: 100.0% (8/8), unique offsets: 8
+  Aug Quality: GOOD
+  --- Training Diagnostics ---
+  Solver Steps: 6 (deep supervision active)
+  Per-Step Loss: [2.602, 2.625, 2.643, 2.653, 2.660, 2.664]
+    [!] SOLVER DEGRADATION: Step 0 is best! Later steps 2.4% worse!
+    [!] Best: step 0 (2.602), Worst: step 5 (2.664)
+  Grad Norms: DSC=0.2221, StopPred=0.1268, Encoder=0.0889, Solver=5.0710
+              ContextEnc=0.7842, MSRE=0.0509
+  Attention: max=0.0315, min=0.000000
+  Stop Prob: 0.134 (approx 5.2 clues active)
+  Clues Used: mean=5.19, std=0.19, range=[4.9, 5.5]
+  Clue-Loss Correlation: +0.241 (learning - per-sample coupling active)
+  Stop Logits: mean=-1.91, std=0.37, range=[-2.8, -1.1]
+  Per-Clue Entropy: [4.43, 4.43, 4.43, 4.43, 4.43, 4.43] (mean=4.43, max=6.80)
+    [!] Clues have uniform entropy (std=0.001) - not differentiating!
+  Centroid Spread: 0.12 (higher=more diverse)
+    [!] Clues clustered (spread < 2) - should spread out
+  --- Stop Predictor Coupling ---
+  Entropy Input to Stop: 0.6517 (normalized, lower=sharper)
+  Per-Clue Entropy Input: [0.652, 0.651, 0.652, 0.652, 0.652, 0.652]
+  Per-Clue Stop Prob: [0.133, 0.128, 0.115, 0.141, 0.154, 0.135]
+  --- Sparsity Loss Breakdown (Per-Sample Coupled) ---
+  Min Clue Penalty: 0.0000 (per-sample avg)
+  Per-Sample Clue Penalty (scaled): 0.0000
+  Base Pondering: 0.1039 (clues=5.19)
+  Entropy Pondering: 0.0682
+  --- Context Encoder ---
+  Context Magnitude: 16.7580 (should be > 0.5)
+  Context Batch Std: 0.3971 (should vary)
+  --- Gradient Clipping ---
+  Grad Norm (before clip): 5.1408
+    [!] Gradients were clipped! (threshold=1.0)
+  --- Per-Class Distribution (Valid Pixels Only) ---
+  Padding: 82.0% of grid (ignored in loss)
+  Pred %: [0.7, 11.3, 7.5, 5.0, 3.9, 5.8, 5.1, 3.1, 4.2, 53.4]
+  Target %: [71.5, 5.0, 0.9, 5.1, 3.5, 0.4, 0.5, 1.5, 9.0, 2.5]
+  Per-Class Acc %: [0, 17, 17, 3, 24, 20, 14, 30, 3, 34]
+  [WARN] FG color preference: 38% are color 9
+  ==================================================
+  PER-SAMPLE TRAINING ACCURACY (Epoch 1)
+  ==================================================
+  ★ Mean Accuracy: 6.9%
+  ★ Exact Match: 0/8 (0.0%)
+  ★ High Acc (≥90%): 0/8 (0.0%)
+  FG Accuracy: 12.8%
+  BG Accuracy: 1.4%
+  Accuracy Distribution: 0-25%:100%, 25-50%:0%, 50-75%:0%, 75-90%:0%, 90-100%:0%
+    [!] Many samples stuck at low accuracy - check data/model!
+  Running Window (last 1 batches): 6.9% ± 0.0%
+
+  --- PER-COLOR ACCURACY (10 classes) ---
+  Color:       0     1     2     3     4     5     6     7     8     9
+  Acc%:       0%   17%   17%    3%   24%   20%   14%   30%    3%   34%
+  Target:  71.5%  5.0%  0.9%  5.1%  3.5%  0.4%  0.5%  1.5%  9.0%  2.5%
+  Pred:     0.7% 11.3%  7.5%  5.0%  3.9%  5.8%  5.1%  3.1%  4.2% 53.4%
+  [!] Weak colors (<50% acc): 0(Black), 1(Blue), 2(Red), 3(Green), 4(Yellow), 5(Gray), 6(Pink), 7(Orange), 8(Cyan), 9(Brown)
+  [!] Under-predicting color 8 (Cyan): 4.2% vs target 9.0%
+  ==================================================
+
+  ==================================================
+  LEARNING TRAJECTORY (Epoch 1)
+  ==================================================
+  ==================================================
+
+  ############################################################
+  🚦 TRAINING HEALTH CHECK - Epoch 1
+  ############################################################
+  ✓ Attention sharpening (0.65 < 0.7)
+  ✓ No NaN/Inf issues
+  ⚠ Stop probs uniform (std=0.012) - early epoch OK
+  ⚠ Centroids clustered (0.1) - early epoch OK
+  ⚠ Weak entropy-stop coupling (r=0.24)
+  ⚠ Color preference (38% one color)
+  --------------------------------------------------------
+  RESULT: 2/6 checks passed
+  STATUS: 🟡 MONITOR
+  → Some concerns but not critical. Watch next few epochs.
+  ############################################################
+
+
+Received signal 2, cleaning up...
+
+Cleaning up memory...
+Memory cleanup complete.

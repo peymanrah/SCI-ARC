@@ -1,0 +1,108 @@
+Logging to: checkpoint\rlan-learning-test\training_log_20251222_132836.txt
+Timestamp: 2025-12-22T13:28:36.463639
+Python: 3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:37:03) [MSC v.1929 64 bit (AMD64)]
+PyTorch: 2.9.1+cpu
+Starting fresh training
+
+num_classes validation: OK (10 classes for colors 0-9)
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT]
+
+Model parameters:
+  encoder: 67,712
+  feature_proj: 66,304
+  context_encoder: 4,189,056
+  context_injector: 131,584
+  dsc: 660,866
+  msre: 109,152
+  lcr: 0
+  sph: 0
+  solver: 7,053,322
+  total: 12,277,996
+
+============================================================
+MODULE ABLATION STATUS
+============================================================
+  ContextEncoder: ENABLED (task signal from demos)
+  DSC:            ENABLED (dynamic spatial clues - CORE)
+  MSRE:           ENABLED (multi-scale relative encoding - CORE)
+  LCR:            DISABLED (latent counting registers)
+  SPH:            DISABLED (symbolic predicate heads)
+  ACT:            DISABLED (adaptive computation time)
+  Pos Encoding:   SINUSOIDAL
+
+  >>> CORE ABLATION MODE: Testing DSC + MSRE novelty <<<
+============================================================
+
+============================================================
+RLAN TRAINING REGIME
+============================================================
+  Batch Size: 4
+  Grad Accumulation: 1
+  Effective Batch: 4
+  Learning Rate: 1.0e-04
+  Weight Decay: 0.01
+  Optimizer: adamw (beta1=0.9, beta2=0.95)
+  Scheduler: none
+  Warmup Epochs: 0
+  Max Epochs: 100
+
+Loss Configuration:
+  Loss Mode: WEIGHTED_STABLEMAX
+
+Auxiliary Loss Weights (only non-zero shown):
+  lambda_entropy=0.01 (DSC attention sharpness)
+  lambda_sparsity=0.5 (clue efficiency)
+    min_clues=2.5 (min clues before penalty)
+    min_clue_weight=5.0 (penalty strength)
+    ponder_weight=0.02 (cost per clue)
+  lambda_predicate=0.01 (predicate diversity)
+
+Temperature Schedule (Gumbel-Softmax):
+  Start: 1.0, End: 0.5
+============================================================
+  Loss Mode: WEIGHTED_STABLEMAX (inverse frequency, bg_cap=0.5, fg_cap=5.0)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+
+Loading data from: ./data/arc-agi/data/training
+Cache samples: False
+
+============================================================
+AUGMENTATION CONFIGURATION
+============================================================
+  1. Dihedral (D4 group): ENABLED
+     - 8 transforms: identity, rot90, rot180, rot270, flipLR, flipUD, transpose, anti-transpose
+  2. Color Permutation:   ENABLED
+     - 9! = 362,880 permutations (colors 1-9 shuffled, 0 fixed)
+     - Probability: 100% (CRITICAL: 100% breaks color identity learning!)
+  3. Translational:       ENABLED
+     - Random offset within 30x30 canvas (~100 positions)
+
+  Total Diversity: 8 x 362,880 x ~100 = ~290,304,000 unique per task
+  Mode: On-the-fly (EACH sample is NEW random augmentation)
+  Advantage: Infinite diversity vs TRM's fixed 1000 samples
+============================================================
+
+Curriculum learning DISABLED (using all data from epoch 1, like TRM)
+  Limited to 5 random tasks (max_tasks=5)
+Loaded 5 tasks from ./data/arc-agi/data/training
+Loaded 400 tasks from ./data/arc-agi/data/evaluation
+Train samples: 5, batches: 1
+Eval samples: 400, batches: 100
+  Optimizer param groups:
+    DSC: 23 params @ 1.0x LR (1.00e-04)
+    MSRE: 10 params @ 1.0x LR (1.00e-04)
+    Other: 79 params @ 1x LR (1.00e-04)
+WandB logging disabled (use_wandb=false or wandb not installed)
+
+Starting training from epoch 0 to 100
+============================================================
+
+Epoch 1/100
+----------------------------------------
+
+
+Received signal 2, cleaning up...
+
+Cleaning up memory...
+Memory cleanup complete.

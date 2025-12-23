@@ -1,0 +1,150 @@
+# RLAN CPU Test Configuration
+# ============================
+# This config mirrors rlan_stable.yaml EXACTLY but with:
+# - max_tasks: 10 (only 10 random tasks for quick testing)
+# - max_epochs: 5 (enough to see learning trajectory)
+# - device: cpu (for testing without GPU)
+# - batch_size: 8 (smaller for CPU memory)
+# - num_workers: 0 (simpler for CPU)
+#
+# PURPOSE: Validate end-to-end training+eval pipeline before GPU prod run
+# 
+# Usage:
+#   python scripts/train_rlan.py --config configs/rlan_cpu_test.yaml
+#
+# IMPORTANT: This should produce same learning dynamics as prod!
+# If training is healthy here, it will be healthy on GPU with full data.
+
+model:
+  # === IDENTICAL TO PROD (rlan_stable.yaml) ===
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10
+  max_grid_size: 30
+  
+  max_clues: 6
+  num_predicates: 32
+  num_solver_steps: 6
+  
+  use_act: false
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8
+  
+  use_context_encoder: true
+  use_dsc: true
+  use_msre: true
+  use_lcr: false
+  use_sph: false
+  use_learned_pos: false
+
+training:
+  # === MODIFIED FOR CPU TEST ===
+  max_epochs: 5  # Enough to see learning trajectory
+  
+  batch_size: 8   # Smaller for CPU memory (prod: 75)
+  grad_accumulation_steps: 1  # No accumulation needed for small test
+  
+  # === IDENTICAL TO PROD ===
+  learning_rate: 5.0e-4
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  
+  temperature_start: 1.0
+  temperature_end: 0.5
+  
+  loss_mode: 'stablemax'
+  bg_weight_cap: 2.0
+  fg_weight_cap: 5.0
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  
+  lambda_entropy: 0.01
+  lambda_sparsity: 0.5
+  lambda_predicate: 0.01
+  lambda_curriculum: 0.0
+  lambda_deep_supervision: 0.0
+  lambda_act: 0.0
+  
+  min_clues: 2.5
+  min_clue_weight: 5.0
+  ponder_weight: 0.02
+  entropy_ponder_weight: 0.02
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 5.0e-4
+  
+  use_ema: false
+  ema_decay: 0.999
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  ignore_padding_in_loss: true
+  
+  # === MODIFIED FOR CPU TEST ===
+  max_tasks: 10  # Only 10 random tasks for quick testing
+  
+  num_workers: 0      # Simpler for CPU testing
+  pin_memory: false   # Not needed for CPU
+  prefetch_factor: 2
+  persistent_workers: false
+  
+  # === NO CACHING - fresh augmentation each sample ===
+  # This tests the on-the-fly augmentation path
+  cache_samples: false
+  num_cached_samples: 0
+  cache_path: null
+  
+  # === IDENTICAL TO PROD - FULL AUGMENTATION ===
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    color_permutation_prob: 1.0  # 100% like prod
+    translational: true
+
+evaluation:
+  eval_every: 1  # Eval every epoch
+  eval_batch_size: 4
+  max_eval_tasks: 10  # Only 10 random eval tasks for quick testing
+  
+  # === IDENTICAL TO PROD ===
+  use_trm_style_eval: true
+  num_augmented_views: 8  # 8 dihedral views for TTA
+
+device:
+  use_cuda: false  # CPU testing
+  gpu_ids: []
+
+logging:
+  log_interval: 1  # Log every batch for detailed debugging
+  track_augmentation: true  # CRITICAL: Verify augmentation is working!
+  wandb_enabled: false
+  
+  checkpoint_dir: "./checkpoint/rlan-cpu-test"
+  checkpoint_every: 1
+  keep_last_n: 2

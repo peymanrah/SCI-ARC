@@ -61,21 +61,16 @@ model:
   use_lcr: false              # DISABLED - not needed for learning
   use_sph: false              # DISABLED - not needed for learning
   use_learned_pos: false      # DISABLED - sinusoidal works better
-  
-  # Phase 2.5: Solver Cross-Attention to Support Set (Dec 2025)
-  # Removes information bottleneck - solver can query examples at EVERY step
-  use_solver_context: true    # Enable solver cross-attention to support set
-  solver_context_heads: 4     # Attention heads for solver cross-attention
 
 training:
-  max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
+  max_epochs: 50  # REDUCED for CPU test (prod: 200)
   
-  batch_size: 75   # Larger batch for TRM-competitive effective batch size
-  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
+  batch_size: 4    # REDUCED for CPU test (prod: 75)
+  grad_accumulation_steps: 1  # REDUCED for CPU test (prod: 4)
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
-  gradient_clip: 1.0     # Conservative
+  gradient_clip: 5.0     # Raised from 1.0 - allows stronger gradients like 2a50f2d
   
   # NO per-module LR boosting (ablation showed it can cause NaN)
   dsc_lr_multiplier: 1.0
@@ -110,18 +105,18 @@ training:
   
   # AUXILIARY LOSSES (minimized for stability)
   lambda_entropy: 0.01          # Light attention sharpness
-  lambda_sparsity: 0.5          # Required for clue regularization
+  lambda_sparsity: 0.1          # REDUCED from 0.5 - softer clue penalty like 2a50f2d
   lambda_predicate: 0.01        # Light predicate diversity
   lambda_curriculum: 0.0        # OFF
   lambda_deep_supervision: 0.0  # OFF - not needed with weighted_stablemax
   lambda_act: 0.0               # OFF
   
-  # Clue regularization (ENABLED - validated stable Dec 2025)
+  # Clue regularization (SOFTENED - matching 2a50f2d setup)
   # Helps model learn appropriate clue count per task
   min_clues: 2.5
-  min_clue_weight: 5.0       # Prevents collapse to 0 clues
-  ponder_weight: 0.02        # Small cost per clue (encourages efficiency)
-  entropy_ponder_weight: 0.02  # Encourages sharp attention
+  min_clue_weight: 1.0       # REDUCED from 5.0 - softer minimum clue enforcement
+  ponder_weight: 0.005       # REDUCED from 0.02 - less cost per clue
+  entropy_ponder_weight: 0.01  # REDUCED - less aggressive sharpening
   
   use_stablemax: true
   
@@ -156,8 +151,8 @@ data:
   # CRITICAL: Ignore padding in loss
   ignore_padding_in_loss: true
   
-  num_workers: 8       # 8 workers is optimal (too many = CPU overhead)
-  pin_memory: true
+  num_workers: 0       # CHANGED for CPU test (prod: 8)
+  pin_memory: false     # CHANGED for CPU test
   prefetch_factor: 4   # Increased for faster data loading
   persistent_workers: true
   
@@ -178,9 +173,10 @@ data:
   #   rm ./cache/rlan_stable_400k.pkl
   # ==========================================================================
   
-  cache_samples: true
-  num_cached_samples: 400000  # 500 per task (TRM uses 1000x)
-  cache_path: "./cache/rlan_stable_400k_v2.pkl"  # NEW cache with color_perm arrays (v2)
+  cache_samples: false  # DISABLED for CPU test (prod: true)
+  num_cached_samples: 0  # DISABLED for CPU test
+  cache_path: null  # DISABLED for CPU test
+  max_tasks: 5  # ADDED for CPU test - only 5 tasks
   
   augmentation:
     enabled: true
@@ -188,7 +184,7 @@ data:
     flip: true
     transpose: true
     color_permutation: true
-    color_permutation_prob: 1.0  # TRM STYLE: ALWAYS apply (was 0.3, now 1.0)
+    color_permutation_prob: 0.5  # STAGED: 50% initially, gives model color anchors
     translational: true
     track_augmentation: true  # REQUIRED for inverse aug at eval
 
@@ -207,6 +203,8 @@ evaluation:
   use_tta: true
   tta_rotations: [0, 90, 180, 270]
   tta_flips: [false, true]
+  eval_every: 10  # ADDED for CPU test - eval every 10 epochs
+  max_eval_tasks: 10  # ADDED for CPU test - limit eval tasks
   
   # TRM-style evaluation settings
   use_trm_style_eval: true
@@ -232,7 +230,7 @@ logging:
   save_every: 10
   eval_every: 1  # Changed from 5 to detect train/eval gap early
   keep_last_n: 3
-  checkpoint_dir: "checkpoints/rlan_stable"
+  checkpoint_dir: "checkpoints/rlan_cpu_test"  # CHANGED for CPU test
   log_to_file: true
   track_augmentation: true  # Enable to verify augmentation diversity
   
@@ -241,12 +239,12 @@ logging:
   wandb_run_name: null
 
 hardware:
-  device: "cuda"
+  device: "cpu"  # CHANGED for CPU test (prod: cuda)
   seed: 42
   deterministic: false
 
 device:
-  use_cuda: true
-  mixed_precision: true
-  dtype: "bfloat16"
+  use_cuda: false  # CHANGED for CPU test (prod: true)
+  mixed_precision: false  # DISABLED for CPU test
+  dtype: "float32"  # CHANGED for CPU test
   compile: false

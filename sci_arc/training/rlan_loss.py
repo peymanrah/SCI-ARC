@@ -41,9 +41,7 @@ def stablemax(x: torch.Tensor, epsilon: float = 1e-30) -> torch.Tensor:
         Stablemax activations (always positive)
     """
     # Clamp input to prevent extreme values that could cause overflow
-    # Use ±50 to match logit clamping in solver output and DSC attention
-    # At |x|=50, stablemax values are well-defined: s(50)=51, s(-50)≈0.02
-    x = x.clamp(min=-50, max=50)
+    x = x.clamp(min=-1000, max=1000)
     
     # Handle NaN/Inf inputs by replacing with 0
     x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
@@ -75,9 +73,7 @@ def log_stablemax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
         Log probabilities using stablemax normalization
     """
     # Clamp input first to prevent extreme values
-    # Use ±50 to match logit clamping in solver output and DSC attention
-    # This ensures consistency: logits arrive already clamped, but we re-clamp for safety
-    x = x.clamp(min=-50, max=50)
+    x = x.clamp(min=-1000, max=1000)
     
     # Handle NaN/Inf inputs by replacing with 0
     x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))

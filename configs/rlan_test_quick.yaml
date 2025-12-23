@@ -1,0 +1,126 @@
+# RLAN Quick Test Configuration
+# ==============================
+# Minimal config for testing the pipeline works end-to-end
+# 
+# Usage:
+#   python scripts/train_rlan.py --config configs/rlan_test_quick.yaml
+
+model:
+  type: "rlan"
+  hidden_dim: 128  # Smaller for fast testing
+  num_colors: 10
+  num_classes: 10
+  max_grid_size: 30
+  
+  max_clues: 4
+  num_predicates: 16
+  num_solver_steps: 4
+  
+  use_act: false
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  msre_encoding_dim: 16
+  msre_num_freq: 4
+  
+  # Core modules
+  use_context_encoder: true
+  use_dsc: true
+  use_msre: true
+  use_lcr: false
+  use_sph: false
+  use_learned_pos: false
+
+training:
+  max_epochs: 3  # 3 epochs for quick end-to-end test
+  
+  batch_size: 4   # Small batch for 10 tasks
+  grad_accumulation_steps: 1
+  
+  learning_rate: 5.0e-4
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  
+  temperature_start: 1.0
+  temperature_end: 0.5
+  
+  loss_mode: 'stablemax'
+  bg_weight_cap: 2.0
+  fg_weight_cap: 5.0
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  
+  lambda_entropy: 0.01
+  lambda_sparsity: 0.5
+  lambda_predicate: 0.01
+  lambda_curriculum: 0.0
+  lambda_deep_supervision: 0.0
+  lambda_act: 0.0
+  
+  min_clues: 2.5
+  min_clue_weight: 5.0
+  ponder_weight: 0.02
+  entropy_ponder_weight: 0.02
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 5.0e-4
+  
+  use_ema: false
+  ema_decay: 0.999
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  ignore_padding_in_loss: true
+  
+  max_tasks: 10  # Only 10 tasks for quick testing
+  
+  num_workers: 0      # Simpler for testing
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: false
+  
+  # NO CACHING - fast startup
+  cache_samples: false
+  num_cached_samples: 0
+  cache_path: null
+  
+  augmentation:
+    enabled: true
+    color_permutation: true
+    color_permutation_prob: 1.0  # 100% color permutation
+    translational: true
+
+evaluation:
+  eval_every: 1  # Eval every epoch
+  eval_batch_size: 4
+  use_trm_style_eval: true
+  num_augmented_views: 8  # 8 dihedral views for TTA
+
+device:
+  use_cuda: true
+  gpu_ids: [0]
+
+logging:
+  log_interval: 10
+  track_augmentation: false
+  wandb_enabled: false
+  
+  checkpoint_dir: "./checkpoint/rlan-test"
+  checkpoint_every: 1
+  keep_last_n: 2

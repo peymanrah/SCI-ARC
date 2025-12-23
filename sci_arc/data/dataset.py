@@ -95,6 +95,7 @@ class ARCDataset(Dataset):
         cache_samples: bool = False,  # NEW: Cache pre-generated samples for memorization
         num_cached_samples: int = 32000,  # NEW: Number of cached samples to generate
         cache_path: str = None,  # NEW: Path to load/save cached samples
+        max_tasks: int = None,  # NEW: Limit number of tasks loaded (for testing)
     ):
         """
         Initialize ARCDataset.
@@ -131,12 +132,20 @@ class ARCDataset(Dataset):
         self.cache_samples = cache_samples
         self.num_cached_samples = num_cached_samples
         self.cache_path = Path(cache_path) if cache_path else None
+        self.max_tasks = max_tasks
         
         # Cached sample storage
         self._cached_samples: List[Dict[str, Any]] = []
         
         # Load tasks
         self.tasks = self._load_tasks()
+        
+        # Limit tasks if max_tasks specified (for testing)
+        if max_tasks is not None and max_tasks > 0:
+            import random
+            random.shuffle(self.tasks)
+            self.tasks = self.tasks[:max_tasks]
+            print(f"  Limited to {len(self.tasks)} random tasks (max_tasks={max_tasks})")
         
         # Apply curriculum filtering if enabled
         if curriculum_stage > 0:
@@ -259,9 +268,11 @@ class ARCDataset(Dataset):
         test_output = np.array(test_pair.get('output', test_pair['input']), dtype=np.int64)
         
         # Initialize augmentation tracking
+        # CRITICAL: Store actual permutation arrays, not just booleans!
+        # This enables inverse transforms during TRM-style evaluation.
         aug_info = {
             'dihedral_id': 0,
-            'color_perm_applied': False,
+            'color_perm': None,  # Store actual permutation array (not just boolean!)
             'translational_offset': (0, 0),
         }
         
@@ -274,10 +285,10 @@ class ARCDataset(Dataset):
         
         # Apply color permutation
         if self.color_permutation and random.random() < self.color_permutation_prob:
-            train_inputs, train_outputs, test_input, test_output = self._augment_color(
+            train_inputs, train_outputs, test_input, test_output, color_perm = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )
-            aug_info['color_perm_applied'] = True
+            aug_info['color_perm'] = color_perm  # Store actual array for inverse!
         
         # Compute translational offset
         offset = None
@@ -346,9 +357,11 @@ class ARCDataset(Dataset):
         test_output = np.array(test_pair.get('output', test_pair['input']), dtype=np.int64)
         
         # Initialize augmentation tracking
+        # CRITICAL: Store actual permutation arrays, not just booleans!
+        # This enables inverse transforms during TRM-style evaluation.
         aug_info = {
             'dihedral_id': 0,  # Identity
-            'color_perm_applied': False,
+            'color_perm': None,  # Store actual permutation array (not just boolean!)
             'translational_offset': (0, 0),
         }
         
@@ -362,10 +375,10 @@ class ARCDataset(Dataset):
         # Apply color permutation (9! = 362,880 possibilities)
         # Use color_permutation_prob to control frequency (100% can break color learning!)
         if self.color_permutation and random.random() < self.color_permutation_prob:
-            train_inputs, train_outputs, test_input, test_output = self._augment_color(
+            train_inputs, train_outputs, test_input, test_output, color_perm = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )
-            aug_info['color_perm_applied'] = True
+            aug_info['color_perm'] = color_perm  # Store actual array for inverse!
         
         # Compute random translational offset (shared across all grids in this sample)
         # TRM-style: random position within 30×30 canvas
@@ -550,9 +563,13 @@ class ARCDataset(Dataset):
         
         Permutes colors 1-9 while keeping 0 (black/background) fixed.
         This is the SAME augmentation used by TRM.
+        
+        Returns:
+            Tuple of (aug_inputs, aug_outputs, aug_test_in, aug_test_out, perm)
+            where perm is the color permutation array for inverse transform.
         """
         # Generate random permutation of colors 1-9
-        perm = np.arange(10)  # [0, 1, 2, ..., 9]
+        perm = np.arange(10, dtype=np.int64)  # [0, 1, 2, ..., 9]
         perm[1:] = np.random.permutation(9) + 1  # Shuffle 1-9, keep 0 fixed
         
         def apply_perm(g):
@@ -563,7 +580,8 @@ class ARCDataset(Dataset):
         aug_test_in = apply_perm(test_input)
         aug_test_out = apply_perm(test_output)
         
-        return aug_inputs, aug_outputs, aug_test_in, aug_test_out
+        # Return permutation array for inverse transform during eval
+        return aug_inputs, aug_outputs, aug_test_in, aug_test_out, perm
     
     # Keep old method name for backward compatibility
     def _augment(
@@ -1250,7 +1268,8 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
             dihedral_id = aug_info.get('dihedral_id', 0)
             dihedral_counts[dihedral_id] += 1
             
-            if aug_info.get('color_perm_applied', False):
+            # Check if color_perm array is present (not just boolean check)
+            if aug_info.get('color_perm') is not None:
                 color_perm_count += 1
             
             offset = aug_info.get('translational_offset', (0, 0))
@@ -1281,6 +1300,9 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
             'unique_offsets': unique_offsets,
             'batch_size': batch_size,
         }
+        
+        # Also include per-sample aug_info for TRM-style inverse augmentation
+        result['aug_info'] = [sample.get('aug_info', {'dihedral_id': 0}) for sample in batch]
     
     return result
 

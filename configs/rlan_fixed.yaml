@@ -1,0 +1,227 @@
+# RLAN FIXED Configuration - Post Generalization Gap Analysis
+# ===========================================================
+# 
+# This configuration incorporates all fixes from the TRM vs RLAN analysis:
+#
+# 1. NO GUMBEL NOISE: DSC uses pure softmax (train = eval behavior)
+# 2. INVERSE AUGMENTATION: TRM-style evaluator reverses augmentations
+# 3. AGGREGATED VOTING: Multiple predictions per task with consensus
+# 4. FASTER EMA: 0.99 decay (catches up in ~100 steps vs 1000 for 0.999)
+# 5. FIXED TEMPERATURE: No decay (0.5 constant for train and eval)
+# 6. PER-EPOCH EVAL: Detect generalization gap early
+# 7. GAP MONITORING: Alerts for train/eval divergence
+#
+# HARDWARE TARGET: RTX 3090 (24GB VRAM), 1 GPU, 20 epochs max (7 days)
+#
+# TRAINING PLAN:
+# - 400K augmented samples (500 per task x 400 training tasks)
+# - 20 epochs = 20 * 400K/300 = ~26,660 steps total
+# - Evaluate every epoch with TRM-style Pass@K metrics
+# - Monitor for generalization gap throughout
+#
+# ===========================================================
+
+model:
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10  # colors 0-9
+  max_grid_size: 30
+  
+  max_clues: 6
+  num_predicates: 32
+  num_solver_steps: 6
+  
+  use_act: false       # DISABLED - not needed
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4     # Not used
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8      # Not used
+  
+  # CORE MODULES ONLY
+  use_context_encoder: true   # REQUIRED
+  use_dsc: true               # REQUIRED - now uses pure softmax (no Gumbel!)
+  use_msre: true              # REQUIRED
+  use_lcr: false              # DISABLED
+  use_sph: false              # DISABLED
+  use_learned_pos: false      # DISABLED
+
+training:
+  max_epochs: 20  # Limited by 7-day constraint
+  
+  batch_size: 75   # Larger batch for stability
+  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
+  
+  learning_rate: 5.0e-4  # Validated in ablation
+  weight_decay: 0.01     # Light regularization
+  gradient_clip: 1.0     # Conservative
+  
+  # NO per-module LR boosting
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  
+  # =============================================================
+  # FIXED TEMPERATURE - CRITICAL FOR GENERALIZATION
+  # =============================================================
+  # Previously: temperature_start=1.0, temperature_end=0.5 (decay)
+  # Problem: Training saw different temperatures than eval (fixed at 0.5)
+  # Fix: Use constant 0.5 for both train and eval
+  # =============================================================
+  temperature_start: 0.5
+  temperature_end: 0.5    # SAME as start = no decay
+  
+  # LOSS CONFIGURATION - PURE STABLEMAX (TRM PROVEN)
+  loss_mode: 'stablemax'
+  bg_weight_cap: 2.0      # Not used with stablemax
+  fg_weight_cap: 5.0      # Not used with stablemax
+  
+  focal_gamma: 2.0        # Not used with stablemax
+  focal_alpha: 0.75       # Not used with stablemax
+  
+  # AUXILIARY LOSSES
+  lambda_entropy: 0.01          # Now operates on pure softmax attention
+  lambda_sparsity: 0.5          # Clue regularization
+  lambda_predicate: 0.01        # Predicate diversity
+  lambda_curriculum: 0.0        # OFF
+  lambda_deep_supervision: 0.0  # OFF
+  lambda_act: 0.0               # OFF
+  
+  # Clue regularization
+  min_clues: 2.5
+  min_clue_weight: 5.0
+  ponder_weight: 0.02
+  entropy_ponder_weight: 0.02
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  # NO SCHEDULER - constant LR
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 5.0e-4
+  
+  # =============================================================
+  # EMA CONFIGURATION - DISABLED FOR 20-EPOCH TRAINING
+  # =============================================================
+  # Analysis showed EMA with decay=0.99 still creates ~100 step lag.
+  # For 20-epoch training, direct model weights work better.
+  # Disabled based on user guidance: "EMA doesn't benefit 20 epochs"
+  # =============================================================
+  use_ema: false
+  ema_decay: 0.99  # Not used when use_ema=false
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  
+  ignore_padding_in_loss: true
+  
+  num_workers: 8
+  pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
+  
+  # CACHING STRATEGY
+  cache_samples: true
+  num_cached_samples: 400000  # 500 per task (TRM uses 1000x)
+  cache_path: "./cache/rlan_fixed_400k.pkl"  # NEW cache for fixed version
+  
+  # =============================================================
+  # AUGMENTATION - TRACKING FOR INVERSE AUG AT EVAL
+  # =============================================================
+  # CRITICAL: We need to track which augmentations were applied
+  # so we can REVERSE them during evaluation (like TRM)
+  # =============================================================
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    color_permutation_prob: 1.0  # TRM STYLE: ALWAYS apply
+    translational: true
+    track_augmentation: true  # REQUIRED for inverse aug at eval
+
+# =============================================================
+# EVALUATION - TRM-STYLE WITH INVERSE AUGMENTATION
+# =============================================================
+# NEW evaluation approach matching TRM:
+# 1. Apply multiple augmentations to each test input
+# 2. Get model predictions
+# 3. REVERSE augmentations to canonical space
+# 4. Vote across predictions for consensus
+# 5. Report Pass@K metrics
+# =============================================================
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+  
+  # NEW: TRM-style evaluation
+  use_trm_style_eval: true
+  num_augmented_views: 8  # Generate 8 predictions per task
+  use_voting: true        # Aggregate predictions
+  use_inverse_aug: true   # CRITICAL: Undo augmentations before comparison
+  pass_ks: [1, 2, 5, 10]  # Report Pass@K metrics like TRM
+
+# =============================================================
+# GAP MONITORING - EARLY WARNING FOR GENERALIZATION ISSUES
+# =============================================================
+# Based on our analysis, we monitor these gaps every epoch:
+# - Exact match: train - eval (should be < 10%)
+# - Entropy ratio: eval / train (should be < 2x)
+# - Stop value: |train - eval| (should be < 0.15)
+# - Loss ratio: eval / train (should be < 1.5x)
+# =============================================================
+monitoring:
+  enabled: true
+  exact_match_warning: 0.10   # Warn if gap > 10%
+  exact_match_critical: 0.20  # Critical if gap > 20%
+  entropy_ratio_warning: 2.0  # Warn if eval entropy > 2x train
+  entropy_ratio_critical: 5.0 # Critical if > 5x
+  stop_value_warning: 0.15    # Warn if |train - eval| > 0.15
+  stop_value_critical: 0.25   # Critical if > 0.25
+  
+  # Actions on critical alerts
+  early_stop_on_critical: false  # Set true to stop training on critical gap
+  reduce_lr_on_warning: false    # Set true to reduce LR on warning
+
+logging:
+  log_every: 1
+  save_every: 5       # Save every 5 epochs (4 checkpoints for 20 epochs)
+  eval_every: 1       # CRITICAL: Eval every epoch to catch gaps early
+  keep_last_n: 3
+  checkpoint_dir: "checkpoints/rlan_fixed"
+  log_to_file: true
+  track_augmentation: true
+  
+  # Log Pass@K metrics
+  log_pass_at_k: true
+  
+  use_wandb: false
+  wandb_project: "rlan-arc-fixed"
+  wandb_run_name: null
+
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false
+
+device:
+  use_cuda: true
+  mixed_precision: true
+  dtype: "bfloat16"
+  compile: false

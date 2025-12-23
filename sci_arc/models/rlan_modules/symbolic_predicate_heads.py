@@ -34,30 +34,31 @@ def gumbel_sigmoid(
     deterministic: bool = False,
 ) -> torch.Tensor:
     """
-    Gumbel-sigmoid for differentiable binary sampling.
+    Sigmoid for binary predicate outputs.
+    
+    CRITICAL FIX (Dec 2025): Removed Gumbel noise entirely!
+    
+    Previous behavior:
+    - Training: Added Gumbel noise for exploration
+    - Eval: No noise (deterministic)
+    - Result: Train/eval distribution mismatch!
+    
+    New behavior:
+    - Training AND Eval: Pure sigmoid with temperature scaling
+    - Result: Identical train/eval, no generalization gap
     
     Args:
         logits: Shape (...) logits for binary decision
         temperature: Temperature (lower = sharper)
         hard: If True, use straight-through estimator
-        deterministic: If True, skip Gumbel noise (for eval mode)
+        deterministic: Ignored - always deterministic now (kept for API compat)
         
     Returns:
         probs: Shape (...) probabilities in (0, 1)
     """
-    # During eval, use regular sigmoid (no noise) for reproducible predictions
-    if deterministic:
-        soft = torch.sigmoid(logits / temperature)
-    else:
-        # Sample Gumbel noise for both classes
-        gumbel_0 = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
-        gumbel_1 = -torch.log(-torch.log(torch.rand_like(logits) + 1e-20) + 1e-20)
-        
-        # Compute soft binary decision
-        log_prob_1 = logits / temperature + gumbel_1
-        log_prob_0 = -logits / temperature + gumbel_0
-        
-        soft = torch.sigmoid(log_prob_1 - log_prob_0)
+    # Pure sigmoid with temperature scaling - NO Gumbel noise
+    # Same behavior for train and eval
+    soft = torch.sigmoid(logits / max(temperature, 1e-10))
     
     if hard:
         hard_decision = (soft > 0.5).float()

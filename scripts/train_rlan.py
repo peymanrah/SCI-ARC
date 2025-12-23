@@ -28,6 +28,7 @@ import math
 import gc
 import signal
 import atexit
+import json
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List
@@ -49,6 +50,8 @@ from sci_arc.models import RLAN, RLANConfig
 from sci_arc.training import RLANLoss
 from sci_arc.training.ema import EMAHelper
 from sci_arc.data import ARCDataset, collate_sci_arc
+from sci_arc.evaluation.trm_style_evaluator import TRMStyleEvaluator
+from sci_arc.utils.gap_monitor import GapHealthMonitor
 
 # Optional wandb import
 try:
@@ -56,7 +59,6 @@ try:
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
-
 
 # Global cleanup flag
 _cleanup_done = False
@@ -222,6 +224,9 @@ def create_train_loader(
             print(f"  cache_path: {cache_path}")
         print(f"{'='*60}\n")
     
+    # Support max_tasks for quick testing
+    max_tasks = data_cfg.get('max_tasks', None)
+    
     train_dataset = ARCDataset(
         data_cfg['train_path'],
         max_size=max_grid_size,
@@ -235,6 +240,7 @@ def create_train_loader(
         cache_samples=cache_samples,  # Enable caching for memorization
         num_cached_samples=num_cached_samples,  # Number of cached samples
         cache_path=cache_path,  # Optional path to save/load cache
+        max_tasks=max_tasks,  # Limit tasks for testing
     )
     
     batch_size = train_cfg['batch_size']
@@ -383,6 +389,9 @@ def create_model(config: dict) -> RLAN:
         use_lcr=model_config.get('use_lcr', True),
         use_sph=model_config.get('use_sph', True),
         use_learned_pos=model_config.get('use_learned_pos', False),
+        # Phase 2.5: Solver cross-attention to support set
+        use_solver_context=model_config.get('use_solver_context', True),
+        solver_context_heads=model_config.get('solver_context_heads', 4),
     )
     
     model = RLAN(config=rlan_config)
@@ -1700,6 +1709,245 @@ def evaluate(
         'eval_stop_prob': eval_stop_prob,
         'predicate_activation': predicate_activation_sum / max(num_eval_samples, 1),
     }
+
+
+# =============================================================================
+# DIHEDRAL TRANSFORMS FOR TTA EVALUATION
+# =============================================================================
+
+def apply_dihedral(arr: np.ndarray, tid: int) -> np.ndarray:
+    """Apply dihedral transform to 2D array."""
+    if tid == 0:
+        return arr.copy()  # identity
+    elif tid == 1:
+        return np.rot90(arr, k=1)  # 90° CCW
+    elif tid == 2:
+        return np.rot90(arr, k=2)  # 180°
+    elif tid == 3:
+        return np.rot90(arr, k=3)  # 270° CCW
+    elif tid == 4:
+        return np.fliplr(arr)  # horizontal flip
+    elif tid == 5:
+        return np.flipud(arr)  # vertical flip
+    elif tid == 6:
+        return arr.T  # transpose
+    elif tid == 7:
+        return np.fliplr(np.rot90(arr, k=1))  # anti-transpose
+    else:
+        return arr.copy()
+
+
+# Inverse mapping: DIHEDRAL_INVERSE[t] gives the transform that undoes t
+DIHEDRAL_INVERSE = [0, 3, 2, 1, 4, 5, 6, 7]
+
+
+def inverse_dihedral(arr: np.ndarray, tid: int) -> np.ndarray:
+    """Apply inverse of dihedral transform."""
+    return apply_dihedral(arr, DIHEDRAL_INVERSE[tid])
+
+
+def inverse_color_perm(arr: np.ndarray, perm: np.ndarray) -> np.ndarray:
+    """Apply inverse color permutation."""
+    inv_perm = np.argsort(perm)
+    return inv_perm[arr]
+
+
+def crop_prediction(pred: np.ndarray, pad_value: int = 10) -> np.ndarray:
+    """Crop prediction to remove padding."""
+    if pred.ndim == 1:
+        pred = pred.reshape(30, 30)
+    
+    content_mask = (pred != pad_value) & (pred != -100)
+    
+    if not content_mask.any():
+        return np.array([[0]])
+    
+    rows = np.any(content_mask, axis=1)
+    cols = np.any(content_mask, axis=0)
+    
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    
+    return pred[rmin:rmax+1, cmin:cmax+1]
+
+
+def pad_grid_for_tta(grid: np.ndarray, max_size: int = 30, pad_value: int = 10, is_target: bool = False) -> np.ndarray:
+    """Pad grid to max_size."""
+    h, w = grid.shape
+    padded = np.full((max_size, max_size), -100 if is_target else pad_value, dtype=np.int64)
+    padded[:h, :w] = grid
+    return padded
+
+
+def grid_hash(grid: np.ndarray) -> str:
+    """Create a hash of a grid for voting."""
+    return grid.tobytes().hex()
+
+
+def evaluate_trm_style(
+    model: RLAN,
+    eval_tasks: List[Dict],
+    device: torch.device,
+    temperature: float = 0.5,
+    num_dihedral: int = 8,
+    num_color_perms: int = 1,
+    max_size: int = 30,
+) -> Dict[str, float]:
+    """
+    Proper TTA evaluation with inverse augmentation and voting.
+    
+    This function generates N augmented views per task, collects predictions,
+    applies inverse transforms, and votes across predictions.
+    
+    CRITICAL FIX (Dec 2025): Actually generates all dihedral views per task!
+    Previous version just iterated over dataloader samples without generating views.
+    
+    Args:
+        model: RLAN model
+        eval_tasks: List of task dicts with 'train' and 'test' keys
+        device: Device to run on
+        temperature: DSC attention temperature
+        num_dihedral: Number of dihedral views (1-8)
+        num_color_perms: Number of color permutations per dihedral view
+        max_size: Max grid size for padding
+        
+    Returns:
+        Dict with exact_match, pass@k, and voting analysis metrics
+    """
+    model.eval()
+    
+    correct = 0
+    total = len(eval_tasks)
+    total_views = num_dihedral * num_color_perms
+    
+    # Track voting statistics
+    all_unique_predictions = []
+    all_winner_votes = []
+    
+    with torch.no_grad():
+        for task in eval_tasks:
+            # Parse task
+            train_inputs = [np.array(p['input'], dtype=np.int64) for p in task['train']]
+            train_outputs = [np.array(p['output'], dtype=np.int64) for p in task['train']]
+            test_pair = task['test'][0]
+            test_input = np.array(test_pair['input'], dtype=np.int64)
+            test_output = np.array(test_pair['output'], dtype=np.int64)
+            
+            # Collect predictions from all augmented views
+            predictions = []  # List of (canonical_pred, confidence)
+            
+            for dihedral_id in range(num_dihedral):
+                for color_idx in range(num_color_perms):
+                    # Apply dihedral to ALL grids (demos + test input)
+                    aug_train_in = [apply_dihedral(g, dihedral_id) for g in train_inputs]
+                    aug_train_out = [apply_dihedral(g, dihedral_id) for g in train_outputs]
+                    aug_test_in = apply_dihedral(test_input, dihedral_id)
+                    
+                    # Apply color permutation if needed
+                    color_perm = None
+                    if color_idx > 0:
+                        color_perm = np.arange(10, dtype=np.int64)
+                        color_perm[1:] = np.random.permutation(9) + 1
+                        aug_train_in = [color_perm[g] for g in aug_train_in]
+                        aug_train_out = [color_perm[g] for g in aug_train_out]
+                        aug_test_in = color_perm[aug_test_in]
+                    
+                    # Pad grids
+                    train_in_padded = [pad_grid_for_tta(g, max_size, is_target=False) for g in aug_train_in]
+                    train_out_padded = [pad_grid_for_tta(g, max_size, is_target=True) for g in aug_train_out]
+                    test_in_padded = pad_grid_for_tta(aug_test_in, max_size, is_target=False)
+                    
+                    # Build batch tensors
+                    input_grids = torch.stack([torch.from_numpy(g) for g in train_in_padded])  # (K, H, W)
+                    output_grids = torch.stack([torch.from_numpy(g) for g in train_out_padded])  # (K, H, W)
+                    test_input_t = torch.from_numpy(test_in_padded)  # (H, W)
+                    
+                    # Create pair mask
+                    num_pairs = len(train_inputs)
+                    max_pairs = 10
+                    pair_mask = torch.zeros(max_pairs, dtype=torch.bool)
+                    pair_mask[:num_pairs] = True
+                    
+                    # Pad to max_pairs
+                    if num_pairs < max_pairs:
+                        pad_in = input_grids[0:1].expand(max_pairs - num_pairs, -1, -1)
+                        pad_out = output_grids[0:1].expand(max_pairs - num_pairs, -1, -1)
+                        input_grids = torch.cat([input_grids, pad_in], dim=0)
+                        output_grids = torch.cat([output_grids, pad_out], dim=0)
+                    
+                    # Move to device
+                    input_grids = input_grids.unsqueeze(0).to(device)  # (1, K, H, W)
+                    output_grids = output_grids.unsqueeze(0).to(device)  # (1, K, H, W)
+                    test_input_t = test_input_t.unsqueeze(0).to(device)  # (1, H, W)
+                    pair_mask = pair_mask.unsqueeze(0).to(device)  # (1, K)
+                    
+                    # Get model prediction
+                    outputs = model(
+                        test_input_t,
+                        train_inputs=input_grids,
+                        train_outputs=output_grids,
+                        pair_mask=pair_mask,
+                        temperature=temperature,
+                        return_intermediates=True,
+                    )
+                    
+                    logits = outputs['logits']  # (1, C, H, W)
+                    pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()  # (H, W)
+                    
+                    # Inverse transform to canonical space
+                    pred_cropped = crop_prediction(pred)
+                    pred_canonical = inverse_dihedral(pred_cropped, dihedral_id)
+                    if color_perm is not None:
+                        pred_canonical = inverse_color_perm(pred_canonical, color_perm)
+                    
+                    predictions.append((pred_canonical, 1.0))  # Confidence fixed at 1.0
+            
+            # Vote across predictions
+            vote_counts = {}  # {hash: {'count': int, 'grid': np.array}}
+            
+            for pred, conf in predictions:
+                h = grid_hash(pred)
+                if h not in vote_counts:
+                    vote_counts[h] = {'count': 0, 'grid': pred}
+                vote_counts[h]['count'] += 1
+            
+            # Find winner (by count)
+            winner_hash = max(vote_counts.keys(), key=lambda h: vote_counts[h]['count'])
+            winner_grid = vote_counts[winner_hash]['grid']
+            winner_votes = vote_counts[winner_hash]['count']
+            
+            # Track voting stats
+            all_unique_predictions.append(len(vote_counts))
+            all_winner_votes.append(winner_votes)
+            
+            # Compare with ground truth
+            is_correct = (
+                winner_grid.shape == test_output.shape and
+                np.array_equal(winner_grid, test_output)
+            )
+            
+            if is_correct:
+                correct += 1
+    
+    # Compute metrics
+    exact_match = correct / max(total, 1)
+    avg_unique_preds = sum(all_unique_predictions) / max(len(all_unique_predictions), 1)
+    avg_winner_votes = sum(all_winner_votes) / max(len(all_winner_votes), 1)
+    max_agreement = max(all_winner_votes) if all_winner_votes else 0
+    
+    return {
+        'pass@1': exact_match,
+        'pass@2': exact_match,  # With voting, pass@2 ≈ pass@1 unless ties
+        'exact_match': exact_match,
+        'correct_tasks': correct,
+        'total_tasks': total,
+        'avg_unique_predictions': avg_unique_preds,
+        'avg_winner_votes': avg_winner_votes,
+        'max_agreement': max_agreement,
+        'total_views': total_views,
+    }
+
+
 def save_checkpoint(
     model: RLAN,
     optimizer: torch.optim.Optimizer,
@@ -1827,6 +2075,8 @@ Config Overrides:
                         help='Reset optimizer/scheduler when resuming (use for fine-tuning with new LR)')
     parser.add_argument('--device', type=str, default=None,
                         help='Device to use (cuda/cpu)')
+    parser.add_argument('--max-train-samples', type=int, default=None,
+                        help='Limit training samples for quick sanity checks (e.g., 1000)')
     parser.add_argument('overrides', nargs='*',
                         help='Config overrides in format key.subkey=value')
     args = parser.parse_args()
@@ -1838,6 +2088,20 @@ Config Overrides:
     if args.overrides:
         print("Applying config overrides:")
         config = override_config(config, args.overrides)
+    
+    # Handle --max-train-samples for quick sanity checks
+    if args.max_train_samples is not None:
+        print(f"\n{'='*60}")
+        print(f"QUICK SANITY CHECK MODE")
+        print(f"{'='*60}")
+        print(f"  Limiting to {args.max_train_samples} training samples")
+        print(f"  Use this to verify epoch-1 metrics are healthy before full training")
+        print(f"{'='*60}\n")
+        # Force caching with limited samples
+        if 'data' not in config:
+            config['data'] = {}
+        config['data']['cache_samples'] = True
+        config['data']['num_cached_samples'] = args.max_train_samples
     
     print(f"=" * 60)
     print(f"RLAN Training")
@@ -2224,7 +2488,7 @@ Config Overrides:
     
     # Collapse detection state
     collapse_warnings = 0
-    max_collapse_warnings = 5  # Stop after this many consecutive warnings
+    max_collapse_warnings = 999  # DISABLED - let training run full epochs for debugging
     
     # Learning trajectory tracker for epoch-by-epoch trend analysis
     # Stores key metrics to verify learning is progressing correctly
@@ -3138,6 +3402,70 @@ Config Overrides:
                     print(f"\n  [!] EMA LAG: Training model FG={train_fg:.1%} vs EMA FG={ema_fg:.1%}")
                     print(f"      Training model is learning but EMA hasn't caught up yet")
             
+            # ============================================================
+            # TRM-STYLE EVALUATION WITH INVERSE AUGMENTATION
+            # ============================================================
+            # This is the CRITICAL evaluation for measuring true generalization.
+            # Uses proper TTA: generates all dihedral views per task, votes.
+            # ============================================================
+            use_trm_eval = config.get('evaluation', {}).get('use_trm_style_eval', False)
+            if use_trm_eval:
+                # Load eval tasks from JSON files for proper TTA
+                eval_path = Path(config['data']['eval_path'])
+                max_eval_tasks = config.get('evaluation', {}).get('max_eval_tasks', 50)
+                eval_tasks = []
+                if eval_path.is_dir():
+                    for json_file in sorted(eval_path.glob('*.json'))[:max_eval_tasks]:
+                        try:
+                            with open(json_file, 'r') as f:
+                                task_data = json.load(f)
+                            eval_tasks.append(task_data)
+                        except Exception:
+                            pass
+                
+                if eval_tasks:
+                    num_dihedral = config.get('evaluation', {}).get('num_augmented_views', 8)
+                    trm_metrics = evaluate_trm_style(
+                        eval_model, eval_tasks, device, 
+                        temperature=eval_temp,
+                        num_dihedral=num_dihedral,
+                        num_color_perms=1,  # No color perm for now (training bug)
+                        max_size=max_grid_size,
+                    )
+                    print(f"\n  --- TRM-Style TTA Evaluation ({num_dihedral} dihedral views, voting) ---")
+                    print(f"  ★ TTA Exact Match: {trm_metrics['correct_tasks']}/{trm_metrics['total_tasks']} ({trm_metrics['exact_match']*100:.1f}%)")
+                    print(f"  Avg Unique Predictions: {trm_metrics['avg_unique_predictions']:.1f} / {trm_metrics['total_views']}")
+                    print(f"  Avg Winner Votes: {trm_metrics['avg_winner_votes']:.1f} / {trm_metrics['total_views']}")
+                    
+                    # GAP MONITORING: Compare train metrics vs eval metrics
+                    train_exact_match = epoch_exact_match_pct / 100.0  # Convert to 0-1
+                    eval_exact_match = trm_metrics.get('exact_match', 0)
+                    gap = train_exact_match - eval_exact_match
+                    
+                    # GENERALIZATION HEALTH METRICS
+                    print(f"\n  --- Generalization Health ---")
+                    print(f"  Train Exact Match: {train_exact_match:.1%}")
+                    print(f"  Eval Exact Match (TTA): {eval_exact_match:.1%}")
+                    print(f"  Delta (Train - Eval): {gap:.1%}")
+                    
+                    if gap > 0.20:
+                        print(f"  🚨 CRITICAL GAP: {gap:.1%} > 20% - Model overfitting!")
+                    elif gap > 0.10:
+                        print(f"  ⚠️ WARNING GAP: {gap:.1%} > 10% - Monitor closely")
+                    elif gap > 0.05:
+                        print(f"  ℹ️ Mild gap: {gap:.1%} - Acceptable")
+                    else:
+                        print(f"  ✅ Healthy gap: {gap:.1%} - Good generalization!")
+                    
+                    # Check voting consensus
+                    consensus_ratio = trm_metrics['avg_winner_votes'] / trm_metrics['total_views']
+                    if consensus_ratio < 0.25:  # Less than 25% agreement
+                        print(f"  🚨 LOW CONSENSUS: {consensus_ratio:.0%} - Model not dihedral-invariant!")
+                    elif consensus_ratio < 0.5:
+                        print(f"  ⚠️ Moderate consensus: {consensus_ratio:.0%}")
+                    else:
+                        print(f"  ✅ Good consensus: {consensus_ratio:.0%}")
+            
             # Core metrics (all computed over VALID pixels only, excluding padding)
             # 10-class encoding: class 0=black (BG), classes 1-9=colors (FG)
             correct_tasks = eval_metrics.get('correct_tasks', 0)
@@ -3162,6 +3490,34 @@ Config Overrides:
                 print(f"  Eval Stop Prob: {eval_stop_prob:.3f}")
             print(f"  Predicate Activation: {eval_metrics['predicate_activation']:.4f}")
             print(f"  Eval Temperature: {eval_temp:.3f} (matched to training)")
+            
+            # ============================================================
+            # TRAIN-EVAL ENTROPY DELTA - Critical for generalization check
+            # ============================================================
+            eval_entropy = eval_metrics['dsc_entropy']
+            if mean_entropy > 0:  # mean_entropy from training diagnostics
+                entropy_delta = eval_entropy - mean_entropy
+                entropy_ratio = eval_entropy / max(mean_entropy, 0.001)
+                print(f"\n  --- Train vs Eval Entropy Delta ---")
+                print(f"  Train DSC Entropy: {mean_entropy:.4f}")
+                print(f"  Eval DSC Entropy:  {eval_entropy:.4f}")
+                print(f"  Delta (Eval - Train): {entropy_delta:+.4f}")
+                print(f"  Ratio (Eval / Train): {entropy_ratio:.2f}x")
+                
+                # Warning thresholds from monitoring config
+                entropy_ratio_warning = config.get('monitoring', {}).get('entropy_ratio_warning', 2.0)
+                entropy_ratio_critical = config.get('monitoring', {}).get('entropy_ratio_critical', 5.0)
+                
+                if entropy_ratio > entropy_ratio_critical:
+                    print(f"  🚨 CRITICAL: Eval entropy {entropy_ratio:.1f}x higher than train!")
+                    print(f"      Model not generalizing - attention collapses on unseen data")
+                elif entropy_ratio > entropy_ratio_warning:
+                    print(f"  ⚠️ WARNING: Eval entropy {entropy_ratio:.1f}x higher than train")
+                    print(f"      Potential generalization issue - monitor closely")
+                elif entropy_ratio < 0.5:
+                    print(f"  ⚠️ Unusual: Eval entropy LOWER than train ({entropy_ratio:.2f}x)")
+                else:
+                    print(f"  ✅ Healthy: Train-eval entropy aligned ({entropy_ratio:.2f}x)")
             
             if ema is not None:
                 print("  (Using EMA weights for evaluation)")

@@ -1,0 +1,172 @@
+# Phase 2.5 Cross-Attention Validation Config - SOLVER CONTEXT
+# ==============================================================
+# Phase 2: CrossAttention from DSC to support set
+# Phase 2.5: CrossAttention from SOLVER to support set (NEW!)
+#
+# This removes the information bottleneck where solver relied
+# solely on pre-injected context. Now solver can query examples
+# at EVERY refinement step.
+# ==============================================================
+
+model:
+  type: "rlan"
+  hidden_dim: 128  # Smaller for faster training
+  num_colors: 10
+  num_classes: 10
+  max_grid_size: 30
+  
+  max_clues: 5
+  num_predicates: 8
+  num_solver_steps: 6
+  
+  use_act: false
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8
+  
+  # Phase 2: Cross-Attention Context Injection
+  use_context_encoder: true   # CrossAttentionInjector enabled
+  use_dsc: true
+  use_msre: true
+  use_lcr: true
+  use_sph: true
+  use_learned_pos: false
+  
+  # Phase 2.5: Solver Cross-Attention to Support Set (NEW!)
+  use_solver_context: true    # Enable solver to query support set at each step
+  solver_context_heads: 4     # Attention heads for solver cross-attention
+
+training:
+  max_epochs: 20
+  
+  batch_size: 4
+  grad_accumulation_steps: 1
+  
+  learning_rate: 1.0e-4  # Conservative for validation
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  
+  temperature_start: 1.0
+  temperature_end: 0.5
+  
+  # Loss configuration
+  loss_mode: 'stablemax'
+  bg_weight_cap: 2.0
+  fg_weight_cap: 5.0
+  
+  focal_gamma: 2.0
+  focal_alpha: 0.9    # Increased from 0.75 to fight color mode collapse
+
+  # Auxiliary losses
+  lambda_entropy: 0.01
+  lambda_sparsity: 0.1
+  lambda_predicate: 0.01
+  lambda_curriculum: 0.0
+  lambda_deep_supervision: 0.0
+  lambda_act: 0.0
+  
+  # Clue regularization
+  min_clues: 2.5
+  min_clue_weight: 1.0
+  ponder_weight: 0.005
+  entropy_ponder_weight: 0.01
+  
+  use_stablemax: true
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  # No scheduler for stability
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 1.0e-4
+  
+  # EMA disabled for short training
+  use_ema: false
+  ema_decay: 0.999
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  max_grid_size: 30
+  
+  ignore_padding_in_loss: true
+  
+  num_workers: 0
+  pin_memory: false
+  prefetch_factor: 4
+  persistent_workers: false
+  
+  cache_samples: false
+  num_cached_samples: 0
+  cache_path: null
+  max_tasks: 50  # Use 50 training tasks for quick validation
+  
+  # CRITICAL: Color permutation for color-agnostic learning (TRM-style)
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true       # MUST BE TRUE for generalization
+    color_permutation_prob: 0.5   # 50% curriculum (was 1.0) - stabilize color learning first
+    translational: true
+    track_augmentation: true
+
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+  eval_every: 5  # Eval every 5 epochs
+  max_eval_tasks: 20
+  
+  use_trm_style_eval: true
+  num_augmented_views: 8
+  use_voting: true
+  use_inverse_aug: true
+  pass_ks: [1, 2, 5, 10]
+
+monitoring:
+  enabled: true
+  exact_match_warning: 0.10
+  exact_match_critical: 0.20
+  entropy_ratio_warning: 2.0
+  entropy_ratio_critical: 5.0
+  stop_value_warning: 0.15
+  stop_value_critical: 0.25
+
+logging:
+  log_every: 10
+  save_every: 5
+  eval_every: 5
+  keep_last_n: 5
+  checkpoint_dir: "checkpoints/phase2.5_alpha09_perm50"
+  log_to_file: true
+  track_augmentation: true
+  
+  use_wandb: false
+  wandb_project: "sci-arc-phase2"
+  wandb_run_name: "phase2.5_focal09_perm50"
+
+hardware:
+  device: "cpu"
+  seed: 42
+  deterministic: false
+
+device:
+  use_cuda: false
+  mixed_precision: false
+  dtype: "float32"
+  compile: false

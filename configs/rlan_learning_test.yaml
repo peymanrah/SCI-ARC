@@ -1,0 +1,146 @@
+# RLAN Focused Learning Test Configuration
+# ==========================================
+# Tests RLAN's ability to learn and generalize on a small, focused dataset
+# 
+# GOAL: Verify RLAN can:
+# 1. Learn training tasks to >20% exact match
+# 2. Show dihedral invariance (low unique predictions in TTA)
+# 3. Generalize to held-out eval tasks
+#
+# APPROACH:
+# - Use 5 simple "easy" ARC tasks (curriculum filtering)
+# - Train for 100 epochs to see learning curve
+# - Small batch size for more gradient updates
+# - Track detailed metrics every epoch
+#
+# Usage:
+#   python scripts/train_rlan.py --config configs/rlan_learning_test.yaml
+
+model:
+  # === FULL PROD MODEL (256 hidden_dim) ===
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10
+  max_grid_size: 30
+  
+  max_clues: 6
+  num_predicates: 32
+  num_solver_steps: 6
+  
+  use_act: false
+  dropout: 0.1
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8
+  
+  use_context_encoder: true
+  use_dsc: true
+  use_msre: true
+  use_lcr: false
+  use_sph: false
+  use_learned_pos: false
+
+training:
+  max_epochs: 50  # 50 epochs - enough to see learning
+  
+  batch_size: 4   # Small batch = more gradient updates
+  grad_accumulation_steps: 1
+  
+  learning_rate: 3.0e-4  # Higher LR for faster learning on small dataset
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  
+  temperature_start: 1.0
+  temperature_end: 0.5
+  
+  # === STABLEMAX (match prod) ===
+  loss_mode: 'stablemax'  # TRM-proven: pure cross-entropy, no weighting
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  
+  lambda_entropy: 0.01
+  lambda_sparsity: 0.5
+  lambda_predicate: 0.01
+  lambda_curriculum: 0.0
+  lambda_deep_supervision: 0.0
+  lambda_act: 0.0
+  
+  min_clues: 2.5
+  min_clue_weight: 5.0
+  ponder_weight: 0.02
+  entropy_ponder_weight: 0.02
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 1.0e-4
+  
+  use_ema: false
+  ema_decay: 0.999
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  ignore_padding_in_loss: true
+  
+  # === LIMITED DATASET FOR FAST TESTING ===
+  max_tasks: 5  # Only 5 tasks for focused learning
+  
+  num_workers: 0
+  pin_memory: false
+  prefetch_factor: 2
+  persistent_workers: false
+  
+  # NO CACHING - each sample is fresh augmentation
+  cache_samples: false
+  num_cached_samples: 0
+  cache_path: null
+  
+  # === FULL AUGMENTATION ===
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    color_permutation_prob: 0.0  # DISABLED for learning test - need color identity!
+    translational: true
+
+evaluation:
+  eval_every: 10  # Eval every 10 epochs
+  eval_batch_size: 4
+  max_eval_tasks: 5  # Only 5 eval tasks for speed
+  
+  use_trm_style_eval: true
+  num_augmented_views: 8
+
+device:
+  use_cuda: false  # CPU testing
+  gpu_ids: []
+
+logging:
+  log_interval: 1
+  track_augmentation: true
+  wandb_enabled: false
+  
+  checkpoint_dir: "./checkpoint/rlan-learning-test"
+  checkpoint_every: 10
+  keep_last_n: 3

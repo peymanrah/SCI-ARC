@@ -50,6 +50,52 @@ def _find_multiple(a: int, b: int) -> int:
     return (-(a // -b)) * b
 
 
+def soft_clamp_logits(x: torch.Tensor, threshold: float = 1000.0, max_val: float = 2000.0) -> torch.Tensor:
+    """
+    Soft clamp that allows natural growth up to threshold, then compresses.
+    
+    This prevents NaN from extreme logits (10K+) while allowing the model
+    to express strong confidence (unlike hard clamp at ±50 which caused collapse).
+    
+    For |x| <= threshold: returns x unchanged (identity)
+    For |x| > threshold: smoothly compresses towards max_val using tanh
+    
+    The function is:
+    - Continuous and differentiable everywhere
+    - Identity in the normal operating range
+    - Bounded to ±max_val to prevent overflow
+    
+    Args:
+        x: Input logits
+        threshold: Values below this are unchanged (default 1000)
+        max_val: Maximum output magnitude (default 2000)
+        
+    Returns:
+        Soft-clamped logits
+    """
+    # For values within threshold, return unchanged
+    # For values beyond threshold, use tanh to smoothly compress
+    # 
+    # Formula: sign(x) * (threshold + (max_val - threshold) * tanh((|x| - threshold) / scale))
+    # where scale controls how quickly we approach max_val
+    
+    scale = (max_val - threshold) / 2  # Reach ~max_val when |x| = threshold + 2*scale
+    
+    abs_x = x.abs()
+    sign_x = x.sign()
+    
+    # Excess beyond threshold
+    excess = (abs_x - threshold).clamp(min=0)
+    
+    # Compress excess using tanh
+    compressed = threshold + (max_val - threshold) * torch.tanh(excess / scale)
+    
+    # Apply only where |x| > threshold
+    result = torch.where(abs_x <= threshold, x, sign_x * compressed)
+    
+    return result
+
+
 class ConvGRUCell(nn.Module):
     """
     Convolutional GRU cell for spatial state updates.
@@ -214,6 +260,92 @@ class PredicateGating(nn.Module):
         return gated
 
 
+class SolverCrossAttention(nn.Module):
+    """
+    Cross-attention module for the Solver to attend to support set features.
+    
+    This gives the Solver direct access to the examples at EVERY refinement step,
+    rather than relying on pre-compressed context from the initial injection.
+    
+    Phase 2.5: Removes the information bottleneck identified in Phase 2 analysis.
+    """
+    
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        
+        # Multi-head cross-attention
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        
+        # Layer norms for pre-norm architecture (more stable)
+        self.norm_q = nn.LayerNorm(hidden_dim)
+        self.norm_kv = nn.LayerNorm(hidden_dim)
+        self.norm_out = nn.LayerNorm(hidden_dim)
+        
+        # Output projection with gating (allows model to ignore context if not helpful)
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Sigmoid(),
+        )
+        
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(
+        self,
+        hidden_state: torch.Tensor,       # (B, D, H, W) solver's hidden state
+        support_features: torch.Tensor,   # (B, N, D, H', W') support pair features
+    ) -> torch.Tensor:
+        """
+        Apply cross-attention from solver hidden state to support features.
+        
+        Returns:
+            enhanced_state: (B, D, H, W) hidden state enhanced with context
+        """
+        B, D, H, W = hidden_state.shape
+        _, N, D_s, H_s, W_s = support_features.shape
+        
+        # Flatten hidden state to sequence: (B, H*W, D)
+        h_flat = hidden_state.permute(0, 2, 3, 1).reshape(B, H * W, D)
+        
+        # Flatten support features: (B, N*H'*W', D)
+        support_flat = support_features.permute(0, 1, 3, 4, 2).reshape(B, N * H_s * W_s, D_s)
+        
+        # Pre-norm for stability
+        q = self.norm_q(h_flat)
+        kv = self.norm_kv(support_flat)
+        
+        # Cross-attention: hidden state queries support set
+        attn_output, _ = self.cross_attn(
+            query=q,
+            key=kv,
+            value=kv,
+        )
+        
+        # Gated residual connection - allows model to skip if not useful
+        gate = self.gate(h_flat)
+        h_flat = h_flat + gate * self.dropout(attn_output)
+        
+        # Post-norm
+        h_flat = self.norm_out(h_flat)
+        
+        # Reshape back to spatial: (B, D, H, W)
+        enhanced = h_flat.reshape(B, H, W, D).permute(0, 3, 1, 2)
+        
+        return enhanced
+
+
 class RecursiveSolver(nn.Module):
     """
     Recursive Solver - iterative refinement decoder for RLAN.
@@ -223,9 +355,15 @@ class RecursiveSolver(nn.Module):
     
     Now supports Adaptive Computation Time (ACT) for variable steps.
     
+    PHASE 2.5: Added SolverCrossAttention to give the solver direct access
+    to support set features at every refinement step. This removes the
+    information bottleneck where all context had to be compressed into
+    the initial feature injection.
+    
     ABLATION SUPPORT:
     - When use_lcr=False, count injection is skipped (not just zero input)
     - When use_sph=False, predicate gating is skipped
+    - When use_solver_context=False, solver cross-attention is skipped
     - This avoids wasted computation and gradient noise from unused modules
     """
     
@@ -241,6 +379,8 @@ class RecursiveSolver(nn.Module):
         use_lcr: bool = True,   # Enable count injection (ablation flag)
         use_sph: bool = True,   # Enable predicate gating (ablation flag)
         use_feedback: bool = False,  # Use prediction feedback (disabled by default - causes gradient issues)
+        use_solver_context: bool = True,  # NEW: Enable solver cross-attention to support set
+        num_context_heads: int = 4,  # Heads for solver cross-attention
     ):
         """
         Args:
@@ -256,6 +396,9 @@ class RecursiveSolver(nn.Module):
             use_feedback: Whether to use prediction feedback in refinement loop.
                           Disabled by default because argmax is non-differentiable,
                           causing later steps to receive gradient-disconnected inputs.
+            use_solver_context: Whether to use cross-attention to support set at each step.
+                                Phase 2.5 feature - gives solver direct access to examples.
+            num_context_heads: Number of attention heads for solver cross-attention.
         """
         super().__init__()
         
@@ -266,6 +409,7 @@ class RecursiveSolver(nn.Module):
         self.use_lcr = use_lcr
         self.use_sph = use_sph
         self.use_feedback = use_feedback
+        self.use_solver_context = use_solver_context
         
         # Clue feature aggregation
         self.clue_aggregator = nn.Sequential(
@@ -322,6 +466,18 @@ class RecursiveSolver(nn.Module):
                 print("Warning: ACTController not found, disabling ACT")
                 self.use_act = False
         
+        # Phase 2.5: Solver Cross-Attention to Support Set
+        # Gives the solver direct access to examples at EVERY refinement step
+        if use_solver_context:
+            self.solver_cross_attn = SolverCrossAttention(
+                hidden_dim=hidden_dim,
+                num_heads=num_context_heads,
+                dropout=dropout,
+            )
+            print(f"[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED ({num_context_heads} heads)")
+        else:
+            self.solver_cross_attn = None
+        
         self.dropout = nn.Dropout(dropout)
     
     def _init_output_head_for_balanced_predictions(self):
@@ -345,12 +501,13 @@ class RecursiveSolver(nn.Module):
                 final_layer = module
         
         if final_layer is not None and final_layer.bias is not None:
-            # NEUTRAL initialization - let weighted loss guide learning
-            # With bg_cap=2.0, fg_cap=5.0, the ratio is 2.5x which is reasonable
+            # ANTI-COLLAPSE initialization - disfavor all-black predictions at init
+            # bg_bias=-0.5 makes "predict black" slightly uphill, giving DSC time
+            # to establish useful gradients before the head commits to all-black
             with torch.no_grad():
-                final_layer.bias[0] = 0.0  # NEUTRAL for background
+                final_layer.bias[0] = -0.5  # Disfavor background to prevent collapse
                 final_layer.bias[1:] = 0.0  # NEUTRAL for foreground classes
-            print(f"[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0")
+            print(f"[RecursiveSolver] Output head initialized: bg_bias=-0.5 (ANTI-COLLAPSE), fg_bias=0.0")
     
     def _aggregate_clues(
         self,
@@ -504,6 +661,7 @@ class RecursiveSolver(nn.Module):
         input_grid: torch.Tensor,
         attention_maps: Optional[torch.Tensor] = None,
         stop_logits: Optional[torch.Tensor] = None,
+        support_features: Optional[torch.Tensor] = None,  # Phase 2.5: (B, N, D, H', W')
         return_all_steps: bool = False,
         return_act_outputs: bool = False,
     ) -> torch.Tensor:
@@ -519,6 +677,8 @@ class RecursiveSolver(nn.Module):
             stop_logits: Optional (B, K) stop probability logits from DSC
                         Used to weight clue contributions - creates gradient flow
                         from task_loss to stop_predictor for latent clue count learning
+            support_features: Optional (B, N, D, H', W') from ContextEncoder
+                             Phase 2.5: Allows solver to attend to support set at each step
             return_all_steps: If True, return predictions at all steps
             return_act_outputs: If True, also return ACT outputs for loss computation
             
@@ -584,6 +744,11 @@ class RecursiveSolver(nn.Module):
             # GRU update
             h_new = self.gru(combined, h)
             
+            # Phase 2.5: Cross-attention to support set at each step
+            # This gives the solver "eyes" to look back at the examples
+            if self.solver_cross_attn is not None and support_features is not None:
+                h_new = self.solver_cross_attn(h_new, support_features)
+            
             # Store initial hidden state for residual connections
             if t == 0:
                 h_initial = h_new.clone()
@@ -631,31 +796,27 @@ class RecursiveSolver(nn.Module):
                 h = h_new
             
             # Predict output
-            # Clamp logits to prevent numerical instability in softmax/stablemax
-            # At ±50, softmax already saturates (~1.0), so no loss of expressiveness
-            # Matches DSC attention clamping convention
-            logits = self.output_head(h).clamp(-50, 50)  # (B, num_classes, H, W)
+            # Use soft_clamp_logits to prevent NaN from extreme values (10K+)
+            # while still allowing natural growth (unlike ±50 clamp which caused collapse)
+            # - Identity for |logits| <= 1000 (normal training range)
+            # - Smooth compression to ±2000 max (prevents overflow)
+            logits = soft_clamp_logits(self.output_head(h))  # (B, num_classes, H, W)
             all_logits.append(logits)
             
             # Optional: Use prediction to update input embedding (feedback)
-            # When enabled, uses DIFFERENTIABLE soft feedback during training
-            # and hard argmax during inference.
+            # CRITICAL FIX (Dec 2025): Removed Gumbel noise!
+            # Use soft argmax (differentiable) instead of Gumbel-softmax
+            # to maintain train/eval consistency.
             if self.use_feedback and t < self.num_steps - 1:
-                if self.training:
-                    # TRAINING: Use Gumbel-Softmax for differentiable discrete samples
-                    # This allows gradients to flow through the feedback loop
-                    # tau=1.0 gives soft samples; lower tau → sharper (more discrete-like)
-                    soft_pred = F.gumbel_softmax(logits, tau=1.0, hard=False, dim=1)  # (B, C, H, W)
-                    # Weighted sum of embeddings: soft_pred @ embedding_weights
-                    # input_embed shape: (B, D, H, W)
-                    # embedding weights shape: (num_classes, D)
-                    emb_weights = self.input_embed.weight[:self.num_classes]  # (C, D)
-                    # Einsum: (B, C, H, W) @ (C, D) -> (B, D, H, W)
-                    input_embed = torch.einsum('bchw,cd->bdhw', soft_pred, emb_weights)
-                else:
-                    # INFERENCE: Use hard argmax (non-differentiable, but that's OK)
-                    pred = logits.argmax(dim=1)  # (B, H, W)
-                    input_embed = self.input_embed(pred.clamp(0, 10)).permute(0, 3, 1, 2)
+                # Use soft argmax for differentiable feedback - NO Gumbel noise
+                # This gives same behavior during training and inference
+                soft_pred = F.softmax(logits / 1.0, dim=1)  # (B, C, H, W)
+                # Weighted sum of embeddings: soft_pred @ embedding_weights
+                # input_embed shape: (B, D, H, W)
+                # embedding weights shape: (num_classes, D)
+                emb_weights = self.input_embed.weight[:self.num_classes]  # (C, D)
+                # Einsum: (B, C, H, W) @ (C, D) -> (B, D, H, W)
+                input_embed = torch.einsum('bchw,cd->bdhw', soft_pred, emb_weights)
         
         # Prepare return value
         logits_output = all_logits if return_all_steps else all_logits[-1]

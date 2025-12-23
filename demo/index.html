@@ -105,6 +105,187 @@
             <div class="speaker-notes" data-duration-30s="RLAN solves AGI-ARC visual puzzles through relative coordinates and iterative refinement—achieving 55% accuracy with just 8M parameters." data-duration-2min="RLAN—Recursive Latent Attractor Networks—is a unified architecture for solving the ARC-AGI benchmark. Unlike transformers that process sequences with trillions of parameters, RLAN maintains 2D structure, thinks in relative coordinates, and iteratively refines answers. We achieve 55% exact match with just ~8M parameters—220,000× more efficient than GPT-4." data-duration-5min="Welcome to RLAN—Recursive Latent Attractor Networks: A Unified Architecture for Solving Abstract Reasoning via Dynamic Coordinate Re-projection. This is our approach to the AGI-ARC challenge—often called the 'IQ test for AI'. While GPT-4 with 1.76 trillion parameters scores around 5% on ARC, RLAN achieves 55% exact match with just 8 million parameters. The key insight is coordinate re-projection: instead of memorizing absolute positions, RLAN finds 'clue anchors' and reasons in relative space—just like humans do."></div>
         </section>
 
+        <!-- ========== SECTION 1.5: HOW RLAN THINKS ========== -->
+        <section id="how-rlan-thinks" class="story-section" data-section="1.5">
+            <div class="section-header">
+                <h2>How RLAN "Thinks"</h2>
+                <p class="section-subtitle">The intuition behind recursive spatial reasoning</p>
+            </div>
+            
+            <div class="section-content">
+                <div class="thinking-explainer">
+                    <!-- Human Analogy -->
+                    <div class="human-analogy-container">
+                        <h3>🧠 How a Human Solves ARC</h3>
+                        <p>Imagine asking a human to solve an ARC puzzle. They don't memorize every pixel. Instead, they do three specific things:</p>
+                        
+                        <div class="human-steps">
+                            <div class="human-step" id="human-step-1">
+                                <div class="step-icon">👀</div>
+                                <div class="step-content">
+                                    <h4>1. Look at the Examples</h4>
+                                    <p><em>"Oh, in every example, the <span class="color-red">Red</span> square moves to the <span class="color-blue">Blue</span> square."</em></p>
+                                    <span class="step-label">Rule Extraction</span>
+                                </div>
+                            </div>
+                            <div class="human-step" id="human-step-2">
+                                <div class="step-icon">🎯</div>
+                                <div class="step-content">
+                                    <h4>2. Find the Objects</h4>
+                                    <p><em>They scan the test grid to find the <span class="color-red">Red</span> square.</em></p>
+                                    <span class="step-label">Saliency / Attention</span>
+                                </div>
+                            </div>
+                            <div class="human-step" id="human-step-3">
+                                <div class="step-icon">➡️</div>
+                                <div class="step-content">
+                                    <h4>3. Apply the Rule</h4>
+                                    <p><em>They mentally move it <strong>relative</strong> to its starting position.</em></p>
+                                    <span class="step-label">Relative Reasoning</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- The Problem with Standard NNs -->
+                    <div class="problem-container">
+                        <h3>❌ Why Standard Neural Networks Fail</h3>
+                        <div class="problem-visual">
+                            <div class="nn-problem-grid">
+                                <div class="grid-scenario">
+                                    <div class="scenario-label">Training: Object at (10,10)</div>
+                                    <div class="mini-grid training-grid" id="nn-train-grid">
+                                        <!-- 5x5 grid visualization -->
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                        <div class="grid-cell"></div><div class="grid-cell red-cell">■</div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                    </div>
+                                    <div class="scenario-note">NN memorizes: "Pixel (1,1) is Red"</div>
+                                </div>
+                                <div class="arrow-separator">→</div>
+                                <div class="grid-scenario">
+                                    <div class="scenario-label">Test: Object at (20,20)</div>
+                                    <div class="mini-grid test-grid" id="nn-test-grid">
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell red-cell">■</div><div class="grid-cell"></div>
+                                        <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+                                    </div>
+                                    <div class="scenario-note failure">❌ NN fails: "Where's (1,1)?"</div>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="problem-explanation">Standard CNNs and Transformers memorize <strong>absolute positions</strong>. If an object moves, they're lost.</p>
+                    </div>
+                    
+                    <!-- RLAN's Solution -->
+                    <div class="solution-container">
+                        <h3>✅ RLAN's Solution: Think in Relative Coordinates</h3>
+                        <p>RLAN doesn't care <em>where</em> an object is absolutely; it only cares where things are <strong>relative to each other</strong>.</p>
+                        
+                        <div class="rlan-modules-visual">
+                            <div class="module-flow-horizontal">
+                                <!-- Context Encoder -->
+                                <div class="flow-module-compact" id="flow-context">
+                                    <div class="module-header">
+                                        <span class="module-icon">📖</span>
+                                        <h4>Context Encoder</h4>
+                                    </div>
+                                    <p class="module-nickname">"The Rule Book"</p>
+                                    <div class="module-io">
+                                        <div class="io-row input"><span class="io-label">IN</span> Training pairs (In→Out)</div>
+                                        <div class="io-row action"><span class="io-label">DO</span> Compare input vs output</div>
+                                        <div class="io-row output"><span class="io-label">OUT</span> Task Vector τ</div>
+                                    </div>
+                                </div>
+                                
+                                <div class="flow-arrow-h">→</div>
+                                
+                                <!-- Dynamic Spatial Conditioning -->
+                                <div class="flow-module-compact" id="flow-dsc">
+                                    <div class="module-header">
+                                        <span class="module-icon">👁️</span>
+                                        <h4>Dynamic Spatial Conditioning</h4>
+                                    </div>
+                                    <p class="module-nickname">"The Eye"</p>
+                                    <div class="module-io">
+                                        <div class="io-row input"><span class="io-label">IN</span> Test grid + Task Vector τ</div>
+                                        <div class="io-row action"><span class="io-label">DO</span> "Where should I look?"</div>
+                                        <div class="io-row output"><span class="io-label">OUT</span> Attractor $(c_x, c_y)$</div>
+                                    </div>
+                                </div>
+                                
+                                <div class="flow-arrow-h">→</div>
+                                
+                                <!-- Multi-Scale Relative Encoding -->
+                                <div class="flow-module-compact highlight-module" id="flow-msre">
+                                    <div class="module-header">
+                                        <span class="module-icon">🧭</span>
+                                        <h4>Multi-Scale Relative Encoding</h4>
+                                    </div>
+                                    <p class="module-nickname">"The Compass" ⭐</p>
+                                    <div class="module-io">
+                                        <div class="io-row input"><span class="io-label">IN</span> Grid + Attractor $(c_x, c_y)$</div>
+                                        <div class="io-row action"><span class="io-label">DO</span> $\Delta = (x - c_x, y - c_y)$</div>
+                                        <div class="io-row output"><span class="io-label">OUT</span> Position-invariant features</div>
+                                    </div>
+                                </div>
+                                
+                                <div class="flow-arrow-h">→</div>
+                                
+                                <!-- Recursive Solver -->
+                                <div class="flow-module-compact" id="flow-solver">
+                                    <div class="module-header">
+                                        <span class="module-icon">🎨</span>
+                                        <h4>Recursive Solver</h4>
+                                    </div>
+                                    <p class="module-nickname">"The Painter"</p>
+                                    <div class="module-io">
+                                        <div class="io-row input"><span class="io-label">IN</span> Relative coords + τ</div>
+                                        <div class="io-row action"><span class="io-label">DO</span> Iteratively paint output</div>
+                                        <div class="io-row output"><span class="io-label">OUT</span> Final prediction grid</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Why It Generalizes -->
+                    <div class="generalization-container">
+                        <h3>🚀 Why RLAN Generalizes</h3>
+                        <div class="generalization-reasons">
+                            <div class="reason-card">
+                                <div class="reason-icon">📐</div>
+                                <h4>Manifold Flattening</h4>
+                                <p>By switching to <strong>Relative Coordinates</strong>, RLAN "flattens" the problem space. The task "Move Object 1 step right" looks <em>mathematically identical</em> regardless of where the object starts.</p>
+                            </div>
+                            <div class="reason-card">
+                                <div class="reason-icon">🔀</div>
+                                <h4>Separation of Concerns</h4>
+                                <p><strong>DSC (Perception):</strong> Handles the messy pixel work<br>
+                                <strong>Solver (Reasoning):</strong> Handles abstract logic<br>
+                                The Solver learns "Copy" once and applies it to <em>any</em> object DSC points at.</p>
+                            </div>
+                            <div class="reason-card">
+                                <div class="reason-icon">🎯</div>
+                                <h4>Dynamic Attractors</h4>
+                                <p>DSC creates a <strong>new coordinate system</strong> for every sample. It "re-centers" the world around relevant objects, ignoring noise.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="takeaway">
+                <strong>Takeaway:</strong> RLAN works because it stops treating grids as fixed images and starts treating them as collections of <strong>anchors</strong> and <strong>relative movements</strong>. Its mathematics <em>force</em> it to ignore absolute positions and focus on relationships.
+            </div>
+            
+            <div class="speaker-notes" data-duration-30s="RLAN mimics human reasoning: extract rules, find objects, apply relative logic." data-duration-2min="RLAN mimics how humans solve puzzles. First, the Context Encoder extracts the rule from examples. Then, DSC finds the relevant objects. Finally, MSRE converts everything to relative coordinates—making 'Red at (10,10)' identical to 'Red at (20,20)'. This forces the model to learn general rules, not memorize positions." data-duration-5min="RLAN is designed to think like humans. Step 1: The Context Encoder watches the training examples and extracts the rule—like 'move Red to Blue'. Step 2: The Dynamic Saliency Controller scans the test grid and places 'attractors' on key objects. Step 3: The Multi-Scale Relative Encoding module transforms all coordinates to be relative to these attractors. This is the key insight: a Red square at (10,10) looks mathematically identical to one at (20,20) because both are at position (0,0) relative to their own attractor. The model literally cannot distinguish absolute positions—it's forced to learn the general rule. Finally, the Recursive Solver paints the output, using cross-attention to look back at the examples for guidance."></div>
+        </section>
+
         <!-- ========== SECTION 2: THE ARC PROBLEM ========== -->
         <section id="arc-problem" class="story-section" data-section="2">
             <div class="section-header">

@@ -48,6 +48,7 @@ from sci_arc.models.rlan_modules import (
     RecursiveSolver,
     ContextEncoder,
     ContextInjector,
+    CrossAttentionInjector,
 )
 
 
@@ -80,6 +81,8 @@ class RLANConfig:
     num_solver_steps: int = 6
     use_act: bool = False  # Adaptive Computation Time
     use_solver_feedback: bool = False  # Use prediction feedback in solver (disabled - argmax breaks gradients)
+    use_solver_context: bool = True  # Phase 2.5: Solver cross-attention to support set
+    solver_context_heads: int = 4  # Number of attention heads for solver cross-attention
     
     # Training parameters
     dropout: float = 0.1
@@ -212,8 +215,14 @@ class RLAN(nn.Module):
                 max_pairs=5,  # ARC has 2-5 training pairs
                 num_heads=config.dsc_num_heads if config else 4,
                 dropout=dropout,
+                use_spatial_features=True,  # NEW: Return (B, N, D, H, W) for cross-attention
             )
-            self.context_injector = ContextInjector(hidden_dim=hidden_dim)
+            # NEW: Use CrossAttentionInjector instead of FiLM
+            self.context_injector = CrossAttentionInjector(
+                hidden_dim=hidden_dim,
+                num_heads=config.dsc_num_heads if config else 4,
+                dropout=dropout,
+            )
         else:
             self.context_encoder = None
             self.context_injector = None
@@ -264,6 +273,8 @@ class RLAN(nn.Module):
         
         # Recursive Solver - ALWAYS REQUIRED (core output generation)
         # Pass ablation flags so solver can skip unused components
+        # Phase 2.5: Pass support set cross-attention flag
+        self.use_solver_context = config.use_solver_context if config else True
         self.solver = RecursiveSolver(
             hidden_dim=hidden_dim,
             num_classes=num_classes,
@@ -275,6 +286,8 @@ class RLAN(nn.Module):
             use_lcr=self.use_lcr,  # Skip count injection if LCR disabled
             use_sph=self.use_sph,  # Skip predicate gating if SPH disabled
             use_feedback=config.use_solver_feedback if config else False,  # Disabled by default (argmax breaks gradients)
+            use_solver_context=self.use_solver_context,  # Phase 2.5: Solver cross-attention to support set
+            num_context_heads=config.solver_context_heads if config else 4,
         )
         
         # Print module configuration
@@ -287,6 +300,7 @@ class RLAN(nn.Module):
             ('LCR', self.use_lcr),
             ('SPH', self.use_sph),
             ('ACT', self.use_act),
+            ('SolverContext', self.use_solver_context),  # Phase 2.5
         ]:
             (enabled if flag else disabled).append(name)
         
@@ -362,14 +376,14 @@ class RLAN(nn.Module):
         grid_sizes = self.encoder.get_grid_sizes(input_grid)  # (B, 2)
         
         # 2. Encode training context if provided and enabled
-        context = None
+        support_features = None
         if self.use_context_encoder and self.context_encoder is not None:
             if train_inputs is not None and train_outputs is not None:
-                context = self.context_encoder(
+                support_features = self.context_encoder(
                     train_inputs, train_outputs, pair_mask
-                )  # (B, D)
-                # Inject context into features via FiLM
-                features = self.context_injector(features, context)
+                )  # (B, N, D, H, W) - spatial features for cross-attention
+                # Inject context into features via Cross-Attention (not FiLM)
+                features = self.context_injector(features, support_features)
         
         # 3. Dynamic Saliency Controller - find clue anchors (if enabled)
         if self.use_dsc and self.dsc is not None:
@@ -422,6 +436,7 @@ class RLAN(nn.Module):
         # CRITICAL: Pass stop_logits to solver for clue aggregation weighting
         # This creates gradient flow: task_loss -> stop_probs -> stop_predictor
         # Making clue count a TRUE latent variable learned from target grids
+        # Phase 2.5: Pass support_features for solver cross-attention
         act_outputs = None
         if return_all_steps or return_intermediates:
             solver_output = self.solver(
@@ -431,6 +446,7 @@ class RLAN(nn.Module):
                 input_grid=input_grid,
                 attention_maps=attention_maps,
                 stop_logits=stop_logits,  # For latent clue count learning
+                support_features=support_features,  # Phase 2.5: Solver cross-attention
                 return_all_steps=True,
                 return_act_outputs=return_intermediates and self.use_act,
             )
@@ -448,6 +464,7 @@ class RLAN(nn.Module):
                 input_grid=input_grid,
                 attention_maps=attention_maps,
                 stop_logits=stop_logits,  # For latent clue count learning
+                support_features=support_features,  # Phase 2.5: Solver cross-attention
                 return_all_steps=False,
             )
             all_logits = None
@@ -463,8 +480,8 @@ class RLAN(nn.Module):
                 "count_embedding": count_embedding,
                 "features": features,
             }
-            if context is not None:
-                result["context"] = context
+            if support_features is not None:
+                result["support_features"] = support_features
             if act_outputs is not None:
                 result["act_outputs"] = act_outputs
             # Add DSC diagnostics if available
@@ -546,6 +563,7 @@ class RLAN(nn.Module):
                 "use_msre": self.use_msre,
                 "use_lcr": self.use_lcr,
                 "use_sph": self.use_sph,
+                "use_solver_context": self.use_solver_context,  # Phase 2.5
             },
             **extra_data,
         }

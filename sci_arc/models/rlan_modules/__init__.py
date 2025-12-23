@@ -23,7 +23,7 @@ from .multi_scale_relative_encoding import MultiScaleRelativeEncoding
 from .latent_counting_registers import LatentCountingRegisters
 from .symbolic_predicate_heads import SymbolicPredicateHeads
 from .recursive_solver import RecursiveSolver
-from .context_encoder import ContextEncoder, ContextInjector, PairEncoder
+from .context_encoder import ContextEncoder, ContextInjector, PairEncoder, CrossAttentionInjector, SpatialPairEncoder
 from .activations import SwiGLU, SwiGLUConv2d, FFN
 from .adaptive_computation import ACTController, AdaptiveHaltHead, ACTState, PonderingCost
 from .positional_encoding import (
@@ -43,6 +43,8 @@ __all__ = [
     "ContextEncoder",
     "ContextInjector",
     "PairEncoder",
+    "CrossAttentionInjector",
+    "SpatialPairEncoder",
     # Activations
     "SwiGLU",
     "SwiGLUConv2d",

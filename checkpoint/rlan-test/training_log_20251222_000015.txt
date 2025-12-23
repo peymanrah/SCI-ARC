@@ -1,0 +1,93 @@
+Logging to: checkpoint\rlan-test\training_log_20251222_000015.txt
+Timestamp: 2025-12-22T00:00:15.327610
+Python: 3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:37:03) [MSC v.1929 64 bit (AMD64)]
+PyTorch: 2.9.1+cpu
+Starting fresh training
+
+num_classes validation: OK (10 classes for colors 0-9)
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT]
+
+Model parameters:
+  encoder: 17,472
+  feature_proj: 16,768
+  context_encoder: 1,078,720
+  context_injector: 33,024
+  dsc: 166,338
+  msre: 27,952
+  lcr: 0
+  sph: 0
+  solver: 1,765,386
+  total: 3,105,660
+
+============================================================
+MODULE ABLATION STATUS
+============================================================
+  ContextEncoder: ENABLED (task signal from demos)
+  DSC:            ENABLED (dynamic spatial clues - CORE)
+  MSRE:           ENABLED (multi-scale relative encoding - CORE)
+  LCR:            DISABLED (latent counting registers)
+  SPH:            DISABLED (symbolic predicate heads)
+  ACT:            DISABLED (adaptive computation time)
+  Pos Encoding:   SINUSOIDAL
+
+  >>> CORE ABLATION MODE: Testing DSC + MSRE novelty <<<
+============================================================
+
+============================================================
+RLAN TRAINING REGIME
+============================================================
+  Batch Size: 8
+  Grad Accumulation: 1
+  Effective Batch: 8
+  Learning Rate: 5.0e-04
+  Weight Decay: 0.01
+  Optimizer: adamw (beta1=0.9, beta2=0.95)
+  Scheduler: none
+  Warmup Epochs: 0
+  Max Epochs: 2
+
+Loss Configuration:
+  Loss Mode: STABLEMAX
+
+Auxiliary Loss Weights (only non-zero shown):
+  lambda_entropy=0.01 (DSC attention sharpness)
+  lambda_sparsity=0.5 (clue efficiency)
+    min_clues=2.5 (min clues before penalty)
+    min_clue_weight=5.0 (penalty strength)
+    ponder_weight=0.02 (cost per clue)
+  lambda_predicate=0.01 (predicate diversity)
+
+Temperature Schedule (Gumbel-Softmax):
+  Start: 1.0, End: 0.5
+============================================================
+  Loss Mode: STABLEMAX (pure cross-entropy)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+
+Loading data from: ./data/arc-agi/data/training
+Cache samples: False
+
+============================================================
+AUGMENTATION CONFIGURATION
+============================================================
+  1. Dihedral (D4 group): ENABLED
+     - 8 transforms: identity, rot90, rot180, rot270, flipLR, flipUD, transpose, anti-transpose
+  2. Color Permutation:   ENABLED
+     - 9! = 362,880 permutations (colors 1-9 shuffled, 0 fixed)
+     - Probability: 100% (CRITICAL: 100% breaks color identity learning!)
+  3. Translational:       ENABLED
+     - Random offset within 30x30 canvas (~100 positions)
+
+  Total Diversity: 8 x 362,880 x ~100 = ~290,304,000 unique per task
+  Mode: On-the-fly (EACH sample is NEW random augmentation)
+  Advantage: Infinite diversity vs TRM's fixed 1000 samples
+============================================================
+
+Curriculum learning DISABLED (using all data from epoch 1, like TRM)
+Loaded 400 tasks from ./data/arc-agi/data/training
+
+
+Received signal 2, cleaning up...
+
+Cleaning up memory...
+Memory cleanup complete.
