@@ -113,11 +113,20 @@ training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
   
   # CONSERVATIVE batch size to stay within 24GB GPU VRAM only
-  # Previous attempt with batch_size=288 caused 40GB+ shared memory spillover!
-  # batch_size=75 was proven stable in commit 2a50f2d (24GB VRAM, no spillover)
-  # Gradient accumulation gives effective batch of 300 (TRM-competitive)
-  batch_size: 75    # Proven stable in 24GB VRAM (no CPU shared memory)
-  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
+  # 
+  # MEMORY ANALYSIS (Dec 2025 with CrossAttention + SolverCrossAttention):
+  # - Base model (commit 2a50f2d, no cross-attention): batch=75 used ~22GB
+  # - CrossAttentionInjector adds: ~160 MB (query+key+value+FFN activations)
+  # - SolverCrossAttention adds: ~400 MB (6 steps × 67 MB each)
+  # - Backward pass: ~2× forward = +1.1 GB from cross-attention
+  # - TOTAL additional: ~1.7 GB from cross-attention features
+  #
+  # To stay within 24GB with ~2GB headroom:
+  # - Reduce batch from 75 to 64 (saves ~3 GB)
+  # - Use grad_accumulation=5 for effective batch of 320 (TRM-competitive)
+  #
+  batch_size: 64    # Reduced from 75 to account for cross-attention memory
+  grad_accumulation_steps: 5  # effective_batch_size = 64 × 5 = 320
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
