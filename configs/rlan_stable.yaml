@@ -112,14 +112,12 @@ model:
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
   
-  # MAXIMIZED for 24GB GPU with solver cross-attention enabled
-  # Peak VRAM ≈ 19.8 GB (leaves ~4 GB headroom)
-  # Larger real batch > gradient accumulation for:
-  #   - Faster training (1 forward pass vs multiple)
-  #   - Better GPU utilization
-  #   - More diverse dropout/augmentation per step
-  batch_size: 288   # Max safe for 24GB with solver cross-attention
-  grad_accumulation_steps: 1  # No accumulation needed (real batch = effective batch)
+  # CONSERVATIVE batch size to stay within 24GB GPU VRAM only
+  # Previous attempt with batch_size=288 caused 40GB+ shared memory spillover!
+  # batch_size=75 was proven stable in commit 2a50f2d (24GB VRAM, no spillover)
+  # Gradient accumulation gives effective batch of 300 (TRM-competitive)
+  batch_size: 75    # Proven stable in 24GB VRAM (no CPU shared memory)
+  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization

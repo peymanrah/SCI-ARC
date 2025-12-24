@@ -50,6 +50,32 @@ def _find_multiple(a: int, b: int) -> int:
     return (-(a // -b)) * b
 
 
+def soft_clamp(x: torch.Tensor, threshold: float = 8.0, max_val: float = 10.0) -> torch.Tensor:
+    """
+    Soft clamp for hidden states that preserves gradients at boundaries.
+    
+    Unlike hard clamp (torch.clamp) which kills gradients at boundaries,
+    soft clamp uses tanh compression to maintain gradient flow.
+    
+    For |x| <= threshold: returns x unchanged (identity)
+    For |x| > threshold: smoothly compresses towards max_val using tanh
+    
+    Args:
+        x: Input tensor (hidden states)
+        threshold: Values below this are unchanged (default 8.0)
+        max_val: Maximum output magnitude (default 10.0)
+        
+    Returns:
+        Soft-clamped tensor with preserved gradients
+    """
+    scale = (max_val - threshold) / 2
+    abs_x = x.abs()
+    sign_x = x.sign()
+    excess = (abs_x - threshold).clamp(min=0)
+    compressed = threshold + (max_val - threshold) * torch.tanh(excess / scale)
+    return torch.where(abs_x <= threshold, x, sign_x * compressed)
+
+
 def soft_clamp_logits(x: torch.Tensor, threshold: float = 1000.0, max_val: float = 2000.0) -> torch.Tensor:
     """
     Soft clamp that allows natural growth up to threshold, then compresses.
