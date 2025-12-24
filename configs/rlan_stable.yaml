@@ -51,7 +51,7 @@ model:
   
   max_clues: 7
   num_predicates: 32  # More predicates for diversity
-  num_solver_steps: 10
+  num_solver_steps: 6   # Reverted from 10 - 6 is stable and fast
   
   use_act: false       # DISABLED
   dropout: 0.1
@@ -72,17 +72,18 @@ model:
   use_learned_pos: false      # DISABLED - sinusoidal works better
   
   # Phase 2.5: Solver Cross-Attention to Support Set (Dec 2025)
-  # Removes information bottleneck - solver can query examples at EVERY step
-  use_solver_context: true    # Enable solver cross-attention to support set
-  solver_context_heads: 4     # Attention heads for solver cross-attention
+  # DISABLED: Causes gradient instability and 10x slowdown
+  # The spatial pooling (30x30→6x6) loses too much information
+  # TODO: Revisit with better design (sparse attention, fewer steps)
+  use_solver_context: false   # DISABLED - causes mode collapse at batch 6
+  solver_context_heads: 4     # Not used when disabled
 
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
   
-  # OOM FIX: Reduced from 75 to 48 due to Phase 2.5 solver cross-attention memory
-  # Cross-attention on 30x30 grids (900 positions) × 10 support pairs = huge attention matrix
-  batch_size: 48   # Smaller batch to fit solver cross-attention in 24GB VRAM
-  grad_accumulation_steps: 6  # effective_batch_size = 48 × 6 = 288 (similar to before)
+  # Reverted to 75 since solver cross-attention is disabled (no OOM)
+  batch_size: 75   # Larger batch for TRM-competitive effective batch size
+  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
