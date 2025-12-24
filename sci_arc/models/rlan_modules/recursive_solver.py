@@ -268,6 +268,11 @@ class SolverCrossAttention(nn.Module):
     rather than relying on pre-compressed context from the initial injection.
     
     Phase 2.5: Removes the information bottleneck identified in Phase 2 analysis.
+    
+    Memory Optimization (Dec 2025):
+    - Uses spatial pooling to reduce key/value sequence length
+    - Full 30x30 grid = 900 positions × 10 pairs = 9000 keys → OOM
+    - With pool_size=5: 6x6 grid = 36 positions × 10 pairs = 360 keys → fits in memory
     """
     
     def __init__(
@@ -275,11 +280,16 @@ class SolverCrossAttention(nn.Module):
         hidden_dim: int,
         num_heads: int = 4,
         dropout: float = 0.1,
+        pool_size: int = 5,  # Pool support features spatially to reduce memory
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
+        self.pool_size = pool_size
+        
+        # Spatial pooling for support features (reduces memory by pool_size^2)
+        self.support_pool = nn.AdaptiveAvgPool2d((6, 6))  # 30x30 → 6x6 = 36 positions
         
         # Multi-head cross-attention
         self.cross_attn = nn.MultiheadAttention(
@@ -310,6 +320,8 @@ class SolverCrossAttention(nn.Module):
         """
         Apply cross-attention from solver hidden state to support features.
         
+        Memory-efficient: pools support features spatially before cross-attention.
+        
         Returns:
             enhanced_state: (B, D, H, W) hidden state enhanced with context
         """
@@ -319,8 +331,15 @@ class SolverCrossAttention(nn.Module):
         # Flatten hidden state to sequence: (B, H*W, D)
         h_flat = hidden_state.permute(0, 2, 3, 1).reshape(B, H * W, D)
         
-        # Flatten support features: (B, N*H'*W', D)
-        support_flat = support_features.permute(0, 1, 3, 4, 2).reshape(B, N * H_s * W_s, D_s)
+        # Pool support features spatially to reduce memory: (B, N, D, H', W') → (B, N, D, 6, 6)
+        # This reduces 900 positions per pair to 36, cutting memory by 25x
+        support_pooled = support_features.reshape(B * N, D_s, H_s, W_s)
+        support_pooled = self.support_pool(support_pooled)  # (B*N, D, 6, 6)
+        _, _, H_p, W_p = support_pooled.shape
+        support_pooled = support_pooled.reshape(B, N, D_s, H_p, W_p)
+        
+        # Flatten pooled support features: (B, N*36, D)
+        support_flat = support_pooled.permute(0, 1, 3, 4, 2).reshape(B, N * H_p * W_p, D_s)
         
         # Pre-norm for stability
         q = self.norm_q(h_flat)

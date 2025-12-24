@@ -3425,11 +3425,12 @@ Config Overrides:
                 
                 if eval_tasks:
                     num_dihedral = config.get('evaluation', {}).get('num_augmented_views', 8)
+                    num_color_perms = config.get('evaluation', {}).get('num_color_perms', 4)
                     trm_metrics = evaluate_trm_style(
                         eval_model, eval_tasks, device, 
                         temperature=eval_temp,
                         num_dihedral=num_dihedral,
-                        num_color_perms=1,  # No color perm for now (training bug)
+                        num_color_perms=num_color_perms,  # TTA with color permutation for max generalization
                         max_size=max_grid_size,
                     )
                     print(f"\n  --- TRM-Style TTA Evaluation ({num_dihedral} dihedral views, voting) ---")

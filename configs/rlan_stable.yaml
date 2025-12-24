@@ -15,21 +15,30 @@
 # - Clue regularization validated: faster convergence, stable training
 # - No NaN issues with proper padding (ignore_index=-100)
 #
+# PHASE 2.5 UPDATE (Dec 2025):
+# - Solver cross-attention enabled (removes information bottleneck)
+# - Memory-efficient pooling: 30x30 → 6x6 support features
+# - TTA evaluation: 8 dihedral × 4 color = 32 views with voting
+# - batch_size=48 (reduced from 75 for solver cross-attention memory)
+#
 # SAMPLE COUNT (TRM comparison):
 # - TRM: 1000x pre-generated augmentation = 800,000 samples
-# - RLAN Phase 1: 400,000 cached (500 per task)
+# - RLAN Phase 1: 400,000 cached (1000 per task)
 # - RLAN Phase 2: INFINITE on-the-fly augmentation
 #
 # KEY PRINCIPLES:
 # 1. No scheduler - constant learning rate (most stable)
 # 2. Clue regularization ENABLED (prevents clue collapse)
-# 3. Core modules: ContextEncoder, DSC, MSRE
+# 3. Core modules: ContextEncoder, DSC, MSRE, SolverContext
 # 4. Light auxiliary losses (entropy, sparsity, predicate)
 # 5. max_grid_size=30 (official ARC-AGI maximum)
 #
 # TRAINING WORKFLOW:
 # Phase 1: Train with cache_samples=true until convergence (memorization)
 # Phase 2: Resume with cache_samples=false for diversity (generalization)
+#
+# CACHE NOTE: If you change augmentation or solver_context, DELETE cache!
+#   rm ./cache/rlan_stable_400k_v2.pkl
 #
 # ==========================
 
@@ -40,9 +49,9 @@ model:
   num_classes: 10  # colors 0-9
   max_grid_size: 30
   
-  max_clues: 6
+  max_clues: 7
   num_predicates: 32  # More predicates for diversity
-  num_solver_steps: 6
+  num_solver_steps: 10
   
   use_act: false       # DISABLED
   dropout: 0.1
@@ -70,8 +79,10 @@ model:
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
   
-  batch_size: 75   # Larger batch for TRM-competitive effective batch size
-  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
+  # OOM FIX: Reduced from 75 to 48 due to Phase 2.5 solver cross-attention memory
+  # Cross-attention on 30x30 grids (900 positions) × 10 support pairs = huge attention matrix
+  batch_size: 48   # Smaller batch to fit solver cross-attention in 24GB VRAM
+  grad_accumulation_steps: 6  # effective_batch_size = 48 × 6 = 288 (similar to before)
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -118,7 +129,7 @@ training:
   
   # Clue regularization (ENABLED - validated stable Dec 2025)
   # Helps model learn appropriate clue count per task
-  min_clues: 2.5
+  min_clues: 1.0             # Allow 1-clue simple tasks (was 2.5)
   min_clue_weight: 5.0       # Prevents collapse to 0 clues
   ponder_weight: 0.02        # Small cost per clue (encourages efficiency)
   entropy_ponder_weight: 0.02  # Encourages sharp attention
@@ -156,9 +167,9 @@ data:
   # CRITICAL: Ignore padding in loss
   ignore_padding_in_loss: true
   
-  num_workers: 8       # 8 workers is optimal (too many = CPU overhead)
+  num_workers: 12      # 12 workers for maximum throughput (RTX 3090 + 24 cores)
   pin_memory: true
-  prefetch_factor: 4   # Increased for faster data loading
+  prefetch_factor: 6   # Aggressive prefetching for GPU utilization
   persistent_workers: true
   
   # ==========================================================================
@@ -210,10 +221,12 @@ evaluation:
   
   # TRM-style evaluation settings
   use_trm_style_eval: true
-  num_augmented_views: 8  # Generate 8 predictions per task
+  num_augmented_views: 8  # 8 dihedral transforms (D4 group)
+  num_color_perms: 4      # 4 color permutations per dihedral = 32 total views
   use_voting: true        # Aggregate predictions
   use_inverse_aug: true   # CRITICAL: Undo augmentations before comparison
   pass_ks: [1, 2, 5, 10]  # Report Pass@K metrics like TRM
+  max_eval_tasks: 100     # Number of eval tasks to run TTA on (100 for full eval)
 
 # =============================================================
 # GAP MONITORING - EARLY WARNING FOR GENERALIZATION ISSUES
