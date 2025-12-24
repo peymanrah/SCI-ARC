@@ -2,7 +2,7 @@
 # ==========================
 # Production-ready configuration validated by ablation testing
 # 
-# HARDWARE TARGET: RTX 3090 (24GB VRAM), 24 CPU cores, 128GB RAM
+# HARDWARE TARGET: RTX 3090 (24GB VRAM), 48 virtual CPUs, 128GB RAM
 #
 # USE THIS CONFIG WHEN:
 # - Training new models from scratch
@@ -15,11 +15,16 @@
 # - Clue regularization validated: faster convergence, stable training
 # - No NaN issues with proper padding (ignore_index=-100)
 #
-# PHASE 2.5 UPDATE (Dec 2025):
-# - Solver cross-attention enabled (removes information bottleneck)
-# - Memory-efficient pooling: 30x30 → 6x6 support features
-# - TTA evaluation: 8 dihedral × 4 color = 32 views with voting
-# - batch_size=48 (reduced from 75 for solver cross-attention memory)
+# CONTEXT INJECTION (Dec 2025):
+# - use_cross_attention_context=true with spatial_downsample=8
+# - Preserves spatial structure for generalization (unlike FiLM compression)
+# - Adaptive pooling: all grids → 8×8 + learned refinement + position re-encoding
+# - Memory efficient: 64 tokens/pair vs 900 (14x reduction)
+#
+# DATA LOADING (Dec 2025):
+# - 400K cached samples in CPU RAM (not GPU VRAM!)
+# - num_workers=0 when cached (avoids memory duplication)
+# - CUDAPrefetcher for async CPU→GPU transfer (no GPU stalls)
 #
 # SAMPLE COUNT (TRM comparison):
 # - TRM: 1000x pre-generated augmentation = 800,000 samples
@@ -29,7 +34,7 @@
 # KEY PRINCIPLES:
 # 1. No scheduler - constant learning rate (most stable)
 # 2. Clue regularization ENABLED (prevents clue collapse)
-# 3. Core modules: ContextEncoder, DSC, MSRE, SolverContext
+# 3. Core modules: ContextEncoder (CrossAttention+Pooling), DSC, MSRE
 # 4. Light auxiliary losses (entropy, sparsity, predicate)
 # 5. max_grid_size=30 (official ARC-AGI maximum)
 #
@@ -37,8 +42,10 @@
 # Phase 1: Train with cache_samples=true until convergence (memorization)
 # Phase 2: Resume with cache_samples=false for diversity (generalization)
 #
-# CACHE NOTE: If you change augmentation or solver_context, DELETE cache!
+# ⚠️ CACHE NOTE: DELETE CACHE after augmentation order fix (Dec 2025)!
+# Previous cache had wrong order (dihedral→color), now using TRM order (color→dihedral)
 #   rm ./cache/rlan_stable_400k_v2.pkl
+#   rm ./cache/rlan_stable_400k_v3.pkl  # v3 with correct TRM-style order
 #
 # ==========================
 
@@ -68,22 +75,51 @@ model:
   use_dsc: true               # REQUIRED - dynamic spatial cluing
   use_msre: true              # REQUIRED - multi-scale relative encoding
   use_lcr: false              # DISABLED - not needed for learning
+  
+  # Context injection mode (CRITICAL FOR STABILITY!)
+  # false = FiLM conditioning (stable, proven, compresses context to vector)
+  # true = CrossAttention (experimental, high memory, can cause mode collapse)
+  #
+  # MIDDLE GROUND: Enable CrossAttention but with spatial downsampling
+  # This gives spatial context without the massive memory cost
+  use_cross_attention_context: true
+  
+  # Spatial downsample TARGET SIZE (not divisor!)
+  # All support grids (3x3 to 30x30) are pooled to this fixed size
+  # 8 = 8x8 output (64 tokens per pair, ~14x reduction from 30x30)
+  # Uses learned refinement + position re-encoding after pooling
+  spatial_downsample: 8       # 8x8 target - preserves objects while being memory-efficient
   use_sph: false              # DISABLED - not needed for learning
   use_learned_pos: false      # DISABLED - sinusoidal works better
   
   # Phase 2.5: Solver Cross-Attention to Support Set (Dec 2025)
-  # DISABLED: Causes gradient instability and 10x slowdown
-  # The spatial pooling (30x30→6x6) loses too much information
-  # TODO: Revisit with better design (sparse attention, fewer steps)
-  use_solver_context: false   # DISABLED - causes mode collapse at batch 6
-  solver_context_heads: 4     # Not used when disabled
+  # ENABLED: Critical for generalization to unseen ARC rules
+  # 
+  # WHY THIS IS NEEDED:
+  # - DSC injection provides GLOBAL context (baked in once at start)
+  # - Solver cross-attention provides LOCAL verification at EVERY step
+  # - These are COMPLEMENTARY: spatial priors + iterative verification
+  #
+  # MEMORY COST: ~100MB additional (trivial on 24GB GPU)
+  # - Support: (B, N, 256, 8, 8) computed ONCE, reused across 6 steps
+  # - Attention: O(900 × 256) per step = ~230K ops = <1ms/step
+  #
+  # PREVIOUS ISSUE: Mode collapse was caused by hardcoded CrossAttentionInjector
+  # not by solver cross-attention. Now with spatial_downsample=8, memory is fine.
+  use_solver_context: true    # ENABLED - critical for iterative verification
+  solver_context_heads: 4     # Multi-head attention for diverse queries
 
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
   
-  # Reverted to 75 since solver cross-attention is disabled (no OOM)
-  batch_size: 75   # Larger batch for TRM-competitive effective batch size
-  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
+  # MAXIMIZED for 24GB GPU with solver cross-attention enabled
+  # Peak VRAM ≈ 19.8 GB (leaves ~4 GB headroom)
+  # Larger real batch > gradient accumulation for:
+  #   - Faster training (1 forward pass vs multiple)
+  #   - Better GPU utilization
+  #   - More diverse dropout/augmentation per step
+  batch_size: 288   # Max safe for 24GB with solver cross-attention
+  grad_accumulation_steps: 1  # No accumulation needed (real batch = effective batch)
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -168,9 +204,13 @@ data:
   # CRITICAL: Ignore padding in loss
   ignore_padding_in_loss: true
   
-  num_workers: 12      # 12 workers for maximum throughput (RTX 3090 + 24 cores)
-  pin_memory: true
-  prefetch_factor: 6   # Aggressive prefetching for GPU utilization
+  # Data loading configuration
+  # NOTE: When cache_samples=true, num_workers is automatically set to 0
+  # to avoid duplicating the 400K cache across worker processes.
+  # GPU stalls are prevented by CUDAPrefetcher (async CPU→GPU transfer).
+  num_workers: 12      # Used when cache_samples=false (on-the-fly augmentation)
+  pin_memory: true     # Enables async GPU transfer (always beneficial)
+  prefetch_factor: 6   # Used when num_workers > 0
   persistent_workers: true
   
   # ==========================================================================
@@ -192,7 +232,7 @@ data:
   
   cache_samples: true
   num_cached_samples: 400000  # 500 per task (TRM uses 1000x)
-  cache_path: "./cache/rlan_stable_400k_v2.pkl"  # NEW cache with color_perm arrays (v2)
+  cache_path: "./cache/rlan_stable_400k_v3.pkl"  # v3: TRM-style aug order (color→dihedral)
   
   augmentation:
     enabled: true

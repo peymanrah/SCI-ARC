@@ -273,12 +273,14 @@ class ContextEncoder(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.1,
         use_spatial_features: bool = True,  # New: return spatial features
+        spatial_downsample: int = 1,        # New: downsample factor (1 = no downsample)
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.max_pairs = max_pairs
         self.use_spatial_features = use_spatial_features
+        self.spatial_downsample = spatial_downsample
         
         # Pair encoder
         self.pair_encoder = PairEncoder(hidden_dim, num_colors, max_size)
@@ -310,6 +312,27 @@ class ContextEncoder(nn.Module):
                 num_colors=num_colors,
                 max_size=max_size,
             )
+            
+            # Downsampling: use adaptive target size for consistent output
+            # spatial_downsample now means TARGET SIZE (e.g., 8 = 8x8 output)
+            # This ensures all grids (3x3 to 30x30) get same spatial resolution
+            if spatial_downsample > 1:
+                target_size = spatial_downsample  # Reinterpret as target size
+                # Learned downsampling preserves edges better than AvgPool for discrete grids
+                self.downsampler = nn.Sequential(
+                    nn.AdaptiveAvgPool2d(output_size=(target_size, target_size)),
+                    # Refine after pooling to recover edge information
+                    nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+                    nn.GroupNorm(8, hidden_dim),
+                    nn.GELU(),
+                )
+                # Re-encode position after downsampling (original positions are averaged away)
+                self.downsample_pos_embed = nn.Parameter(
+                    torch.randn(1, hidden_dim, target_size, target_size) * 0.02
+                )
+            else:
+                self.downsampler = nn.Identity()
+                self.downsample_pos_embed = None
     
     def forward(
         self,
@@ -346,6 +369,19 @@ class ContextEncoder(nn.Module):
             
             # Stack: (B, N, D, H, W)
             support_features = torch.stack(support_features, dim=1)
+            
+            # Apply downsampling if configured
+            if self.spatial_downsample > 1:
+                B, N, D, H, W = support_features.shape
+                # Reshape to (B*N, D, H, W) for pooling
+                support_features = support_features.view(B * N, D, H, W)
+                support_features = self.downsampler(support_features)
+                # Add fresh positional encoding after downsampling
+                if self.downsample_pos_embed is not None:
+                    support_features = support_features + self.downsample_pos_embed
+                # Reshape back: (B, N, D, H', W')
+                _, _, H_new, W_new = support_features.shape
+                support_features = support_features.view(B, N, D, H_new, W_new)
             
             # Apply pair_mask if provided (zero out invalid pairs)
             if pair_mask is not None:

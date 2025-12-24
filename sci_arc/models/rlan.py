@@ -59,6 +59,35 @@ class RLANConfig:
     # Core dimensions
     hidden_dim: int = 128
     num_colors: int = 10
+    num_classes: int = 10
+    max_grid_size: int = 30
+    
+    # Module flags
+    use_context_encoder: bool = True
+    use_dsc: bool = True
+    use_msre: bool = True
+    use_lcr: bool = False
+    use_act: bool = False
+    
+    # Context settings
+    use_cross_attention_context: bool = False
+    spatial_downsample: int = 1
+    
+    # Hyperparameters
+    max_clues: int = 5
+    num_predicates: int = 16
+    num_solver_steps: int = 3
+    dropout: float = 0.1
+    
+    # Heads
+    dsc_num_heads: int = 4
+    lcr_num_heads: int = 4
+    
+    # Encodings
+    msre_encoding_dim: int = 32
+    msre_num_freq: int = 8
+    lcr_num_freq: int = 8
+    num_colors: int = 10
     num_classes: int = 10  # 10 colors (0-9), no boundary markers needed
     max_grid_size: int = 30
     
@@ -83,6 +112,10 @@ class RLANConfig:
     use_solver_feedback: bool = False  # Use prediction feedback in solver (disabled - argmax breaks gradients)
     use_solver_context: bool = True  # Phase 2.5: Solver cross-attention to support set
     solver_context_heads: int = 4  # Number of attention heads for solver cross-attention
+    
+    # Context settings
+    use_cross_attention_context: bool = False
+    spatial_downsample: int = 1
     
     # Training parameters
     dropout: float = 0.1
@@ -207,6 +240,11 @@ class RLAN(nn.Module):
         )
         
         # Context Encoder - learns from training examples (OPTIONAL)
+        # Use cross-attention context injection (experimental - high memory, can destabilize training)
+        # Default: FiLM conditioning (stable, proven to work)
+        use_cross_attn_context = config.use_cross_attention_context if config and hasattr(config, 'use_cross_attention_context') else False
+        spatial_downsample = config.spatial_downsample if config and hasattr(config, 'spatial_downsample') else 1
+        
         if self.use_context_encoder:
             self.context_encoder = ContextEncoder(
                 hidden_dim=hidden_dim,
@@ -215,14 +253,19 @@ class RLAN(nn.Module):
                 max_pairs=5,  # ARC has 2-5 training pairs
                 num_heads=config.dsc_num_heads if config else 4,
                 dropout=dropout,
-                use_spatial_features=True,  # NEW: Return (B, N, D, H, W) for cross-attention
+                use_spatial_features=use_cross_attn_context,  # Only for cross-attention mode
+                spatial_downsample=spatial_downsample,        # Downsample support features
             )
-            # NEW: Use CrossAttentionInjector instead of FiLM
-            self.context_injector = CrossAttentionInjector(
-                hidden_dim=hidden_dim,
-                num_heads=config.dsc_num_heads if config else 4,
-                dropout=dropout,
-            )
+            if use_cross_attn_context:
+                # Cross-attention: attends to ALL support pixels (high memory)
+                self.context_injector = CrossAttentionInjector(
+                    hidden_dim=hidden_dim,
+                    num_heads=config.dsc_num_heads if config else 4,
+                    dropout=dropout,
+                )
+            else:
+                # FiLM: stable, compresses context to vector (default)
+                self.context_injector = ContextInjector(hidden_dim=hidden_dim)
         else:
             self.context_encoder = None
             self.context_injector = None
@@ -376,14 +419,23 @@ class RLAN(nn.Module):
         grid_sizes = self.encoder.get_grid_sizes(input_grid)  # (B, 2)
         
         # 2. Encode training context if provided and enabled
-        support_features = None
+        context = None  # (B, D) for FiLM mode
+        support_features = None  # (B, N, D, H, W) for cross-attention mode (for solver)
         if self.use_context_encoder and self.context_encoder is not None:
             if train_inputs is not None and train_outputs is not None:
-                support_features = self.context_encoder(
+                context_output = self.context_encoder(
                     train_inputs, train_outputs, pair_mask
-                )  # (B, N, D, H, W) - spatial features for cross-attention
-                # Inject context into features via Cross-Attention (not FiLM)
-                features = self.context_injector(features, support_features)
+                )
+                # ContextEncoder returns (B, D) for FiLM or (B, N, D, H, W) for cross-attention
+                # depending on use_spatial_features flag
+                if self.context_encoder.use_spatial_features:
+                    # Cross-attention mode: spatial features
+                    support_features = context_output  # Keep for solver if enabled
+                    features = self.context_injector(features, context_output)
+                else:
+                    # FiLM mode: compressed context vector
+                    context = context_output  # (B, D)
+                    features = self.context_injector(features, context)
         
         # 3. Dynamic Saliency Controller - find clue anchors (if enabled)
         if self.use_dsc and self.dsc is not None:

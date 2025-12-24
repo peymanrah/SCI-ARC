@@ -99,6 +99,83 @@ if hasattr(signal, 'SIGBREAK'):  # Windows-specific
     signal.signal(signal.SIGBREAK, signal_handler)
 
 
+class CUDAPrefetcher:
+    """
+    Prefetches batches to GPU using a separate CUDA stream.
+    
+    This allows CPU→GPU data transfer to overlap with GPU computation,
+    eliminating GPU stalls when waiting for data. Essential for num_workers=0
+    scenarios (like cached samples mode).
+    
+    Usage:
+        prefetcher = CUDAPrefetcher(train_loader, device)
+        batch = prefetcher.next()
+        while batch is not None:
+            # ... train on batch ...
+            batch = prefetcher.next()
+    """
+    
+    def __init__(self, loader, device):
+        self.loader = loader
+        self.device = device
+        self.stream = torch.cuda.Stream() if device.type == 'cuda' else None
+        self.batch = None
+        self.loader_iter = None
+        
+    def _preload(self):
+        """Preload next batch to GPU asynchronously."""
+        try:
+            self.batch = next(self.loader_iter)
+        except StopIteration:
+            self.batch = None
+            return
+        
+        if self.stream is not None:
+            with torch.cuda.stream(self.stream):
+                # Transfer all tensors in batch to GPU non-blocking
+                self.batch = self._to_device(self.batch)
+    
+    def _to_device(self, data):
+        """Recursively move data to device with non_blocking=True."""
+        if isinstance(data, torch.Tensor):
+            return data.to(self.device, non_blocking=True)
+        elif isinstance(data, dict):
+            return {k: self._to_device(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._to_device(v) for v in data]
+        else:
+            return data
+    
+    def __iter__(self):
+        """Start iteration and preload first batch."""
+        self.loader_iter = iter(self.loader)
+        self._preload()
+        return self
+    
+    def __next__(self):
+        """Get current batch and start preloading next one."""
+        if self.stream is not None:
+            torch.cuda.current_stream().wait_stream(self.stream)
+        
+        batch = self.batch
+        if batch is None:
+            raise StopIteration
+        
+        # Record that tensors are now safe to use on current stream
+        if self.stream is not None and isinstance(batch, dict):
+            for v in batch.values():
+                if isinstance(v, torch.Tensor) and v.is_cuda:
+                    v.record_stream(torch.cuda.current_stream())
+        
+        # Start preloading next batch
+        self._preload()
+        
+        return batch
+    
+    def __len__(self):
+        return len(self.loader)
+
+
 class TeeLogger:
     """Logger that writes to both stdout and a file (encoding-safe for Windows)."""
     def __init__(self, log_path: Path):
@@ -248,9 +325,11 @@ def create_train_loader(
     # OPTIMIZATION: When using cached samples, use num_workers=0
     # Workers need to pickle/unpickle the full dataset which is slow for large caches
     # With cache in main process memory, direct access is faster
+    # GPU stalls are prevented by CUDAPrefetcher which uses a separate CUDA stream
+    # for async data transfer (CPU→GPU overlaps with GPU computation)
     if cache_samples:
         num_workers = 0
-        print("  (Using num_workers=0 for cached samples - faster than multiprocessing)")
+        print("  (Using num_workers=0 for cached samples + CUDAPrefetcher for async GPU transfer)")
     else:
         num_workers = data_cfg.get('num_workers', 0)
     
@@ -823,7 +902,11 @@ def train_epoch(
     consecutive_nan = 0  # Track consecutive NaN for detecting model corruption
     max_consecutive_nan = 10  # Abort if this many consecutive NaN (model is corrupted)
     
-    for batch_idx, batch in enumerate(dataloader):
+    # Wrap dataloader with CUDA prefetcher for async data transfer
+    # This overlaps CPU→GPU transfer with GPU computation, eliminating stalls
+    prefetcher = CUDAPrefetcher(dataloader, device)
+    
+    for batch_idx, batch in enumerate(prefetcher):
         # Apply warmup with per-group LR preservation
         warmup_lr(optimizer, global_step, warmup_steps, base_lr, initial_lrs)
         
@@ -840,14 +923,12 @@ def train_epoch(
         batch_size = batch['test_inputs'].shape[0]
         total_samples += batch_size
         
-        # Move batch to device - handle collated batch format
-        test_inputs = batch['test_inputs'].to(device)
-        test_outputs = batch['test_outputs'].to(device)
-        
-        # Get training context (CRITICAL for ARC learning!)
-        train_inputs = batch['input_grids'].to(device)  # (B, N, H, W)
-        train_outputs = batch['output_grids'].to(device)  # (B, N, H, W)
-        pair_mask = batch['grid_masks'].to(device)  # (B, N)
+        # Batch already on device (prefetcher handles transfer asynchronously)
+        test_inputs = batch['test_inputs']
+        test_outputs = batch['test_outputs']
+        train_inputs = batch['input_grids']   # (B, N, H, W)
+        train_outputs = batch['output_grids']  # (B, N, H, W)
+        pair_mask = batch['grid_masks']        # (B, N)
         
         # Forward pass with optional mixed precision
         if use_amp and scaler is not None:
@@ -1546,15 +1627,17 @@ def evaluate(
     predicate_activation_sum = 0.0
     num_eval_samples = 0
     
+    # Wrap dataloader with CUDA prefetcher for async data transfer
+    prefetcher = CUDAPrefetcher(dataloader, device)
+    
     with torch.no_grad():
-        for batch in dataloader:
-            test_inputs = batch['test_inputs'].to(device)
-            test_outputs = batch['test_outputs'].to(device)
-            
-            # Get training context for proper evaluation
-            train_inputs = batch['input_grids'].to(device)
-            train_outputs = batch['output_grids'].to(device)
-            pair_mask = batch['grid_masks'].to(device)
+        for batch in prefetcher:
+            # Batch already on device (prefetcher handles transfer asynchronously)
+            test_inputs = batch['test_inputs']
+            test_outputs = batch['test_outputs']
+            train_inputs = batch['input_grids']
+            train_outputs = batch['output_grids']
+            pair_mask = batch['grid_masks']
             
             # Predict with SAME temperature as training to avoid distribution shift
             # CRITICAL FIX: Previously used hardcoded 0.1, causing train-eval mismatch
@@ -1838,19 +1921,27 @@ def evaluate_trm_style(
             
             for dihedral_id in range(num_dihedral):
                 for color_idx in range(num_color_perms):
-                    # Apply dihedral to ALL grids (demos + test input)
-                    aug_train_in = [apply_dihedral(g, dihedral_id) for g in train_inputs]
-                    aug_train_out = [apply_dihedral(g, dihedral_id) for g in train_outputs]
-                    aug_test_in = apply_dihedral(test_input, dihedral_id)
+                    # CRITICAL ORDER (matching TRM):
+                    # Forward: color permutation FIRST, then dihedral
+                    # Inverse: inverse_dihedral FIRST, then inverse_color
                     
-                    # Apply color permutation if needed
+                    # Step 1: Apply color permutation FIRST (if any)
                     color_perm = None
+                    color_aug_train_in = train_inputs
+                    color_aug_train_out = train_outputs  
+                    color_aug_test_in = test_input
+                    
                     if color_idx > 0:
                         color_perm = np.arange(10, dtype=np.int64)
                         color_perm[1:] = np.random.permutation(9) + 1
-                        aug_train_in = [color_perm[g] for g in aug_train_in]
-                        aug_train_out = [color_perm[g] for g in aug_train_out]
-                        aug_test_in = color_perm[aug_test_in]
+                        color_aug_train_in = [color_perm[g] for g in train_inputs]
+                        color_aug_train_out = [color_perm[g] for g in train_outputs]
+                        color_aug_test_in = color_perm[test_input]
+                    
+                    # Step 2: Apply dihedral transform SECOND
+                    aug_train_in = [apply_dihedral(g, dihedral_id) for g in color_aug_train_in]
+                    aug_train_out = [apply_dihedral(g, dihedral_id) for g in color_aug_train_out]
+                    aug_test_in = apply_dihedral(color_aug_test_in, dihedral_id)
                     
                     # Pad grids
                     train_in_padded = [pad_grid_for_tta(g, max_size, is_target=False) for g in aug_train_in]

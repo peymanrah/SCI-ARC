@@ -203,8 +203,9 @@ class ConvGRUCell(nn.Module):
         # Update hidden state with residual connection for stability
         h_new = (1 - z) * h + z * h_candidate
         
-        # Clamp to prevent extreme values that cause loss=100
-        h_new = h_new.clamp(-10, 10)
+        # SOFT clamp to prevent extreme values while preserving gradients
+        # Hard clamp kills gradients at boundaries, soft clamp preserves them
+        h_new = soft_clamp(h_new, threshold=8.0, max_val=10.0)
         
         h_new = self.norm(h_new)
         
@@ -270,9 +271,14 @@ class SolverCrossAttention(nn.Module):
     Phase 2.5: Removes the information bottleneck identified in Phase 2 analysis.
     
     Memory Optimization (Dec 2025):
-    - Uses spatial pooling to reduce key/value sequence length
-    - Full 30x30 grid = 900 positions × 10 pairs = 9000 keys → OOM
-    - With pool_size=5: 6x6 grid = 36 positions × 10 pairs = 360 keys → fits in memory
+    - ContextEncoder already downsamples to 8×8 (64 tokens per pair)
+    - With 4 pairs: 4 × 64 = 256 keys (very efficient)
+    - No additional pooling needed!
+    
+    Mathematical Role:
+    - DSC-injected features = GLOBAL prior ("what is this task?")
+    - Solver cross-attention = LOCAL verification ("does my output match?")
+    - These are COMPLEMENTARY, not interfering
     """
     
     def __init__(
@@ -280,7 +286,7 @@ class SolverCrossAttention(nn.Module):
         hidden_dim: int,
         num_heads: int = 4,
         dropout: float = 0.1,
-        pool_size: int = 5,  # Pool support features spatially to reduce memory
+        pool_size: int = 8,  # Match ContextEncoder's spatial_downsample
     ):
         super().__init__()
         
@@ -288,8 +294,10 @@ class SolverCrossAttention(nn.Module):
         self.num_heads = num_heads
         self.pool_size = pool_size
         
-        # Spatial pooling for support features (reduces memory by pool_size^2)
-        self.support_pool = nn.AdaptiveAvgPool2d((6, 6))  # 30x30 → 6x6 = 36 positions
+        # Adaptive pooling to handle variable input sizes
+        # If support features are already 8×8, this is a no-op
+        # If they're larger (e.g., from old config), this downsamples
+        self.support_pool = nn.AdaptiveAvgPool2d((pool_size, pool_size))
         
         # Multi-head cross-attention
         self.cross_attn = nn.MultiheadAttention(
@@ -315,15 +323,24 @@ class SolverCrossAttention(nn.Module):
     def forward(
         self,
         hidden_state: torch.Tensor,       # (B, D, H, W) solver's hidden state
-        support_features: torch.Tensor,   # (B, N, D, H', W') support pair features
+        support_features: torch.Tensor,   # (B, N, D, H', W') support pair features (8×8 from ContextEncoder)
     ) -> torch.Tensor:
         """
         Apply cross-attention from solver hidden state to support features.
         
-        Memory-efficient: pools support features spatially before cross-attention.
+        At each refinement step, the solver can "look back" at the examples to:
+        1. Verify its current hypothesis matches the transformation pattern
+        2. Correct mistakes by comparing with ground truth examples
+        3. Handle multi-step rules where intermediate states need guidance
+        
+        Memory cost per step:
+        - Query: (B, H*W, D) = (8, 900, 256) = 7.4 MB
+        - Key/Value: (B, N*64, D) = (8, 256, 256) = 2.1 MB
+        - Attention: (B, heads, 900, 256) = 7.4 MB
+        - Total: ~17 MB per step × 6 steps = ~100 MB (trivial on 24GB GPU)
         
         Returns:
-            enhanced_state: (B, D, H, W) hidden state enhanced with context
+            enhanced_state: (B, D, H, W) hidden state enhanced with support context
         """
         B, D, H, W = hidden_state.shape
         _, N, D_s, H_s, W_s = support_features.shape
@@ -331,10 +348,10 @@ class SolverCrossAttention(nn.Module):
         # Flatten hidden state to sequence: (B, H*W, D)
         h_flat = hidden_state.permute(0, 2, 3, 1).reshape(B, H * W, D)
         
-        # Pool support features spatially to reduce memory: (B, N, D, H', W') → (B, N, D, 6, 6)
-        # This reduces 900 positions per pair to 36, cutting memory by 25x
+        # Pool support features if needed (usually 8×8 already from ContextEncoder)
+        # This handles variable input sizes gracefully
         support_pooled = support_features.reshape(B * N, D_s, H_s, W_s)
-        support_pooled = self.support_pool(support_pooled)  # (B*N, D, 6, 6)
+        support_pooled = self.support_pool(support_pooled)  # (B*N, D, pool_size, pool_size)
         _, _, H_p, W_p = support_pooled.shape
         support_pooled = support_pooled.reshape(B, N, D_s, H_p, W_p)
         

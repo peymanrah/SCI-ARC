@@ -276,19 +276,23 @@ class ARCDataset(Dataset):
             'translational_offset': (0, 0),
         }
         
-        # Apply dihedral augmentation
-        if self.augment:
-            train_inputs, train_outputs, test_input, test_output, dihedral_id = self._augment_dihedral_tracked(
-                train_inputs, train_outputs, test_input, test_output
-            )
-            aug_info['dihedral_id'] = dihedral_id
+        # CRITICAL ORDER: TRM applies color permutation FIRST, then dihedral
+        # Forward: color_perm → dihedral
+        # Inverse: inverse_dihedral → inverse_color
         
-        # Apply color permutation
+        # Step 1: Apply color permutation FIRST (like TRM)
         if self.color_permutation and random.random() < self.color_permutation_prob:
             train_inputs, train_outputs, test_input, test_output, color_perm = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )
             aug_info['color_perm'] = color_perm  # Store actual array for inverse!
+        
+        # Step 2: Apply dihedral augmentation SECOND (like TRM)
+        if self.augment:
+            train_inputs, train_outputs, test_input, test_output, dihedral_id = self._augment_dihedral_tracked(
+                train_inputs, train_outputs, test_input, test_output
+            )
+            aug_info['dihedral_id'] = dihedral_id
         
         # Compute translational offset
         offset = None
@@ -365,20 +369,23 @@ class ARCDataset(Dataset):
             'translational_offset': (0, 0),
         }
         
-        # Apply dihedral augmentation (rotation, flip, transpose)
-        if self.augment:
-            train_inputs, train_outputs, test_input, test_output, dihedral_id = self._augment_dihedral_tracked(
-                train_inputs, train_outputs, test_input, test_output
-            )
-            aug_info['dihedral_id'] = dihedral_id
+        # CRITICAL ORDER: TRM applies color permutation FIRST, then dihedral
+        # Forward: color_perm → dihedral
+        # Inverse: inverse_dihedral → inverse_color
         
-        # Apply color permutation (9! = 362,880 possibilities)
-        # Use color_permutation_prob to control frequency (100% can break color learning!)
+        # Step 1: Apply color permutation FIRST (like TRM)
         if self.color_permutation and random.random() < self.color_permutation_prob:
             train_inputs, train_outputs, test_input, test_output, color_perm = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )
             aug_info['color_perm'] = color_perm  # Store actual array for inverse!
+        
+        # Step 2: Apply dihedral augmentation SECOND (like TRM)
+        if self.augment:
+            train_inputs, train_outputs, test_input, test_output, dihedral_id = self._augment_dihedral_tracked(
+                train_inputs, train_outputs, test_input, test_output
+            )
+            aug_info['dihedral_id'] = dihedral_id
         
         # Compute random translational offset (shared across all grids in this sample)
         # TRM-style: random position within 30×30 canvas
