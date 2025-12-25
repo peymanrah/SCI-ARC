@@ -26,6 +26,14 @@ from .ema import (
     EMAHelper,
     EMAWrapper,
 )
+from .loss_logger import (
+    LossLogger,
+    LossStats,
+)
+from .hyperlora_training import (
+    HyperLoRATrainer,
+    HyperLoRATrainingConfig,
+)
 
 __all__ = [
     # RLAN Loss
@@ -42,4 +50,10 @@ __all__ = [
     # EMA
     'EMAHelper',
     'EMAWrapper',
+    # Loss Logger
+    'LossLogger',
+    'LossStats',
+    # HyperLoRA Training
+    'HyperLoRATrainer',
+    'HyperLoRATrainingConfig',
 ]

@@ -40,7 +40,7 @@ sys.path.insert(0, str(project_root))
 
 from sci_arc.models import RLAN
 from sci_arc.data import ARCDataset
-from sci_arc.data.dataset import collate_fn  # CRITICAL: Use same collate as training!
+from sci_arc.data.dataset import collate_sci_arc  # CRITICAL: Use same collate as training!
 from sci_arc.evaluation import (
     pixel_accuracy,
     task_accuracy,
@@ -113,16 +113,30 @@ def inverse_dihedral_transform(grid: torch.Tensor, tid: int) -> torch.Tensor:
 
 
 def apply_color_permutation(grid: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
-    """Apply color permutation to grid. perm[old_color] = new_color."""
-    # perm is shape (10,) mapping old color to new color
-    return perm[grid.long()]
+    """Apply color permutation to grid. perm[old_color] = new_color.
+    
+    CRITICAL: Handles PAD_COLOR=10 and ignore_index=-100 safely by leaving them unchanged.
+    """
+    # perm is shape (10,) mapping old color to new color (colors 0-9 only)
+    result = grid.clone()
+    # Only permute valid color values (0-9)
+    valid_mask = (grid >= 0) & (grid <= 9)
+    result[valid_mask] = perm[grid[valid_mask].long()]
+    return result
 
 
 def inverse_color_permutation(grid: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
-    """Apply inverse of color permutation."""
+    """Apply inverse of color permutation.
+    
+    CRITICAL: Handles PAD_COLOR=10 and ignore_index=-100 safely by leaving them unchanged.
+    """
     # Create inverse permutation: inv_perm[new_color] = old_color
     inv_perm = torch.argsort(perm)
-    return inv_perm[grid.long()]
+    result = grid.clone()
+    # Only permute valid color values (0-9)
+    valid_mask = (grid >= 0) & (grid <= 9)
+    result[valid_mask] = inv_perm[grid[valid_mask].long()]
+    return result
 
 
 def generate_color_permutation(device: torch.device) -> torch.Tensor:
@@ -406,22 +420,50 @@ def save_detailed_predictions(
     return detail
 
 
-def trim_grid(grid: np.ndarray) -> np.ndarray:
+# Padding constants (must match sci_arc/data/dataset.py)
+PAD_COLOR = 10  # Input grid padding
+PADDING_IGNORE_VALUE = -100  # Target grid padding (ignore_index for loss)
+
+
+def trim_grid(grid: np.ndarray, is_target: bool = True) -> np.ndarray:
     """
     Trim padding from grid by finding actual content bounds.
     
-    Removes trailing zeros (padding) from both dimensions.
+    Handles two padding schemes:
+    - Target grids: padded with -100 (PADDING_IGNORE_VALUE)
+    - Input grids: padded with 10 (PAD_COLOR)
+    
+    Args:
+        grid: The grid to trim
+        is_target: If True, treats -100 as padding; if False, treats 10 as padding
+    
+    Returns:
+        Trimmed grid with padding removed
     """
     if grid.size == 0:
         return grid
     
-    # Find rows with any non-zero
-    row_mask = np.any(grid != 0, axis=1)
-    if not row_mask.any():
-        return grid[:1, :1]  # All zeros - return minimal grid
+    # Determine padding value based on grid type
+    if is_target:
+        # Target grids: -100 is padding, 0-9 are valid colors
+        content_mask = (grid != PADDING_IGNORE_VALUE)
+    else:
+        # Input grids: 10 is padding, 0-9 are valid colors
+        content_mask = (grid != PAD_COLOR)
     
-    # Find columns with any non-zero
-    col_mask = np.any(grid != 0, axis=0)
+    # Find rows with any content
+    row_mask = np.any(content_mask, axis=1)
+    if not row_mask.any():
+        # No content found - return minimal grid
+        # For all-zeros grid, return the single cell (valid content)
+        if is_target and np.any(grid != PADDING_IGNORE_VALUE):
+            return grid[:1, :1]
+        elif not is_target and np.any(grid != PAD_COLOR):
+            return grid[:1, :1]
+        return grid[:1, :1]
+    
+    # Find columns with any content
+    col_mask = np.any(content_mask, axis=0)
     if not col_mask.any():
         return grid[:1, :1]
     
@@ -669,7 +711,7 @@ def evaluate_model(
             
             # Trim prediction for regular metrics
             pred_trimmed = pred_np[:target_trimmed.shape[0], :target_trimmed.shape[1]]
-            input_trimmed = trim_grid(input_np)
+            input_trimmed = trim_grid(input_np, is_target=False)
             
             # Check correctness (Pass@1)
             is_correct = np.array_equal(pred_trimmed, target_trimmed)
@@ -712,8 +754,8 @@ def evaluate_model(
                 target_np = test_outputs[i].cpu().numpy()
                 pred_np = predictions[i].cpu().numpy()
                 
-                input_trimmed = trim_grid(input_np)
-                target_trimmed = trim_grid(target_np)
+                input_trimmed = trim_grid(input_np, is_target=False)
+                target_trimmed = trim_grid(target_np, is_target=True)
                 pred_trimmed = pred_np[:target_trimmed.shape[0], :target_trimmed.shape[1]]
                 
                 try:
@@ -853,8 +895,8 @@ def main():
                         help='Device to use (cuda/cpu)')
     parser.add_argument('--batch-size', type=int, default=16,
                         help='Batch size for evaluation')
-    parser.add_argument('--temperature', type=float, default=0.1,
-                        help='Temperature for softmax (lower = sharper, use same as training end)')
+    parser.add_argument('--temperature', type=float, default=0.5,
+                        help='Temperature for softmax (default 0.5 matches training/inference defaults)')
     
     # =============================================================
     # BEST-STEP SELECTION & SOLVER OVERRIDE (Dec 2025)
@@ -978,7 +1020,7 @@ def main():
         batch_size=args.batch_size, 
         shuffle=False, 
         num_workers=0,
-        collate_fn=collate_fn,  # MUST use for context encoder to work!
+        collate_fn=collate_sci_arc,  # MUST use for context encoder to work!
     )
     
     print(f"Evaluating on {len(dataset)} tasks")

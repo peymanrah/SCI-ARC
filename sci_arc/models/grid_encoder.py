@@ -304,7 +304,12 @@ class PatchGridEncoder(nn.Module):
     encodes each patch. This can be more efficient for larger grids.
     
     Not used by default but provided as an alternative.
+    
+    Note: Handles PAD_COLOR=10 by using 11 classes for one-hot encoding.
     """
+    
+    # Padding color index (must match dataset.py PAD_COLOR)
+    PAD_COLOR = 10
     
     def __init__(
         self,
@@ -317,10 +322,13 @@ class PatchGridEncoder(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.patch_size = patch_size
+        self.num_colors = num_colors
+        # +1 for padding token (PAD_COLOR=10)
+        self.num_embeddings = num_colors + 1
         
-        # One-hot encode colors, then conv to embed patches
+        # One-hot encode colors (including padding), then conv to embed patches
         self.patch_embed = nn.Conv2d(
-            num_colors,  # One channel per color (one-hot)
+            self.num_embeddings,  # One channel per color (one-hot) including padding
             hidden_dim,
             kernel_size=patch_size,
             stride=patch_size,
@@ -340,16 +348,19 @@ class PatchGridEncoder(nn.Module):
         Encode grid using patches.
         
         Args:
-            grid: [B, H, W] integer tensor
+            grid: [B, H, W] integer tensor with values 0-9 (colors) or 10 (padding)
         
         Returns:
             embeddings: [B, H//patch, W//patch, hidden_dim]
         """
         B, H, W = grid.shape
         
-        # One-hot encode colors
-        one_hot = F.one_hot(grid.long(), num_classes=10)  # [B, H, W, 10]
-        one_hot = one_hot.permute(0, 3, 1, 2).float()  # [B, 10, H, W]
+        # Clamp grid values to valid range (0-10, where 10 is padding token)
+        grid = grid.clamp(0, self.num_embeddings - 1)
+        
+        # One-hot encode colors (11 classes: 0-9 colors + 10 padding)
+        one_hot = F.one_hot(grid.long(), num_classes=self.num_embeddings)  # [B, H, W, 11]
+        one_hot = one_hot.permute(0, 3, 1, 2).float()  # [B, 11, H, W]
         
         # Patch embedding via convolution
         patches = self.patch_embed(one_hot)  # [B, D, H//p, W//p]

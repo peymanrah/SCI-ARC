@@ -101,13 +101,15 @@ def crop_prediction(pred: np.ndarray, pad_value: int = 10) -> np.ndarray:
     
     Similar to TRM's _crop but works with our padding scheme (pad_value=10).
     Finds the largest rectangle without padding.
+    
+    CRITICAL: Also excludes -100 (ignore_index) from content mask.
     """
     # Find rows and cols that contain actual content (not padding)
     if pred.ndim == 1:
         pred = pred.reshape(30, 30)  # Assume max ARC size
     
-    # Mask of non-padding positions
-    content_mask = (pred != pad_value)
+    # Mask of non-padding positions (exclude both pad_value=10 and ignore_index=-100)
+    content_mask = (pred != pad_value) & (pred != -100)
     
     if not content_mask.any():
         return np.array([[0]])  # Empty prediction
@@ -220,19 +222,14 @@ class TRMStyleEvaluator:
         self._hash_to_grid[pred_hash] = pred_canonical
         
         # Step 5: Store ground truth (in canonical space)
-        # Apply same inverse transform to ground truth as we did to prediction
+        # CRITICAL FIX: ground_truth is already in CANONICAL space (per docstring),
+        # so we should NOT apply inverse transforms to it!
+        # Only crop to remove padding.
         gt_cropped = crop_prediction(ground_truth, self.pad_value)
-        gt_canonical = gt_cropped.copy()
         
-        if dihedral_id != 0:
-            gt_canonical = inverse_dihedral_transform(gt_canonical, dihedral_id)
-        if color_perm is not None:
-            gt_canonical = inverse_color_permutation(gt_canonical, color_perm)
-        
-        gt_hash = grid_hash(gt_canonical)
         if task_id not in self._ground_truths:
             self._ground_truths[task_id] = {}
-        self._ground_truths[task_id][input_hash] = gt_canonical
+        self._ground_truths[task_id][input_hash] = gt_cropped
         
     def update_batch(
         self,

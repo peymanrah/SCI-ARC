@@ -33,7 +33,7 @@ Example Usage:
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Union, List, Tuple
+from typing import Dict, Optional, Union, List, Tuple, Any
 
 import torch
 import torch.nn as nn
@@ -49,47 +49,36 @@ from sci_arc.models.rlan_modules import (
     ContextEncoder,
     ContextInjector,
     CrossAttentionInjector,
+    HyperLoRA,
+    HyperLoRAConfig,
 )
+from sci_arc.models.rlan_modules.acw import AugmentedConfidenceWeighting, apply_augmentation
 
 
 @dataclass
 class RLANConfig:
-    """Configuration for RLAN model."""
+    """Configuration for RLAN model.
+    
+    IMPORTANT: Each field should only be defined ONCE to avoid dataclass override issues.
+    """
     
     # Core dimensions
     hidden_dim: int = 128
     num_colors: int = 10
-    num_classes: int = 10
+    num_classes: int = 10  # 10 colors (0-9), no boundary markers needed
     max_grid_size: int = 30
     
     # Module flags
-    use_context_encoder: bool = True
-    use_dsc: bool = True
-    use_msre: bool = True
-    use_lcr: bool = False
-    use_act: bool = False
+    use_context_encoder: bool = True   # Encode training pairs (4.2M params)
+    use_dsc: bool = True               # Dynamic Saliency Controller (266K)
+    use_msre: bool = True              # Multi-Scale Relative Encoding (109K)
+    use_lcr: bool = False              # Latent Counting Registers (403K)
+    use_sph: bool = False              # Symbolic Predicate Heads (232K)
+    use_act: bool = False              # Adaptive Computation Time
     
     # Context settings
     use_cross_attention_context: bool = False
     spatial_downsample: int = 1
-    
-    # Hyperparameters
-    max_clues: int = 5
-    num_predicates: int = 16
-    num_solver_steps: int = 3
-    dropout: float = 0.1
-    
-    # Heads
-    dsc_num_heads: int = 4
-    lcr_num_heads: int = 4
-    
-    # Encodings
-    msre_encoding_dim: int = 32
-    msre_num_freq: int = 8
-    lcr_num_freq: int = 8
-    num_colors: int = 10
-    num_classes: int = 10  # 10 colors (0-9), no boundary markers needed
-    max_grid_size: int = 30
     
     # DSC parameters
     max_clues: int = 5
@@ -104,42 +93,27 @@ class RLANConfig:
     lcr_num_heads: int = 4
     
     # SPH parameters
-    num_predicates: int = 8
+    num_predicates: int = 16
     
     # Solver parameters
     num_solver_steps: int = 6
-    use_act: bool = False  # Adaptive Computation Time
     use_solver_feedback: bool = False  # Use prediction feedback in solver (disabled - argmax breaks gradients)
     use_solver_context: bool = True  # Phase 2.5: Solver cross-attention to support set
     solver_context_heads: int = 4  # Number of attention heads for solver cross-attention
     use_best_step_selection: bool = False  # Phase 3: Select best step by loss (train) or entropy (eval)
     
-    # Context settings
-    use_cross_attention_context: bool = False
-    spatial_downsample: int = 1
+    # HyperLoRA settings (meta-learning weight adaptation)
+    use_hyperlora: bool = False
+    hyperlora_rank: int = 8
+    hyperlora_scaling: float = 1.0
+    hyperlora_dropout: float = 0.0
+    hyperlora_init_scale: float = 0.01
     
     # Training parameters
     dropout: float = 0.1
     
-    # =============================================================
-    # MODULE ABLATION FLAGS
-    # =============================================================
-    # Enable/disable individual modules for ablation studies
-    # When disabled, modules output zeros or identity transformations
-    #
-    # RLAN Novelty Analysis:
-    #   - DSC + MSRE: Core novelty (spatial anchoring + relative coords)
-    #   - ContextEncoder: Critical but has bottleneck issue
-    #   - LCR + SPH: Auxiliary (nice-to-have, not core)
-    # =============================================================
-    use_context_encoder: bool = True   # Encode training pairs (4.2M params)
-    use_dsc: bool = True               # Dynamic Saliency Controller (266K)
-    use_msre: bool = True              # Multi-Scale Relative Encoding (109K)
-    use_lcr: bool = True               # Latent Counting Registers (403K)
-    use_sph: bool = True               # Symbolic Predicate Heads (232K)
-    
     # Positional encoding option
-    use_learned_pos: bool = False       # Use learned pos embed vs sinusoidal (default)
+    use_learned_pos: bool = False  # Use learned pos embed vs sinusoidal (default)
 
 
 class RLAN(nn.Module):
@@ -246,6 +220,13 @@ class RLAN(nn.Module):
         use_cross_attn_context = config.use_cross_attention_context if config and hasattr(config, 'use_cross_attention_context') else False
         spatial_downsample = config.spatial_downsample if config and hasattr(config, 'spatial_downsample') else 1
         
+        # CRITICAL FIX: Need spatial features if EITHER:
+        # 1. CrossAttentionInjector is used (use_cross_attention_context=True)
+        # 2. Solver cross-attention to support set is used (use_solver_context=True)
+        # Both modes need (B, N, D, H, W) spatial features from ContextEncoder
+        use_solver_context_flag = config.use_solver_context if config else True
+        needs_spatial_features = use_cross_attn_context or use_solver_context_flag
+        
         if self.use_context_encoder:
             self.context_encoder = ContextEncoder(
                 hidden_dim=hidden_dim,
@@ -254,7 +235,7 @@ class RLAN(nn.Module):
                 max_pairs=5,  # ARC has 2-5 training pairs
                 num_heads=config.dsc_num_heads if config else 4,
                 dropout=dropout,
-                use_spatial_features=use_cross_attn_context,  # Only for cross-attention mode
+                use_spatial_features=needs_spatial_features,  # Spatial features for cross-attn OR solver context
                 spatial_downsample=spatial_downsample,        # Downsample support features
             )
             if use_cross_attn_context:
@@ -336,6 +317,21 @@ class RLAN(nn.Module):
             num_context_heads=config.solver_context_heads if config else 4,
         )
         
+        # HyperLoRA for meta-learning weight adaptation (optional)
+        self.use_hyperlora = config.use_hyperlora if config else False
+        if self.use_hyperlora:
+            hyperlora_config = HyperLoRAConfig(
+                hidden_dim=hidden_dim,
+                context_dim=hidden_dim,
+                rank=config.hyperlora_rank if config else 8,
+                scaling=config.hyperlora_scaling if config else 1.0,
+                dropout=config.hyperlora_dropout if config else 0.0,
+                init_scale=config.hyperlora_init_scale if config else 0.01,
+            )
+            self.hyper_lora = HyperLoRA(config=hyperlora_config)
+        else:
+            self.hyper_lora = None
+        
         # Print module configuration
         enabled = []
         disabled = []
@@ -347,6 +343,7 @@ class RLAN(nn.Module):
             ('SPH', self.use_sph),
             ('ACT', self.use_act),
             ('SolverContext', self.use_solver_context),  # Phase 2.5
+            ('HyperLoRA', self.use_hyperlora),  # Meta-learning
         ]:
             (enabled if flag else disabled).append(name)
         
@@ -435,9 +432,18 @@ class RLAN(nn.Module):
                 # ContextEncoder returns (B, D) for FiLM or (B, N, D, H, W) for cross-attention
                 # depending on use_spatial_features flag
                 if self.context_encoder.use_spatial_features:
-                    # Cross-attention mode: spatial features
-                    support_features = context_output  # Keep for solver if enabled
-                    features = self.context_injector(features, context_output)
+                    # Spatial features mode: (B, N, D, H, W)
+                    support_features = context_output  # Keep for solver cross-attention
+                    
+                    # Check what kind of injector we have
+                    if isinstance(self.context_injector, CrossAttentionInjector):
+                        # CrossAttentionInjector: pass spatial features directly
+                        features = self.context_injector(features, context_output)
+                    else:
+                        # FiLM injector: pool spatial features to context vector
+                        # This happens when use_solver_context=True but use_cross_attention_context=False
+                        context = self.pool_context_from_support(context_output)  # (B, D)
+                        features = self.context_injector(features, context)
                 else:
                     # FiLM mode: compressed context vector
                     context = context_output  # (B, D)
@@ -490,6 +496,31 @@ class RLAN(nn.Module):
             # Using zeros instead of empty() to avoid inf/nan garbage values
             predicates = torch.zeros(B, self.num_predicates, device=features.device)
         
+        # 6.5. HyperLoRA - compute task-specific weight adaptations (if enabled)
+        # CRITICAL FIX: This must be called BEFORE solver so LoRA weights are used!
+        lora_deltas = None
+        if self.use_hyperlora and self.hyper_lora is not None:
+            if support_features is not None:
+                # HyperLoRA expects (B, N, D, H, W) and returns weight deltas
+                lora_deltas = self.hyper_lora(support_features)
+            else:
+                # HyperLoRA is enabled but no spatial support features available
+                # This can happen if:
+                # 1. use_cross_attention_context=False and use_solver_context=False
+                # 2. No train_inputs/train_outputs provided
+                # Log warning on first occurrence to help debugging
+                if not hasattr(self, '_hyperlora_warned'):
+                    import warnings
+                    warnings.warn(
+                        "[HyperLoRA] Enabled but no spatial support_features available. "
+                        "LoRA weights will NOT be applied. Ensure use_solver_context=True or "
+                        "use_cross_attention_context=True, and provide train_inputs/train_outputs.",
+                        UserWarning
+                    )
+                    self._hyperlora_warned = True
+            # Note: If no support_features, lora_deltas stays None and solver
+            # runs without adaptation (backward compatible behavior)
+        
         # 7. Recursive Solver - generate output
         # CRITICAL: Pass stop_logits to solver for clue aggregation weighting
         # This creates gradient flow: task_loss -> stop_probs -> stop_predictor
@@ -508,6 +539,7 @@ class RLAN(nn.Module):
                 return_all_steps=True,
                 return_act_outputs=return_intermediates and self.use_act,
                 num_steps_override=num_steps_override,
+                lora_deltas=lora_deltas,  # HyperLoRA weight adaptations
             )
             # Handle ACT outputs if returned
             if isinstance(solver_output, tuple):
@@ -526,6 +558,7 @@ class RLAN(nn.Module):
                 support_features=support_features,  # Phase 2.5: Solver cross-attention
                 return_all_steps=False,
                 num_steps_override=num_steps_override,
+                lora_deltas=lora_deltas,  # HyperLoRA weight adaptations
             )
             all_logits = None
         
@@ -542,6 +575,8 @@ class RLAN(nn.Module):
             }
             if support_features is not None:
                 result["support_features"] = support_features
+            if lora_deltas is not None:
+                result["lora_deltas"] = lora_deltas
             if act_outputs is not None:
                 result["act_outputs"] = act_outputs
             # Add DSC diagnostics if available
@@ -553,12 +588,229 @@ class RLAN(nn.Module):
         else:
             return logits
     
+    def pool_context_from_support(
+        self,
+        support_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Pool context vector from support features.
+        
+        Args:
+            support_features: Shape (B, N, D, Hs, Ws) encoded support features
+            
+        Returns:
+            context: Shape (B, D) pooled context vector
+        """
+        # Global average pool across pairs and spatial dims
+        return support_features.mean(dim=(1, 3, 4))  # (B, D)
+    
+    def forward_with_lora(
+        self,
+        input_grid: torch.Tensor,
+        support_features: torch.Tensor,
+        lora_deltas: Dict[str, torch.Tensor],
+        temperature: float = 1.0,
+    ) -> torch.Tensor:
+        """
+        Forward pass with explicit LoRA weight deltas.
+        
+        Used by LOO training where we want to test generalization
+        using LoRA weights predicted from a subset of examples.
+        
+        Args:
+            input_grid: Shape (B, H, W) input grid
+            support_features: Shape (B, N, D, Hs, Ws) encoded support features
+            lora_deltas: Dict of LoRA weight deltas from HyperLoRA
+            temperature: Softmax temperature
+            
+        Returns:
+            logits: Shape (B, num_classes, H, W) output logits
+        """
+        B, H, W = input_grid.shape
+        
+        # 1. Encode grid
+        features = self.encode(input_grid)  # (B, D, H, W)
+        
+        # Compute valid mask and grid sizes
+        valid_mask = self.encoder.get_valid_mask(input_grid)
+        grid_sizes = self.encoder.get_grid_sizes(input_grid)
+        
+        # 2. Apply cross-attention context injection if we have spatial features
+        if self.context_injector is not None and isinstance(self.context_injector, CrossAttentionInjector):
+            features = self.context_injector(features, support_features)
+        
+        # 3. DSC - find clue anchors
+        if self.use_dsc and self.dsc is not None:
+            centroids, attention_maps, stop_logits = self.dsc(
+                features, temperature=temperature, mask=valid_mask
+            )
+        else:
+            K = self.max_clues
+            centroids = torch.zeros(B, K, 2, device=features.device)
+            centroids[:, :, 0] = H / 2
+            centroids[:, :, 1] = W / 2
+            attention_maps = torch.ones(B, K, H, W, device=features.device) / (H * W)
+            stop_logits = torch.zeros(B, K, device=features.device)
+        
+        # 4. MSRE - relative encodings
+        if self.use_msre and self.msre is not None:
+            clue_features = self.msre(features, centroids, grid_sizes=grid_sizes)
+        else:
+            clue_features = features.unsqueeze(1).expand(-1, self.max_clues, -1, -1, -1)
+        
+        # 5. LCR - counting
+        if self.use_lcr and self.lcr is not None:
+            count_embedding = self.lcr(
+                input_grid, features, mask=valid_mask, attention_maps=attention_maps
+            )
+        else:
+            count_embedding = torch.zeros(
+                B, self.num_colors, self.hidden_dim, device=features.device
+            )
+        
+        # 6. SPH - predicates
+        if self.use_sph and self.sph is not None:
+            predicates = self.sph(features, temperature=temperature)
+        else:
+            predicates = torch.zeros(B, self.num_predicates, device=features.device)
+        
+        # 7. Solver with LoRA modulation
+        logits = self.solver(
+            clue_features=clue_features,
+            count_embedding=count_embedding,
+            predicates=predicates,
+            input_grid=input_grid,
+            attention_maps=attention_maps,
+            stop_logits=stop_logits,
+            support_features=support_features,
+            return_all_steps=False,
+            lora_deltas=lora_deltas,  # Pass LoRA weights to solver
+        )
+        
+        return logits
+    
+    def verify_lora_on_support(
+        self,
+        support_inputs: torch.Tensor,  # (B, N, H, W) or (B, N, C, H, W)
+        support_targets: torch.Tensor,  # (B, N, H, W)
+        support_features: torch.Tensor,  # (B, N, D, Hs, Ws)
+        lora_deltas: Dict[str, torch.Tensor],
+        threshold: float = 0.9,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Verify that LoRA weights work on the support set (sanity check).
+        
+        This is the LOO Sanity Check - if predicted LoRA weights can't
+        even get >90% accuracy on the training examples, we shouldn't
+        use them for the test example.
+        
+        Args:
+            support_inputs: Support set input grids
+            support_targets: Support set target grids
+            support_features: Encoded support features
+            lora_deltas: Predicted LoRA weight deltas
+            threshold: Minimum accuracy to accept LoRA weights
+            
+        Returns:
+            Tuple of (pass_mask, metrics)
+            - pass_mask: (B,) boolean tensor - True if sample passes
+            - metrics: Dict with accuracy, per-sample scores
+        """
+        B, N = support_targets.shape[:2]
+        device = support_targets.device
+        
+        total_correct = 0
+        total_pixels = 0
+        per_sample_accuracy = []
+        
+        with torch.no_grad():
+            for pair_idx in range(N):
+                # Get this pair
+                if support_inputs.dim() == 5:
+                    pair_input = support_inputs[:, pair_idx, 0]  # (B, H, W)
+                else:
+                    pair_input = support_inputs[:, pair_idx]  # (B, H, W)
+                pair_target = support_targets[:, pair_idx]  # (B, H, W)
+                
+                # Predict with LoRA
+                logits = self.forward_with_lora(
+                    pair_input, support_features, lora_deltas
+                )
+                preds = logits.argmax(dim=1)  # (B, H, W)
+                
+                # Compute accuracy - CRITICAL FIX: mask out ignore_index (-100)
+                valid_mask = (pair_target != -100)
+                correct = ((preds == pair_target) & valid_mask).float()
+                total_correct += correct.sum(dim=(1, 2))  # (B,)
+                total_pixels += valid_mask.sum(dim=(1, 2)).float()  # Only count valid pixels
+        
+        # Per-sample accuracy across all pairs
+        per_sample_accuracy = total_correct / total_pixels  # (B,)
+        pass_mask = per_sample_accuracy >= threshold
+        
+        metrics = {
+            'sanity_check_accuracy': per_sample_accuracy.mean().item(),
+            'sanity_check_pass_rate': pass_mask.float().mean().item(),
+            'sanity_check_threshold': threshold,
+        }
+        
+        return pass_mask, metrics
+
+    def inference(
+        self,
+        input_grid: torch.Tensor,
+        train_inputs: Optional[torch.Tensor] = None,
+        train_outputs: Optional[torch.Tensor] = None,
+        voting_method: str = 'hybrid',
+        num_color_perms: int = 4,
+        temperature: float = 0.5,  # CRITICAL: Match training temperature, not 0.1!
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Primary inference method - uses Hybrid voting by default.
+        
+        This is the recommended method for production inference.
+        Uses Test-Time Augmentation (8 dihedral × num_color_perms views)
+        and votes using the specified method.
+        
+        Args:
+            input_grid: (B, H, W) input grid
+            train_inputs: (B, N, H, W) support inputs
+            train_outputs: (B, N, H, W) support outputs
+            voting_method: 'hybrid' (default), 'acw', or 'trm'
+            num_color_perms: Color permutations per dihedral (default: 4)
+            temperature: Softmax temperature
+            
+        Returns:
+            prediction: (B, H, W) final prediction
+            info: Dict with voting details
+        """
+        if voting_method == 'hybrid':
+            return self.predict_with_hybrid(
+                input_grid, train_inputs, train_outputs,
+                num_color_perms=num_color_perms, temperature=temperature
+            )
+        elif voting_method == 'acw':
+            return self.predict_with_acw(
+                input_grid, train_inputs, train_outputs,
+                num_color_perms=num_color_perms, temperature=temperature
+            )
+        elif voting_method == 'trm':
+            # TRM-style: use ACW but return based on raw counts
+            pred, info = self.predict_with_acw(
+                input_grid, train_inputs, train_outputs,
+                num_color_perms=num_color_perms, temperature=temperature
+            )
+            info['voting_method'] = 'trm'
+            return pred, info
+        else:
+            raise ValueError(f"Unknown voting_method: {voting_method}")
+
     def predict(
         self,
         input_grid: torch.Tensor,
         train_inputs: Optional[torch.Tensor] = None,
         train_outputs: Optional[torch.Tensor] = None,
-        temperature: float = 0.1,
+        temperature: float = 0.5,  # CRITICAL: Match training temperature, not 0.1!
         num_steps_override: Optional[int] = None,
     ) -> torch.Tensor:
         """
@@ -609,6 +861,256 @@ class RLAN(nn.Module):
                 )
             prediction = logits.argmax(dim=1)
         return prediction
+
+    def predict_with_acw(
+        self,
+        input_grid: torch.Tensor,
+        train_inputs: Optional[torch.Tensor] = None,
+        train_outputs: Optional[torch.Tensor] = None,
+        augmentations: Optional[List[str]] = None,
+        num_color_perms: int = 4,
+        temperature: float = 0.5,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Predict using Augmented Confidence Weighting (ACW).
+        
+        Generates predictions for multiple augmented views of the input,
+        then aggregates them using consistency-weighted voting.
+        
+        MATCHES training evaluation (evaluate_trm_style):
+        - Forward: color permutation FIRST, then dihedral transform
+        - Inverse: inverse dihedral FIRST, then inverse color
+        
+        Args:
+            input_grid: (B, H, W) input grid
+            train_inputs: (B, N, H, W) support inputs
+            train_outputs: (B, N, H, W) support outputs
+            augmentations: List of dihedral augmentations (default: all 8 symmetries)
+            num_color_perms: Number of color permutations per dihedral (default: 4)
+            temperature: Softmax temperature for prediction
+            
+        Returns:
+            winner: (B, H, W) consensus prediction
+            info: Dict with voting details
+        """
+        if augmentations is None:
+            augmentations = [
+                'identity', 'rotate_90', 'rotate_180', 'rotate_270',
+                'flip_h', 'flip_v', 'transpose', 'transpose_neg'
+            ]
+            
+        B, H, W = input_grid.shape
+        device = input_grid.device
+        all_predictions = []
+        
+        self.eval()
+        with torch.no_grad():
+            # Run prediction for each color permutation × dihedral augmentation
+            for color_idx in range(num_color_perms):
+                # Step 1: Apply color permutation FIRST (matching TRM-style order)
+                if color_idx == 0:
+                    color_perm = None  # Identity permutation
+                    color_input = input_grid
+                    color_train_inputs = train_inputs
+                    color_train_outputs = train_outputs
+                else:
+                    # Generate random color permutation (keep 0=black fixed, keep 10=PAD fixed)
+                    # CRITICAL: Use 11 entries to handle PAD_COLOR=10 in padded grids
+                    color_perm = torch.arange(11, device=device)
+                    shuffled = torch.randperm(9, device=device) + 1
+                    color_perm[1:10] = shuffled  # Only permute colors 1-9, keep 0 and 10 fixed
+                    
+                    # Apply to all grids (clamp to valid range for safety)
+                    color_input = color_perm[input_grid.clamp(0, 10).long()]
+                    if train_inputs is not None:
+                        color_train_inputs = color_perm[train_inputs.long()]
+                        color_train_outputs = color_perm[train_outputs.long()]
+                    else:
+                        color_train_inputs = None
+                        color_train_outputs = None
+                
+                for aug in augmentations:
+                    # Step 2: Apply dihedral transform SECOND
+                    aug_input = apply_augmentation(color_input, aug)
+                    
+                    # Augment support set if provided
+                    aug_train_inputs = None
+                    aug_train_outputs = None
+                    if color_train_inputs is not None and color_train_outputs is not None:
+                        # train_inputs is (B, N, H, W)
+                        N = color_train_inputs.shape[1]
+                        aug_train_inputs = torch.stack([
+                            apply_augmentation(color_train_inputs[:, i], aug) for i in range(N)
+                        ], dim=1)
+                        aug_train_outputs = torch.stack([
+                            apply_augmentation(color_train_outputs[:, i], aug) for i in range(N)
+                        ], dim=1)
+                    
+                    # Step 3: Predict
+                    pred = self.predict(
+                        aug_input, 
+                        train_inputs=aug_train_inputs, 
+                        train_outputs=aug_train_outputs,
+                        temperature=temperature
+                    )
+                    
+                    # Step 4: Inverse dihedral FIRST (CRITICAL: before inverse color!)
+                    inv_dihedral = apply_augmentation(pred, aug, inverse=True)
+                    
+                    # Step 5: Inverse color permutation SECOND
+                    if color_perm is not None:
+                        inv_color_perm = torch.argsort(color_perm)
+                        inv_pred = inv_color_perm[inv_dihedral.long()]
+                    else:
+                        inv_pred = inv_dihedral
+                    
+                    all_predictions.append(inv_pred)
+            
+        # Vote per sample
+        winners = []
+        batch_info = []
+        
+        acw = AugmentedConfidenceWeighting()
+        
+        for b in range(B):
+            # Collect predictions for this sample
+            sample_preds = [p[b] for p in all_predictions]
+            
+            # Perform weighted vote
+            winner, candidates = acw.weighted_vote(sample_preds)
+            winners.append(winner)
+            batch_info.append(candidates)
+        
+        total_views = len(augmentations) * num_color_perms
+        return torch.stack(winners), {
+            'candidates': batch_info,
+            'num_dihedral': len(augmentations),
+            'num_color_perms': num_color_perms,
+            'total_views': total_views,
+            'voting_method': 'acw',
+        }
+
+    def predict_with_hybrid(
+        self,
+        input_grid: torch.Tensor,
+        train_inputs: Optional[torch.Tensor] = None,
+        train_outputs: Optional[torch.Tensor] = None,
+        augmentations: Optional[List[str]] = None,
+        num_color_perms: int = 4,
+        temperature: float = 0.5,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Predict using Hybrid voting (TRM + ACW ensemble).
+        
+        Uses both TRM-style count voting and ACW consistency-weighted voting.
+        When they agree → high confidence
+        When they disagree → use ACW (more robust to noise)
+        
+        This provides the best of both worlds:
+        - TRM: Simple, deterministic, reproducible
+        - ACW: Better at filtering inconsistent predictions
+        
+        Args:
+            input_grid: (B, H, W) input grid
+            train_inputs: (B, N, H, W) support inputs
+            train_outputs: (B, N, H, W) support outputs
+            augmentations: List of dihedral augmentations (default: all 8 symmetries)
+            num_color_perms: Number of color permutations per dihedral (default: 4)
+            temperature: Softmax temperature for prediction
+            
+        Returns:
+            winner: (B, H, W) consensus prediction
+            info: Dict with voting details including agreement status
+        """
+        if augmentations is None:
+            augmentations = [
+                'identity', 'rotate_90', 'rotate_180', 'rotate_270',
+                'flip_h', 'flip_v', 'transpose', 'transpose_neg'
+            ]
+            
+        B, H, W = input_grid.shape
+        device = input_grid.device
+        all_predictions = []
+        
+        self.eval()
+        with torch.no_grad():
+            # Generate all augmented predictions (same as predict_with_acw)
+            for color_idx in range(num_color_perms):
+                if color_idx == 0:
+                    color_perm = None
+                    color_input = input_grid
+                    color_train_inputs = train_inputs
+                    color_train_outputs = train_outputs
+                else:
+                    # CRITICAL: Use 11 entries to handle PAD_COLOR=10 in padded grids
+                    color_perm = torch.arange(11, device=device)
+                    shuffled = torch.randperm(9, device=device) + 1
+                    color_perm[1:10] = shuffled  # Only permute colors 1-9, keep 0 and 10 fixed
+                    
+                    color_input = color_perm[input_grid.clamp(0, 10).long()]
+                    if train_inputs is not None:
+                        color_train_inputs = color_perm[train_inputs.clamp(0, 10).long()]
+                        color_train_outputs = color_perm[train_outputs.clamp(0, 10).long()]
+                    else:
+                        color_train_inputs = None
+                        color_train_outputs = None
+                
+                for aug in augmentations:
+                    aug_input = apply_augmentation(color_input, aug)
+                    
+                    aug_train_inputs = None
+                    aug_train_outputs = None
+                    if color_train_inputs is not None and color_train_outputs is not None:
+                        N = color_train_inputs.shape[1]
+                        aug_train_inputs = torch.stack([
+                            apply_augmentation(color_train_inputs[:, i], aug) for i in range(N)
+                        ], dim=1)
+                        aug_train_outputs = torch.stack([
+                            apply_augmentation(color_train_outputs[:, i], aug) for i in range(N)
+                        ], dim=1)
+                    
+                    pred = self.predict(
+                        aug_input, 
+                        train_inputs=aug_train_inputs, 
+                        train_outputs=aug_train_outputs,
+                        temperature=temperature
+                    )
+                    
+                    inv_dihedral = apply_augmentation(pred, aug, inverse=True)
+                    
+                    if color_perm is not None:
+                        inv_color_perm = torch.argsort(color_perm)
+                        inv_pred = inv_color_perm[inv_dihedral.long()]
+                    else:
+                        inv_pred = inv_dihedral
+                    
+                    all_predictions.append(inv_pred)
+            
+        # Hybrid vote per sample
+        winners = []
+        batch_info = []
+        
+        acw = AugmentedConfidenceWeighting()
+        
+        for b in range(B):
+            sample_preds = [p[b] for p in all_predictions]
+            winner, info = acw.hybrid_vote(sample_preds)
+            winners.append(winner)
+            batch_info.append(info)
+        
+        # Aggregate agreement stats
+        num_agree = sum(1 for info in batch_info if info.get('agree', False))
+        
+        total_views = len(augmentations) * num_color_perms
+        return torch.stack(winners), {
+            'batch_info': batch_info,
+            'num_dihedral': len(augmentations),
+            'num_color_perms': num_color_perms,
+            'total_views': total_views,
+            'voting_method': 'hybrid',
+            'agreement_rate': num_agree / B if B > 0 else 0,
+        }
+
     
     def get_best_step_logits(
         self,
@@ -645,6 +1147,7 @@ class RLAN(nn.Module):
             "lcr": sum(p.numel() for p in self.lcr.parameters()) if self.lcr else 0,
             "sph": sum(p.numel() for p in self.sph.parameters()) if self.sph else 0,
             "solver": sum(p.numel() for p in self.solver.parameters()),
+            "hyper_lora": sum(p.numel() for p in self.hyper_lora.parameters()) if self.hyper_lora else 0,
         }
         counts["total"] = sum(counts.values())
         return counts
@@ -675,6 +1178,8 @@ class RLAN(nn.Module):
                 "use_sph": self.use_sph,
                 "use_solver_context": self.use_solver_context,  # Phase 2.5
                 "use_best_step_selection": self.use_best_step_selection,  # Phase 3
+                # HyperLoRA config
+                "use_hyperlora": self.use_hyperlora,
             },
             **extra_data,
         }
@@ -685,7 +1190,19 @@ class RLAN(nn.Module):
         """Load model from checkpoint."""
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         
-        model = cls(**checkpoint["config"])
+        # Extract saved config and filter to only RLANConfig fields
+        saved_config = checkpoint["config"]
+        
+        # Get valid RLANConfig field names
+        import dataclasses
+        valid_fields = {f.name for f in dataclasses.fields(RLANConfig)}
+        
+        # Filter to only valid config fields (ignore ablation flags stored separately)
+        config_kwargs = {k: v for k, v in saved_config.items() if k in valid_fields}
+        
+        # Create config and model
+        config = RLANConfig(**config_kwargs)
+        model = cls(config=config)
         model.load_state_dict(checkpoint["model_state_dict"])
         
         return model

@@ -32,6 +32,22 @@ from .positional_encoding import (
     LearnedPositionEmbedding2D,
     HybridPositionEncoding,
 )
+from .hyper_lora import (
+    HyperLoRA,
+    HyperLoRAConfig,
+    LoRAPredictor,
+    LoRAApplicator,
+    compute_hyperlora_health_metrics,
+)
+from .loo_training import (
+    LOOConfig,
+    EquivarianceConfig,
+    LOOTrainingLoss,
+    AugmentationEquivarianceLoss,
+    CombinedMetaLoss,
+    create_augmented_contexts,
+    AugmentedConfidenceWeighting,
+)
 
 __all__ = [
     # Core modules
@@ -59,5 +75,19 @@ __all__ = [
     "RotaryPositionEmbedding2D",
     "LearnedPositionEmbedding2D",
     "HybridPositionEncoding",
+    # HyperLoRA (Meta-learning weight adaptation)
+    "HyperLoRA",
+    "HyperLoRAConfig",
+    "LoRAPredictor",
+    "LoRAApplicator",
+    "compute_hyperlora_health_metrics",
+    # LOO Training (Leave-One-Out meta-learning)
+    "LOOConfig",
+    "EquivarianceConfig",
+    "LOOTrainingLoss",
+    "AugmentationEquivarianceLoss",
+    "CombinedMetaLoss",
+    "create_augmented_contexts",
+    "AugmentedConfidenceWeighting",
 ]
 

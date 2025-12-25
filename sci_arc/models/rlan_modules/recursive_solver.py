@@ -130,6 +130,10 @@ class ConvGRUCell(nn.Module):
     maintains spatial structure while performing recurrent updates.
     
     Enhanced with SwiGLU option for better gradient flow (TRM-style).
+    
+    HyperLoRA Support (Dec 2025):
+    Accepts optional lora_deltas dict with task-specific weight modulations.
+    When provided, gate outputs are adjusted by: output + LoRA_apply(output, delta)
     """
     
     def __init__(
@@ -180,17 +184,42 @@ class ConvGRUCell(nn.Module):
         
         self.norm = nn.GroupNorm(8, hidden_dim)
     
+    def _apply_lora_spatial(
+        self,
+        features: torch.Tensor,  # (B, D, H, W)
+        delta_w: torch.Tensor,   # (B, D, D)
+    ) -> torch.Tensor:
+        """
+        Compute LoRA delta for spatial features.
+        
+        Returns ONLY the delta (not features + delta) so the caller can add it:
+            output = features + _apply_lora_spatial(features, delta_w)
+        
+        This implements: y = Wx + dW·x where dW·x is the delta.
+        """
+        B, D, H, W = features.shape
+        # Reshape: (B, D, H, W) → (B, H*W, D)
+        features_flat = features.permute(0, 2, 3, 1).reshape(B, H * W, D)
+        # Apply: (B, H*W, D) @ (B, D, D) → (B, H*W, D)
+        delta_out = torch.bmm(features_flat, delta_w)
+        # Reshape delta back to spatial format (no residual addition here)
+        delta_spatial = delta_out.reshape(B, H, W, D).permute(0, 3, 1, 2)
+        return delta_spatial
+    
     def forward(
         self,
         x: torch.Tensor,
         h: Optional[torch.Tensor] = None,
+        lora_deltas: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
-        Single GRU step.
+        Single GRU step with optional HyperLoRA weight adaptation.
         
         Args:
             x: Input features (B, input_dim, H, W)
             h: Previous hidden state (B, hidden_dim, H, W) or None
+            lora_deltas: Optional dict with keys 'gru_reset', 'gru_update', 'gru_candidate'
+                        Each value is (B, hidden_dim, hidden_dim) weight delta
             
         Returns:
             h_new: Updated hidden state (B, hidden_dim, H, W)
@@ -209,8 +238,24 @@ class ConvGRUCell(nn.Module):
         combined = torch.cat([x, h], dim=1)
         
         # Compute gates
-        r = torch.sigmoid(self.reset_gate(combined))
-        z = torch.sigmoid(self.update_gate(combined))
+        r_logits = self.reset_gate(combined)
+        z_logits = self.update_gate(combined)
+        
+        # Apply HyperLoRA modulation if provided
+        # We apply LoRA to the pre-activation logits to effectively modulate the weights
+        # y = (W + dW)x = Wx + dWx. Here we approximate dWx by applying dW to the output of Wx
+        if lora_deltas is not None:
+            if 'gru_reset' in lora_deltas:
+                # Apply delta to logits: logits + delta_W @ logits
+                # Note: This is a simplified application where we transform the output space
+                r_delta = self._apply_lora_spatial(r_logits, lora_deltas['gru_reset'])
+                r_logits = r_logits + r_delta
+            if 'gru_update' in lora_deltas:
+                z_delta = self._apply_lora_spatial(z_logits, lora_deltas['gru_update'])
+                z_logits = z_logits + z_delta
+        
+        r = torch.sigmoid(r_logits)
+        z = torch.sigmoid(z_logits)
         
         # Compute candidate
         combined_reset = torch.cat([x, r * h], dim=1)
@@ -218,13 +263,24 @@ class ConvGRUCell(nn.Module):
         if self.use_swiglu:
             # SwiGLU path
             proj = self.candidate_proj(combined_reset)
+            # Apply LoRA to projection if needed (before SwiGLU activation)
+            if lora_deltas is not None and 'gru_candidate' in lora_deltas:
+                proj_delta = self._apply_lora_spatial(proj, lora_deltas['gru_candidate'])
+                proj = proj + proj_delta
+                
             h_candidate = self.candidate(proj)
             # Bound the candidate to prevent drift in later steps
             # tanh bounds to [-1, 1] which helps stability
             h_candidate = torch.tanh(h_candidate)
         else:
             # Standard Tanh path
-            h_candidate = torch.tanh(self.candidate(combined_reset))
+            cand_logits = self.candidate(combined_reset)
+            
+            if lora_deltas is not None and 'gru_candidate' in lora_deltas:
+                cand_delta = self._apply_lora_spatial(cand_logits, lora_deltas['gru_candidate'])
+                cand_logits = cand_logits + cand_delta
+                
+            h_candidate = torch.tanh(cand_logits)
         
         # Update hidden state with residual connection for stability
         h_new = (1 - z) * h + z * h_candidate
@@ -724,6 +780,7 @@ class RecursiveSolver(nn.Module):
         attention_maps: Optional[torch.Tensor] = None,
         stop_logits: Optional[torch.Tensor] = None,
         support_features: Optional[torch.Tensor] = None,  # Phase 2.5: (B, N, D, H', W')
+        lora_deltas: Optional[Dict[str, torch.Tensor]] = None,  # HyperLoRA weight deltas
         return_all_steps: bool = False,
         return_act_outputs: bool = False,
         num_steps_override: Optional[int] = None,  # Override num_steps at inference
@@ -742,6 +799,11 @@ class RecursiveSolver(nn.Module):
                         from task_loss to stop_predictor for latent clue count learning
             support_features: Optional (B, N, D, H', W') from ContextEncoder
                              Phase 2.5: Allows solver to attend to support set at each step
+            lora_deltas: Optional Dict with HyperLoRA weight deltas:
+                        - 'gru_reset': (B, D, D) reset gate modulation
+                        - 'gru_update': (B, D, D) update gate modulation
+                        - 'gru_candidate': (B, D, D) candidate modulation
+                        - 'output_head': (B, D, D) output head modulation
             return_all_steps: If True, return predictions at all steps
             return_act_outputs: If True, also return ACT outputs for loss computation
             num_steps_override: If provided, use this many steps instead of self.num_steps.
@@ -809,8 +871,8 @@ class RecursiveSolver(nn.Module):
             combined = torch.cat([aggregated, input_embed], dim=1)  # (B, 2D, H, W)
             combined = self.dropout(combined)
             
-            # GRU update
-            h_new = self.gru(combined, h)
+            # GRU update with optional LoRA modulation
+            h_new = self.gru(combined, h, lora_deltas=lora_deltas)
             
             # Phase 2.5: Cross-attention to support set at each step
             # This gives the solver "eyes" to look back at the examples
@@ -863,12 +925,26 @@ class RecursiveSolver(nn.Module):
             else:
                 h = h_new
             
+            # Apply output_head LoRA modulation if provided (before output_head)
+            # LoRA modulates the hidden state h, then output_head produces logits
+            h_for_output = h
+            if lora_deltas is not None and 'output_head' in lora_deltas:
+                output_lora = lora_deltas['output_head']  # (B, D, D)
+                # Apply LoRA to h: h' = h + h @ lora_delta (per-pixel)
+                # h: (B, D, H, W) -> (B, H*W, D)
+                B_size, D_size, H_size, W_size = h.shape
+                h_flat = h.permute(0, 2, 3, 1).reshape(B_size, H_size * W_size, D_size)  # (B, H*W, D)
+                delta = torch.bmm(h_flat, output_lora)  # (B, H*W, D)
+                delta = delta.reshape(B_size, H_size, W_size, D_size).permute(0, 3, 1, 2)  # (B, D, H, W)
+                h_for_output = h + delta
+            
             # Predict output
             # Use soft_clamp_logits to prevent NaN from extreme values (10K+)
             # while still allowing natural growth (unlike ±50 clamp which caused collapse)
             # - Identity for |logits| <= 1000 (normal training range)
             # - Smooth compression to ±2000 max (prevents overflow)
-            logits = soft_clamp_logits(self.output_head(h))  # (B, num_classes, H, W)
+            logits = soft_clamp_logits(self.output_head(h_for_output))  # (B, num_classes, H, W)
+            
             all_logits.append(logits)
             
             # Optional: Use prediction to update input embedding (feedback)

@@ -272,10 +272,12 @@ class TTTAdapter:
         targets_flat = targets.view(B * H * W)
         
         # Use label smoothing from config (prevents overconfident predictions)
+        # CRITICAL: Use ignore_index=-100 to handle padded targets properly
         loss = F.cross_entropy(
             logits_flat, 
             targets_flat,
-            label_smoothing=self.config.label_smoothing
+            label_smoothing=self.config.label_smoothing,
+            ignore_index=-100
         )
         
         # Add deep supervision if available
@@ -286,7 +288,8 @@ class TTTAdapter:
                 deep_loss += F.cross_entropy(
                     inter_flat, 
                     targets_flat,
-                    label_smoothing=self.config.label_smoothing
+                    label_smoothing=self.config.label_smoothing,
+                    ignore_index=-100
                 )
             deep_loss /= len(outputs['intermediate_logits'])
             loss = loss + self.config.deep_supervision_weight * deep_loss

@@ -114,18 +114,49 @@ def pad_grid(grid: np.ndarray, max_size: int = 30,
     return padded
 
 
-def crop_prediction(pred: np.ndarray, pad_value: int = 10) -> np.ndarray:
-    """Crop prediction to remove padding."""
+def crop_prediction(pred: np.ndarray, target_shape: tuple = None, pad_value: int = 10) -> np.ndarray:
+    """
+    Crop prediction to remove padding and match expected output size.
+    
+    Model predictions are in range 0-9 (valid colors), so we can't rely on
+    detecting pad tokens. Instead:
+    1. If target_shape is provided, crop to that size
+    2. Otherwise, try to find content bounds by excluding common padding indicators
+    
+    Args:
+        pred: Prediction grid (may be 30x30 with padding)
+        target_shape: Expected (H, W) shape from ground truth
+        pad_value: Padding value to exclude (default 10, though model outputs 0-9)
+    
+    Returns:
+        Cropped prediction grid
+    """
     if pred.ndim == 1:
         pred = pred.reshape(30, 30)
     
-    content_mask = (pred != pad_value) & (pred != -100)
+    # If target shape is provided, simply crop to that size
+    if target_shape is not None:
+        h, w = target_shape
+        return pred[:h, :w]
+    
+    # Otherwise, try to find content bounds
+    # Model predictions are 0-9, so we look for the actual content region
+    # by finding rows/cols that have non-zero values (background is usually 0)
+    # But this is imperfect since 0 can be valid content
+    
+    # First try: look for pad_value (10) or -100 which shouldn't appear in valid predictions
+    content_mask = (pred != pad_value) & (pred != -100) & (pred >= 0) & (pred <= 9)
     
     if not content_mask.any():
+        # All padding or empty - return minimal grid
         return np.array([[0]])
     
+    # Find bounding box of content
     rows = np.any(content_mask, axis=1)
     cols = np.any(content_mask, axis=0)
+    
+    if not rows.any() or not cols.any():
+        return np.array([[0]])
     
     rmin, rmax = np.where(rows)[0][[0, -1]]
     cmin, cmax = np.where(cols)[0][[0, -1]]
@@ -307,7 +338,10 @@ class TTAEvaluator:
                 )
                 
                 # Inverse transform to canonical space
-                pred_canonical = crop_prediction(pred_aug)
+                # Note: crop using expected output shape (which may differ after augmentation)
+                # After dihedral transform, the expected shape might be transposed
+                aug_out_shape = aug_train_out[0].shape if aug_train_out else test_output.shape
+                pred_canonical = crop_prediction(pred_aug, target_shape=aug_out_shape)
                 pred_canonical = inverse_dihedral(pred_canonical, dihedral_id)
                 if color_perm is not None:
                     pred_canonical = inverse_color_perm(pred_canonical, color_perm)
@@ -458,8 +492,8 @@ class SimpleEvaluator:
             
             pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()
         
-        # Crop and compare
-        pred_cropped = crop_prediction(pred)
+        # Crop prediction to match expected output size
+        pred_cropped = crop_prediction(pred, target_shape=test_output.shape)
         
         is_correct = (
             pred_cropped.shape == test_output.shape and

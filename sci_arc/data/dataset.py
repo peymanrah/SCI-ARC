@@ -308,7 +308,10 @@ class ARCDataset(Dataset):
         
         # Pad grids
         train_inputs_padded = [self._pad_grid(g, offset, is_target=False) for g in train_inputs]
-        train_outputs_padded = [self._pad_grid(g, offset, is_target=True) for g in train_outputs]
+        # CRITICAL FIX: Use is_target=False for train outputs too!
+        # Train outputs go to ContextEncoder (not loss), so they need PAD_COLOR=10
+        # to distinguish from black (0). Only test_output should use -100 for loss masking.
+        train_outputs_padded = [self._pad_grid(g, offset, is_target=False) for g in train_outputs]
         test_input_padded = self._pad_grid(test_input, offset, is_target=False)
         test_output_padded = self._pad_grid(test_output, offset, is_target=True)
         
@@ -404,9 +407,11 @@ class ARCDataset(Dataset):
                 aug_info['translational_offset'] = offset
         
         # Pad grids (with optional translational offset)
-        # Use is_target=True for output grids so padding is ignored in loss
+        # CRITICAL FIX: Use is_target=False for train outputs too!
+        # Train outputs go to ContextEncoder (not loss), so they need PAD_COLOR=10
+        # to distinguish from black (0). Only test_output should use -100 for loss masking.
         train_inputs_padded = [self._pad_grid(g, offset, is_target=False) for g in train_inputs]
-        train_outputs_padded = [self._pad_grid(g, offset, is_target=True) for g in train_outputs]
+        train_outputs_padded = [self._pad_grid(g, offset, is_target=False) for g in train_outputs]
         test_input_padded = self._pad_grid(test_input, offset, is_target=False)
         test_output_padded = self._pad_grid(test_output, offset, is_target=True)
         
@@ -1170,28 +1175,29 @@ class SCIARCDataset(Dataset):
         return aug_inputs, aug_outputs, aug_test_in, aug_test_out, augment_info
 
 
-def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = None) -> torch.Tensor:
+def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = None, is_target: bool = False) -> torch.Tensor:
     """
     Pad grid to max_size x max_size.
     
     Args:
         grid: Input grid tensor
         max_size: Target size
-        pad_value: Value for padding. If None, infer from grid:
-                   - Use -100 if grid contains -100 (target with ignore_index)
-                   - Use 0 otherwise (input grid)
+        pad_value: Value for padding. If None, use explicit defaults:
+                   - Use -100 for targets (is_target=True) so loss ignores padding
+                   - Use 10 (PAD_COLOR) for inputs so model distinguishes from black (0)
+        is_target: If True and pad_value is None, use -100 for padding
     """
     h, w = grid.shape
     if h >= max_size and w >= max_size:
         return grid[:max_size, :max_size]
     
-    # Infer padding value from grid content if not specified
-    # This preserves the -100 ignore_index for targets
+    # CRITICAL FIX: Use explicit padding values, not content-based inference
+    # This prevents footgun where 0 is used for inputs (0 is a real ARC color!)
     if pad_value is None:
-        if (grid == -100).any():
-            pad_value = -100  # Target grid with ignore_index
+        if is_target:
+            pad_value = -100  # Target grid: ignore_index for loss
         else:
-            pad_value = 0  # Input grid
+            pad_value = 10    # Input grid: PAD_COLOR to distinguish from black (0)
     
     padded = torch.full((max_size, max_size), pad_value, dtype=grid.dtype)
     padded[:min(h, max_size), :min(w, max_size)] = grid[:min(h, max_size), :min(w, max_size)]

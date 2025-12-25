@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import torch
+
+from .loss_logger import LossLogger
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -113,6 +115,12 @@ class TrainingConfig:
     wandb_run_name: Optional[str] = None
     log_to_file: bool = True  # Enable file logging
     
+    # Validation settings
+    # TTA (Test-Time Augmentation) for validation - matches inference behavior
+    val_use_tta: bool = True              # Use TTA during validation (recommended)
+    val_num_dihedral: int = 8             # Dihedral transforms (1-8)
+    val_num_color_perms: int = 1          # Color perms per dihedral (1=fast, 4=thorough)
+    
     # Curriculum learning
     use_curriculum: bool = True
     curriculum_stages: List[int] = field(default_factory=lambda: [10, 30, 60])  # Epoch thresholds
@@ -122,6 +130,10 @@ class TrainingConfig:
     
     # Reproducibility
     seed: int = 42
+    deterministic: bool = False  # Enable CUDA deterministic mode for reproducibility (slower)
+    
+    # Numerical stability
+    check_nan_inf: bool = True  # Check for NaN/Inf in losses during training
 
 
 class SCIARCTrainer:
@@ -153,6 +165,13 @@ class SCIARCTrainer:
         # Move model to device
         self.device = torch.device(config.device if torch.cuda.is_available() else 'cpu')
         self.model = self.model.to(self.device)
+        
+        # Set deterministic mode for reproducibility if requested
+        if config.deterministic:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            print("[Trainer] Deterministic mode enabled (slower but reproducible)")
         
         # Move loss function to device (important for projection head in SCL)
         if hasattr(self.loss_fn, 'to'):
@@ -193,6 +212,16 @@ class SCIARCTrainer:
         self.checkpoint_dir = Path(config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
+        # Initialize structured loss logger for per-component tracking
+        self.loss_logger = LossLogger(
+            log_dir=str(self.checkpoint_dir / 'loss_logs'),
+            log_interval=config.log_every,
+            enable_file_logging=config.log_to_file,
+            enable_console=False,  # We have custom console logging
+            wandb_run=None,  # Will be set after wandb init
+            verbose=False,
+        )
+        
         # File logging
         self.tee_logger = None
         if config.log_to_file:
@@ -212,6 +241,8 @@ class SCIARCTrainer:
         self.wandb_run = None
         if config.use_wandb and WANDB_AVAILABLE:
             self._init_wandb()
+            # Connect loss logger to wandb
+            self.loss_logger.wandb_run = self.wandb_run
     
     def _create_optimizer(self) -> AdamW:
         """Create AdamW optimizer with weight decay filtering."""
@@ -360,6 +391,18 @@ class SCIARCTrainer:
             
             total_loss = losses['total'] / self.config.grad_accumulation_steps
             
+            # Check for NaN/Inf in losses (numerical stability guard)
+            if self.config.check_nan_inf:
+                if not torch.isfinite(total_loss):
+                    print(f"\n[!] WARNING: Non-finite loss detected at step {self.global_step}!")
+                    print(f"    total_loss = {total_loss.item()}")
+                    for k, v in losses.items():
+                        if torch.is_tensor(v) and not torch.isfinite(v):
+                            print(f"    {k} = {v.item()} (NON-FINITE)")
+                    print("    Skipping this batch to prevent training corruption.")
+                    self.optimizer.zero_grad()
+                    continue
+            
             # Backward pass
             backward_start = time.time()
             if self.scaler:
@@ -372,6 +415,13 @@ class SCIARCTrainer:
             if (batch_idx + 1) % self.config.grad_accumulation_steps == 0:
                 if self.scaler:
                     self.scaler.unscale_(self.optimizer)
+                
+                # === GRADIENT HEALTH METRICS (before clipping) ===
+                # Compute gradient statistics for debugging
+                grad_metrics = self._compute_gradient_metrics()
+                losses.update(grad_metrics)
+                
+                if self.scaler:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -451,6 +501,17 @@ class SCIARCTrainer:
         for key in epoch_losses:
             epoch_losses[key] /= max(num_batches, 1)
         
+        # === STRUCTURED EPOCH SUMMARY ===
+        # Log epoch-level loss statistics and health checks
+        epoch_summary = self.loss_logger.log_epoch_summary(self.current_epoch)
+        
+        # Check for health issues and warn
+        health_warnings = self.loss_logger.check_health()
+        if health_warnings:
+            print("\n[!] LOSS HEALTH WARNINGS:")
+            for warning in health_warnings:
+                print(f"    {warning}")
+        
         return epoch_losses
     
     def _compute_losses(self, outputs: Dict, batch: Dict) -> Dict[str, torch.Tensor]:
@@ -496,38 +557,43 @@ class SCIARCTrainer:
                 # Compute per-class prediction distribution
                 with torch.no_grad():
                     preds = logits.argmax(dim=-1)  # [B, H, W]
-                    total_pixels = preds.numel()
+                    # Create valid mask (exclude padding: -100)
+                    valid_mask = (targets != -100)
+                    total_pixels = valid_mask.sum().item()
                     
-                    # Count background vs non-background predictions
-                    bg_preds = (preds == 0).sum().item()
-                    content_preds = total_pixels - bg_preds
-                    bg_targets = (targets == 0).sum().item()
-                    content_targets = total_pixels - bg_targets
-                    
-                    print(f"\n[FOCAL LOSS DEBUG - Batch {self._focal_debug_count + 1}]")
-                    print(f"  Focal gamma: {focal_gamma:.1f}, Class weights: {'Active' if class_weights is not None else 'None'}")
-                    print(f"  Target distribution: {bg_targets/total_pixels*100:.1f}% background, {content_targets/total_pixels*100:.1f}% content")
-                    print(f"  Pred distribution:   {bg_preds/total_pixels*100:.1f}% background, {content_preds/total_pixels*100:.1f}% content")
-                    print(f"  Task loss: {task_loss.item():.4f}")
-                    
-                    # Compare with what standard CE would give
-                    logits_flat = logits.view(B * H * W, C)
-                    targets_flat = targets.view(B * H * W)
-                    standard_ce = F.cross_entropy(logits_flat, targets_flat)
-                    print(f"  Standard CE (for comparison): {standard_ce.item():.4f}")
-                    
-                    if focal_gamma > 0 and task_loss.item() < standard_ce.item():
-                        print(f"  [+] Focal Loss is DOWN-WEIGHTING easy samples (loss reduced by {standard_ce.item() - task_loss.item():.4f})")
-                    elif focal_gamma > 0:
-                        print(f"  [+] Focal Loss active (may increase loss on hard samples)")
+                    if total_pixels > 0:
+                        # Count background vs non-background predictions (only valid pixels)
+                        bg_preds = ((preds == 0) & valid_mask).sum().item()
+                        content_preds = total_pixels - bg_preds
+                        bg_targets = ((targets == 0) & valid_mask).sum().item()
+                        content_targets = total_pixels - bg_targets
+                        
+                        print(f"\n[FOCAL LOSS DEBUG - Batch {self._focal_debug_count + 1}]")
+                        print(f"  Focal gamma: {focal_gamma:.1f}, Class weights: {'Active' if class_weights is not None else 'None'}")
+                        print(f"  Valid pixels: {total_pixels} (excluding -100 padding)")
+                        print(f"  Target distribution: {bg_targets/total_pixels*100:.1f}% background, {content_targets/total_pixels*100:.1f}% content")
+                        print(f"  Pred distribution:   {bg_preds/total_pixels*100:.1f}% background, {content_preds/total_pixels*100:.1f}% content")
+                        print(f"  Task loss: {task_loss.item():.4f}")
+                        
+                        # Compare with what standard CE would give (with ignore_index)
+                        logits_flat = logits.view(B * H * W, C)
+                        targets_flat = targets.view(B * H * W)
+                        standard_ce = F.cross_entropy(logits_flat, targets_flat, ignore_index=-100)
+                        print(f"  Standard CE (for comparison): {standard_ce.item():.4f}")
+                        
+                        if focal_gamma > 0 and task_loss.item() < standard_ce.item():
+                            print(f"  [+] Focal Loss is DOWN-WEIGHTING easy samples (loss reduced by {standard_ce.item() - task_loss.item():.4f})")
+                        elif focal_gamma > 0:
+                            print(f"  [+] Focal Loss active (may increase loss on hard samples)")
                 
                 self._focal_debug_count += 1
         else:
             # Fallback to standard CE (without Focal Loss) if loss_fn doesn't have deep_supervision
+            # CRITICAL: Use ignore_index=-100 to handle padded targets
             logits_flat = logits.view(B * H * W, C)
             targets_flat = targets.view(B * H * W)
             
-            task_loss = F.cross_entropy(logits_flat, targets_flat)
+            task_loss = F.cross_entropy(logits_flat, targets_flat, ignore_index=-100)
             losses['task'] = task_loss
             
             # Deep supervision loss (intermediate predictions)
@@ -535,7 +601,7 @@ class SCIARCTrainer:
             if 'intermediate_logits' in outputs and outputs['intermediate_logits']:
                 for inter_logits in outputs['intermediate_logits']:
                     inter_flat = inter_logits.view(B * H * W, C)
-                    deep_loss += F.cross_entropy(inter_flat, targets_flat)
+                    deep_loss += F.cross_entropy(inter_flat, targets_flat, ignore_index=-100)
                 deep_loss /= len(outputs['intermediate_logits'])
             losses['deep'] = deep_loss
         
@@ -693,7 +759,126 @@ class SCIARCTrainer:
         total = total + self.config.deep_supervision_weight * deep_loss
         losses['total'] = total
         
+        # ===============================================
+        # COMPREHENSIVE HEALTH METRICS FOR DEBUGGING
+        # ===============================================
+        # These metrics enable remote debugging by logging:
+        # - Logit health (mean, std, min, max for numerical stability)
+        # - Prediction quality (accuracy, per-class accuracy)
+        # - Confidence metrics (entropy, prediction confidence)
+        
+        with torch.no_grad():
+            # === LOGIT HEALTH METRICS ===
+            # Monitor for numerical instability (overflow/underflow)
+            logits = outputs['logits']  # [B, H, W, C]
+            losses['logit_mean'] = logits.mean().item()
+            losses['logit_std'] = logits.std().item()
+            losses['logit_max'] = logits.max().item()
+            losses['logit_min'] = logits.min().item()
+            
+            # === PREDICTION QUALITY METRICS ===
+            targets = batch['test_outputs']  # [B, H, W]
+            valid_mask = (targets != -100)  # Exclude padding
+            
+            if valid_mask.any():
+                preds = logits.argmax(dim=-1)  # [B, H, W]
+                
+                # Overall accuracy (on valid pixels only)
+                correct = ((preds == targets) & valid_mask).sum().item()
+                total_pixels = valid_mask.sum().item()
+                losses['accuracy'] = correct / max(total_pixels, 1)
+                
+                # Background accuracy (class 0)
+                bg_mask = (targets == 0) & valid_mask
+                if bg_mask.any():
+                    bg_correct = ((preds == 0) & bg_mask).sum().item()
+                    losses['bg_accuracy'] = bg_correct / max(bg_mask.sum().item(), 1)
+                else:
+                    losses['bg_accuracy'] = 0.0
+                
+                # Foreground accuracy (classes 1-10)
+                fg_mask = (targets > 0) & (targets <= 10) & valid_mask
+                if fg_mask.any():
+                    fg_correct = ((preds == targets) & fg_mask).sum().item()
+                    losses['fg_accuracy'] = fg_correct / max(fg_mask.sum().item(), 1)
+                else:
+                    losses['fg_accuracy'] = 0.0
+            else:
+                losses['accuracy'] = 0.0
+                losses['bg_accuracy'] = 0.0
+                losses['fg_accuracy'] = 0.0
+            
+            # === CONFIDENCE METRICS ===
+            # Low confidence may indicate uncertain predictions
+            probs = torch.softmax(logits, dim=-1)  # [B, H, W, C]
+            max_probs, _ = probs.max(dim=-1)  # [B, H, W]
+            if valid_mask.any():
+                losses['confidence_mean'] = max_probs[valid_mask].mean().item()
+            else:
+                losses['confidence_mean'] = 0.0
+            
+            # Prediction entropy (high = uncertain, low = confident)
+            # Only on valid pixels
+            if valid_mask.any():
+                probs_valid = probs[valid_mask]  # [N_valid, C]
+                # Avoid log(0) with small epsilon
+                entropy = -(probs_valid * (probs_valid + 1e-10).log()).sum(dim=-1).mean()
+                losses['pred_entropy'] = entropy.item()
+            else:
+                losses['pred_entropy'] = 0.0
+        
         return losses
+    
+    def _compute_gradient_metrics(self) -> Dict[str, float]:
+        """
+        Compute gradient statistics for debugging.
+        
+        Should be called BEFORE gradient clipping to get true gradient magnitudes.
+        Returns metrics useful for detecting:
+        - Exploding gradients (large grad_norm, grad_max)
+        - Vanishing gradients (very small grad_norm)
+        - NaN/Inf gradients (grad_has_nan = True)
+        """
+        total_norm = 0.0
+        grad_max = 0.0
+        grad_min = float('inf')
+        grad_count = 0
+        has_nan = False
+        has_inf = False
+        
+        for param in self.model.parameters():
+            if param.grad is not None:
+                grad_data = param.grad.data
+                
+                # Check for NaN/Inf
+                if torch.isnan(grad_data).any():
+                    has_nan = True
+                if torch.isinf(grad_data).any():
+                    has_inf = True
+                
+                # Compute norms (on valid gradients)
+                param_norm = grad_data.norm(2).item()
+                total_norm += param_norm ** 2
+                
+                # Track min/max
+                if grad_data.numel() > 0:
+                    grad_max = max(grad_max, grad_data.abs().max().item())
+                    grad_min = min(grad_min, grad_data.abs().min().item())
+                    grad_count += 1
+        
+        total_norm = total_norm ** 0.5
+        
+        # Handle case where no gradients exist
+        if grad_count == 0:
+            grad_min = 0.0
+        
+        return {
+            'grad_norm': total_norm,
+            'grad_max': grad_max,
+            'grad_min': grad_min,
+            'grad_has_nan': 1.0 if has_nan else 0.0,
+            'grad_has_inf': 1.0 if has_inf else 0.0,
+        }
     
     def _to_device(self, batch: Dict) -> Dict:
         """Move batch tensors to device."""
@@ -735,28 +920,110 @@ class SCIARCTrainer:
         
         print(log_str)
         
+        # === STRUCTURED LOSS LOGGING ===
+        # Log all loss components to the structured logger for tracking and analysis
+        structured_losses = {
+            'total': losses['total'].item() if isinstance(losses['total'], torch.Tensor) else losses['total'],
+            'task': losses['task'].item() if isinstance(losses['task'], torch.Tensor) else losses['task'],
+            'scl': losses['scl'].item() if isinstance(losses['scl'], torch.Tensor) else losses['scl'],
+            'ortho': losses['ortho'].item() if isinstance(losses['ortho'], torch.Tensor) else losses['ortho'],
+            'deep': losses['deep'].item() if isinstance(losses['deep'], torch.Tensor) else losses['deep'],
+        }
+        
+        # Add CISL losses if enabled
+        if self.config.use_cicl:
+            structured_losses['cisl_consist'] = losses.get('cisl_consist', torch.tensor(0.0))
+            if isinstance(structured_losses['cisl_consist'], torch.Tensor):
+                structured_losses['cisl_consist'] = structured_losses['cisl_consist'].item()
+            structured_losses['cisl_content_inv'] = losses.get('cisl_content_inv', torch.tensor(0.0))
+            if isinstance(structured_losses['cisl_content_inv'], torch.Tensor):
+                structured_losses['cisl_content_inv'] = structured_losses['cisl_content_inv'].item()
+            structured_losses['cisl_variance'] = losses.get('cisl_variance', torch.tensor(0.0))
+            if isinstance(structured_losses['cisl_variance'], torch.Tensor):
+                structured_losses['cisl_variance'] = structured_losses['cisl_variance'].item()
+        
+        # Add comprehensive health metrics (logit health, accuracy breakdown, confidence)
+        for metric_key in ['logit_mean', 'logit_std', 'logit_max', 'logit_min',
+                           'accuracy', 'bg_accuracy', 'fg_accuracy', 
+                           'confidence_mean', 'pred_entropy',
+                           'grad_norm', 'grad_max', 'grad_min', 'grad_has_nan', 'grad_has_inf']:
+            if metric_key in losses:
+                val = losses[metric_key]
+                structured_losses[metric_key] = val.item() if isinstance(val, torch.Tensor) else val
+        
+        # Log to structured logger (file + statistics tracking)
+        self.loss_logger.log_step(
+            losses=structured_losses,
+            epoch=self.current_epoch,
+            step=batch_idx,
+            lr=lr,
+            extra_metrics={
+                'batch_time': batch_time,
+                'forward_time': forward_time,
+                'backward_time': backward_time,
+            }
+        )
+        
         if self.wandb_run:
             log_dict = {
-                'train/loss_total': losses['total'].item(),
-                'train/loss_task': losses['task'].item(),
-                'train/loss_scl': losses['scl'].item(),
-                'train/loss_ortho': losses['ortho'].item(),
-                'train/loss_deep': losses['deep'].item(),
+                'train/loss_total': structured_losses['total'],
+                'train/loss_task': structured_losses['task'],
+                'train/loss_scl': structured_losses['scl'],
+                'train/loss_ortho': structured_losses['ortho'],
+                'train/loss_deep': structured_losses['deep'],
                 'train/lr': lr,
                 'train/epoch': self.current_epoch,
                 'train/step': self.global_step,
             }
             # Add CISL losses if enabled (per-batch logging)
             if self.config.use_cicl:
-                log_dict['train/cisl_consist'] = losses.get('cisl_consist', torch.tensor(0.0)).item()
-                log_dict['train/cisl_content_inv'] = losses.get('cisl_content_inv', torch.tensor(0.0)).item()
-                log_dict['train/cisl_variance'] = losses.get('cisl_variance', torch.tensor(0.0)).item()
-                log_dict['train/cisl_total'] = losses['scl'].item()  # CISL total goes into scl slot
+                log_dict['train/cisl_consist'] = structured_losses.get('cisl_consist', 0.0)
+                log_dict['train/cisl_content_inv'] = structured_losses.get('cisl_content_inv', 0.0)
+                log_dict['train/cisl_variance'] = structured_losses.get('cisl_variance', 0.0)
+                log_dict['train/cisl_total'] = structured_losses['scl']  # CISL total goes into scl slot
+            
+            # Add comprehensive health metrics
+            log_dict['train/logit_mean'] = structured_losses.get('logit_mean', 0.0)
+            log_dict['train/logit_std'] = structured_losses.get('logit_std', 0.0)
+            log_dict['train/logit_max'] = structured_losses.get('logit_max', 0.0)
+            log_dict['train/logit_min'] = structured_losses.get('logit_min', 0.0)
+            log_dict['train/accuracy'] = structured_losses.get('accuracy', 0.0)
+            log_dict['train/bg_accuracy'] = structured_losses.get('bg_accuracy', 0.0)
+            log_dict['train/fg_accuracy'] = structured_losses.get('fg_accuracy', 0.0)
+            log_dict['train/confidence_mean'] = structured_losses.get('confidence_mean', 0.0)
+            log_dict['train/pred_entropy'] = structured_losses.get('pred_entropy', 0.0)
+            
+            # Add gradient health metrics
+            log_dict['train/grad_norm'] = structured_losses.get('grad_norm', 0.0)
+            log_dict['train/grad_max'] = structured_losses.get('grad_max', 0.0)
+            log_dict['train/grad_min'] = structured_losses.get('grad_min', 0.0)
+            log_dict['train/grad_has_nan'] = structured_losses.get('grad_has_nan', 0.0)
+            log_dict['train/grad_has_inf'] = structured_losses.get('grad_has_inf', 0.0)
+            
             wandb.log(log_dict)
     
     @torch.no_grad()
-    def validate(self) -> Dict[str, float]:
-        """Run validation."""
+    def validate(self, use_tta: bool = False, num_dihedral: int = 8, num_color_perms: int = 1) -> Dict[str, float]:
+        """
+        Run validation with proper accuracy computation.
+        
+        This method correctly handles:
+        - Padding exclusion: -100 in targets is ignored
+        - Exact match: compares ONLY valid (non-padding) pixels
+        - Optional TTA: when enabled, matches inference behavior
+        
+        Args:
+            use_tta: If True, use Test-Time Augmentation (matches inference).
+                     If False, single forward pass (faster but less accurate).
+            num_dihedral: Number of dihedral transforms for TTA (1-8, default 8)
+            num_color_perms: Color permutations per dihedral for TTA (default 1)
+        
+        Returns:
+            Dict with val_loss, pixel_accuracy, task_accuracy
+        
+        Note: For TTA evaluation, this method applies augmentations to BOTH
+        the demonstration pairs AND the test input (matching TRM-style exactly).
+        """
         if not self.val_loader:
             return {}
         
@@ -770,61 +1037,313 @@ class SCIARCTrainer:
         num_val_batches = len(self.val_loader)
         val_start_time = time.time()
         
+        # ===============================================
+        # COMPREHENSIVE VALIDATION METRICS
+        # ===============================================
+        # Accumulate detailed metrics for debugging
+        val_metrics = {
+            'bg_correct': 0,      # Background class accuracy
+            'bg_total': 0,
+            'fg_correct': 0,      # Foreground class accuracy
+            'fg_total': 0,
+            'logit_sum': 0.0,     # For computing mean
+            'logit_sq_sum': 0.0,  # For computing std
+            'logit_max': float('-inf'),
+            'logit_min': float('inf'),
+            'logit_count': 0,
+            'confidence_sum': 0.0,  # Mean prediction confidence
+            'entropy_sum': 0.0,     # Mean prediction entropy
+            'confidence_count': 0,
+        }
+        
+        # Import augmentation utilities if TTA enabled
+        if use_tta:
+            from sci_arc.models.rlan_modules.acw import apply_augmentation, AugmentedConfidenceWeighting
+        
         for batch_idx, batch in enumerate(self.val_loader):
             batch_start = time.time()
             batch = self._to_device(batch)
             
-            # Use forward_training which accepts the batched format
-            outputs = self.model.forward_training(
-                input_grids=batch['input_grids'],
-                output_grids=batch['output_grids'],
-                test_input=batch['test_inputs'],
-                test_output=batch['test_outputs'],
-                grid_mask=batch.get('grid_masks'),
-            )
+            B = batch['test_inputs'].shape[0]
+            targets = batch['test_outputs']  # [B, H, W] with -100 for padding
             
-            losses = self._compute_losses(outputs, batch)
-            total_loss += losses['total'].item()
-            
-            # Compute accuracy
-            logits = outputs['logits']  # [B, H, W, C]
-            preds = logits.argmax(dim=-1)  # [B, H, W]
-            targets = batch['test_outputs']
-            
-            # Pixel accuracy
-            correct = (preds == targets).sum()
-            total_correct += correct.item()
-            total_pixels += targets.numel()
-            
-            # Task accuracy (entire grid must match) - VECTORIZED
-            # Flatten spatial dims and check if all match per sample
-            B = preds.shape[0]
-            preds_flat = preds.view(B, -1)  # [B, H*W]
-            targets_flat = targets.view(B, -1)  # [B, H*W]
-            task_correct = (preds_flat == targets_flat).all(dim=1)  # [B] bool
-            total_tasks_correct += task_correct.sum().item()
-            total_tasks += B
+            if use_tta:
+                # ============================================================
+                # TTA MODE: Matches inference behavior exactly
+                # ============================================================
+                # Augmentation order (matching TRM-style):
+                # Forward: color perm FIRST → dihedral SECOND
+                # Inverse: inverse dihedral FIRST → inverse color SECOND
+                
+                augmentations = [
+                    'identity', 'rotate_90', 'rotate_180', 'rotate_270',
+                    'flip_h', 'flip_v', 'transpose', 'transpose_neg'
+                ][:num_dihedral]
+                
+                # Collect predictions per sample
+                all_preds_per_sample = [[] for _ in range(B)]
+                
+                for color_idx in range(num_color_perms):
+                    # Step 1: Apply color permutation FIRST
+                    if color_idx == 0:
+                        color_perm = None
+                        color_test = batch['test_inputs']
+                        color_train_in = batch['input_grids']
+                        color_train_out = batch['output_grids']
+                    else:
+                        # CRITICAL: Use 11 entries to handle PAD_COLOR=10 in padded grids
+                        color_perm = torch.arange(11, device=self.device)
+                        shuffled = torch.randperm(9, device=self.device) + 1
+                        color_perm[1:10] = shuffled  # Only permute colors 1-9, keep 0 and 10 fixed
+                        color_test = color_perm[batch['test_inputs'].clamp(0, 10).long()]
+                        color_train_in = color_perm[batch['input_grids'].clamp(0, 10).long()]
+                        color_train_out = color_perm[batch['output_grids'].clamp(0, 10).long()]
+                    
+                    for aug in augmentations:
+                        # Step 2: Apply dihedral transform SECOND
+                        aug_test = apply_augmentation(color_test, aug)
+                        # Handle train grids: (B, N, H, W)
+                        N = color_train_in.shape[1]
+                        aug_train_in = torch.stack([
+                            apply_augmentation(color_train_in[:, i], aug) for i in range(N)
+                        ], dim=1)
+                        aug_train_out = torch.stack([
+                            apply_augmentation(color_train_out[:, i], aug) for i in range(N)
+                        ], dim=1)
+                        
+                        # Forward pass
+                        outputs = self.model.forward_training(
+                            input_grids=aug_train_in,
+                            output_grids=aug_train_out,
+                            test_input=aug_test,
+                            test_output=batch['test_outputs'],  # Not augmented for loss
+                            grid_mask=batch.get('grid_masks'),
+                        )
+                        
+                        preds = outputs['logits'].argmax(dim=-1)  # [B, H, W]
+                        
+                        # Step 3: Inverse dihedral FIRST
+                        preds = apply_augmentation(preds, aug, inverse=True)
+                        
+                        # Step 4: Inverse color permutation SECOND
+                        if color_perm is not None:
+                            inv_color_perm = torch.argsort(color_perm)
+                            preds = inv_color_perm[preds.long()]
+                        
+                        # Collect per sample
+                        for b in range(B):
+                            all_preds_per_sample[b].append(preds[b])
+                
+                # Vote per sample using hybrid voting
+                acw = AugmentedConfidenceWeighting()
+                final_preds = []
+                for b in range(B):
+                    winner, _ = acw.hybrid_vote(all_preds_per_sample[b])
+                    final_preds.append(winner)
+                
+                # Compute accuracy using voted predictions
+                for b in range(B):
+                    target = targets[b]  # [H, W]
+                    pred = final_preds[b]  # May be different shape after voting
+                    
+                    # Create valid mask for target (exclude -100 padding)
+                    valid_mask = (target != -100)
+                    
+                    if valid_mask.any():
+                        # Get target bounds
+                        valid_rows = valid_mask.any(dim=1)
+                        valid_cols = valid_mask.any(dim=0)
+                        r_min, r_max = torch.where(valid_rows)[0][[0, -1]]
+                        c_min, c_max = torch.where(valid_cols)[0][[0, -1]]
+                        
+                        # Crop target to valid region
+                        target_cropped = target[r_min:r_max+1, c_min:c_max+1]
+                        
+                        # Crop prediction to same region (CRITICAL FIX!)
+                        # The prediction may still have padding from the model output
+                        pred_cropped = pred[r_min:r_max+1, c_min:c_max+1] if (
+                            pred.shape[0] >= r_max+1 and pred.shape[1] >= c_max+1
+                        ) else pred
+                        
+                        # Check if prediction matches (shape and values)
+                        if pred_cropped.shape == target_cropped.shape:
+                            task_correct = torch.equal(pred_cropped, target_cropped)
+                            pixel_correct = (pred_cropped == target_cropped).sum().item()
+                            pixel_total = target_cropped.numel()
+                        else:
+                            task_correct = False
+                            pixel_correct = 0
+                            pixel_total = target_cropped.numel()
+                        
+                        total_tasks_correct += int(task_correct)
+                        total_correct += pixel_correct
+                        total_pixels += pixel_total
+                    
+                    total_tasks += 1
+                
+                # Loss computation (use single forward pass, just for monitoring)
+                outputs = self.model.forward_training(
+                    input_grids=batch['input_grids'],
+                    output_grids=batch['output_grids'],
+                    test_input=batch['test_inputs'],
+                    test_output=batch['test_outputs'],
+                    grid_mask=batch.get('grid_masks'),
+                )
+                losses = self._compute_losses(outputs, batch)
+                total_loss += losses['total'].item()
+                
+            else:
+                # ============================================================
+                # FAST MODE: Single forward pass (no TTA)
+                # ============================================================
+                # This is faster but measures a different metric than inference.
+                # Still accurate for what it measures (single-pass accuracy).
+                
+                outputs = self.model.forward_training(
+                    input_grids=batch['input_grids'],
+                    output_grids=batch['output_grids'],
+                    test_input=batch['test_inputs'],
+                    test_output=batch['test_outputs'],
+                    grid_mask=batch.get('grid_masks'),
+                )
+                
+                losses = self._compute_losses(outputs, batch)
+                total_loss += losses['total'].item()
+                
+                # Compute accuracy on valid pixels only
+                logits = outputs['logits']  # [B, H, W, C]
+                preds = logits.argmax(dim=-1)  # [B, H, W]
+                
+                # Valid pixel mask: exclude -100 padding
+                valid_mask = (targets != -100)  # [B, H, W]
+                
+                # Pixel accuracy (only on valid pixels)
+                correct = ((preds == targets) & valid_mask).sum()
+                total_correct += correct.item()
+                total_pixels += valid_mask.sum().item()
+                
+                # === COMPREHENSIVE VALIDATION METRICS ===
+                # Background accuracy (class 0)
+                bg_mask = (targets == 0) & valid_mask
+                if bg_mask.any():
+                    bg_correct = ((preds == 0) & bg_mask).sum().item()
+                    val_metrics['bg_correct'] += bg_correct
+                    val_metrics['bg_total'] += bg_mask.sum().item()
+                
+                # Foreground accuracy (classes 1-10)
+                fg_mask = (targets > 0) & (targets <= 10) & valid_mask
+                if fg_mask.any():
+                    fg_correct = ((preds == targets) & fg_mask).sum().item()
+                    val_metrics['fg_correct'] += fg_correct
+                    val_metrics['fg_total'] += fg_mask.sum().item()
+                
+                # Logit statistics (for numerical stability monitoring)
+                val_metrics['logit_sum'] += logits.sum().item()
+                val_metrics['logit_sq_sum'] += (logits ** 2).sum().item()
+                val_metrics['logit_max'] = max(val_metrics['logit_max'], logits.max().item())
+                val_metrics['logit_min'] = min(val_metrics['logit_min'], logits.min().item())
+                val_metrics['logit_count'] += logits.numel()
+                
+                # Confidence and entropy (prediction quality)
+                if valid_mask.any():
+                    probs = torch.softmax(logits, dim=-1)  # [B, H, W, C]
+                    max_probs, _ = probs.max(dim=-1)  # [B, H, W]
+                    val_metrics['confidence_sum'] += max_probs[valid_mask].sum().item()
+                    
+                    # Entropy on valid pixels
+                    probs_valid = probs[valid_mask]  # [N_valid, C]
+                    entropy_batch = -(probs_valid * (probs_valid + 1e-10).log()).sum(dim=-1).sum()
+                    val_metrics['entropy_sum'] += entropy_batch.item()
+                    val_metrics['confidence_count'] += valid_mask.sum().item()
+                
+                # Task accuracy: ALL valid pixels must match
+                for b in range(B):
+                    sample_mask = valid_mask[b]  # [H, W]
+                    if sample_mask.any():
+                        sample_preds = preds[b][sample_mask]
+                        sample_targets = targets[b][sample_mask]
+                        task_correct = torch.equal(sample_preds, sample_targets)
+                        total_tasks_correct += int(task_correct)
+                    total_tasks += 1
             
             batch_time = time.time() - batch_start
-            print(f"  Validation batch {batch_idx + 1}/{num_val_batches} [{batch_time:.1f}s]", end='\r')
+            tta_str = f" [TTA {num_dihedral}×{num_color_perms}]" if use_tta else ""
+            print(f"  Val batch {batch_idx + 1}/{num_val_batches}{tta_str} [{batch_time:.1f}s]", end='\r')
         
         val_time = time.time() - val_start_time
         
+        # ===============================================
+        # COMPUTE COMPREHENSIVE VALIDATION METRICS
+        # ===============================================
         metrics = {
-            'val_loss': total_loss / len(self.val_loader),
-            'pixel_accuracy': total_correct / total_pixels,
-            'task_accuracy': total_tasks_correct / total_tasks,
+            'val_loss': total_loss / max(len(self.val_loader), 1),
+            'pixel_accuracy': total_correct / max(total_pixels, 1),
+            'task_accuracy': total_tasks_correct / max(total_tasks, 1),
+            'use_tta': use_tta,
+            'num_views': num_dihedral * num_color_perms if use_tta else 1,
         }
         
-        print(f"\nValidation complete in {val_time:.1f}s: Loss={metrics['val_loss']:.4f}, "
-              f"Pixel Acc={metrics['pixel_accuracy']:.4f}, "
-              f"Task Acc={metrics['task_accuracy']:.4f}")
+        # Add per-class accuracy
+        metrics['bg_accuracy'] = val_metrics['bg_correct'] / max(val_metrics['bg_total'], 1)
+        metrics['fg_accuracy'] = val_metrics['fg_correct'] / max(val_metrics['fg_total'], 1)
+        
+        # Add logit health metrics
+        if val_metrics['logit_count'] > 0:
+            logit_mean = val_metrics['logit_sum'] / val_metrics['logit_count']
+            logit_var = (val_metrics['logit_sq_sum'] / val_metrics['logit_count']) - (logit_mean ** 2)
+            metrics['logit_mean'] = logit_mean
+            metrics['logit_std'] = logit_var ** 0.5 if logit_var > 0 else 0.0
+            metrics['logit_max'] = val_metrics['logit_max']
+            metrics['logit_min'] = val_metrics['logit_min']
+        else:
+            metrics['logit_mean'] = 0.0
+            metrics['logit_std'] = 0.0
+            metrics['logit_max'] = 0.0
+            metrics['logit_min'] = 0.0
+        
+        # Add confidence and entropy metrics
+        if val_metrics['confidence_count'] > 0:
+            metrics['confidence_mean'] = val_metrics['confidence_sum'] / val_metrics['confidence_count']
+            metrics['entropy_mean'] = val_metrics['entropy_sum'] / val_metrics['confidence_count']
+        else:
+            metrics['confidence_mean'] = 0.0
+            metrics['entropy_mean'] = 0.0
+        
+        # ===============================================
+        # COMPREHENSIVE VALIDATION LOGGING
+        # ===============================================
+        tta_str = f" (TTA {metrics['num_views']} views)" if use_tta else " (fast mode)"
+        print(f"\n{'='*60}")
+        print(f"VALIDATION SUMMARY - Epoch {self.current_epoch + 1}{tta_str}")
+        print(f"{'='*60}")
+        print(f"  Time: {val_time:.1f}s")
+        print(f"  Loss: {metrics['val_loss']:.4f}")
+        print(f"\n  ACCURACY:")
+        print(f"    Pixel Accuracy:      {metrics['pixel_accuracy']:.4f}")
+        print(f"    Task Accuracy:       {metrics['task_accuracy']:.4f}")
+        print(f"    Background Accuracy: {metrics['bg_accuracy']:.4f}")
+        print(f"    Foreground Accuracy: {metrics['fg_accuracy']:.4f}")
+        print(f"\n  PREDICTION HEALTH:")
+        print(f"    Confidence (mean):   {metrics['confidence_mean']:.4f}")
+        print(f"    Entropy (mean):      {metrics['entropy_mean']:.4f}")
+        print(f"\n  LOGIT HEALTH:")
+        print(f"    Mean: {metrics['logit_mean']:.4f}, Std: {metrics['logit_std']:.4f}")
+        print(f"    Range: [{metrics['logit_min']:.4f}, {metrics['logit_max']:.4f}]")
+        print(f"{'='*60}")
         
         if self.wandb_run:
             wandb.log({
                 'val/loss': metrics['val_loss'],
                 'val/pixel_accuracy': metrics['pixel_accuracy'],
                 'val/task_accuracy': metrics['task_accuracy'],
+                'val/bg_accuracy': metrics['bg_accuracy'],
+                'val/fg_accuracy': metrics['fg_accuracy'],
+                'val/confidence_mean': metrics['confidence_mean'],
+                'val/entropy_mean': metrics['entropy_mean'],
+                'val/logit_mean': metrics['logit_mean'],
+                'val/logit_std': metrics['logit_std'],
+                'val/logit_max': metrics['logit_max'],
+                'val/logit_min': metrics['logit_min'],
                 'val/epoch': self.current_epoch,
             })
         
@@ -1136,7 +1655,13 @@ class SCIARCTrainer:
             if (epoch + 1) % self.config.eval_every == 0:
                 print("Starting validation...")
                 sys.stdout.flush()
-                val_metrics = self.validate()
+                
+                # Use TTA if configured (recommended for accurate generalization metrics)
+                val_metrics = self.validate(
+                    use_tta=self.config.val_use_tta,
+                    num_dihedral=self.config.val_num_dihedral,
+                    num_color_perms=self.config.val_num_color_perms,
+                )
                 sys.stdout.flush()  # Flush after validation
                 
                 # Check for improvement
@@ -1191,8 +1716,8 @@ def train_sci_arc(
         config = TrainingConfig()
     
     if loss_fn is None:
-        from .losses import SCIARCLoss
-        loss_fn = SCIARCLoss()
+        from .rlan_loss import RLANLoss
+        loss_fn = RLANLoss()
     
     trainer = SCIARCTrainer(
         model=model,

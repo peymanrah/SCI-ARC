@@ -153,12 +153,8 @@ class DynamicSaliencyController(nn.Module):
         self.key_proj = nn.Linear(hidden_dim, hidden_dim)
         self.value_proj = nn.Linear(hidden_dim, hidden_dim)
         
-        # Attention score projection (multi-head to single attention map)
-        self.attn_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Linear(hidden_dim // 2, 1),
-        )
+        # NOTE: Removed unused attn_proj layer (was defined but never called in forward)
+        # The attention computation uses direct dot-product scoring, not a projection layer
         
         # Stop-token predictor
         # Predicts whether to stop after this clue

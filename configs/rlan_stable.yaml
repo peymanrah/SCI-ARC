@@ -126,6 +126,38 @@ model:
   # not by solver cross-attention. Now with spatial_downsample=8, memory is fine.
   use_solver_context: true    # ENABLED - critical for iterative verification
   solver_context_heads: 4     # Multi-head attention for diverse queries
+  
+  # =============================================================
+  # HYPER-LORA: META-LEARNING WEIGHT ADAPTATION (Dec 2025)
+  # =============================================================
+  # HyperLoRA predicts task-specific LoRA weight deltas from context.
+  # This allows the model to adapt its GRU gates and output head to
+  # each specific task, similar to test-time training (TTT) but
+  # without gradient updates at inference time.
+  #
+  # ARCHITECTURE:
+  # - Pools context from encoded support features
+  # - Predicts low-rank weight deltas (A, B matrices) for:
+  #   - GRU reset gate, update gate, candidate gate
+  #   - Output head (logits projection)
+  # - Applied via additive LoRA: W' = W + A @ B.T
+  #
+  # TRAINING:
+  # - Task loss: Standard cross-entropy on predictions
+  # - LOO loss: Leave-one-out generalization (predict held-out pair)
+  # - Equivariance loss: Consistent predictions across augmentations
+  #
+  # INFERENCE:
+  # - Sanity check: Verify LoRA works on support set (>90%)
+  # - ACW: Augmented Confidence Weighting for voting
+  #
+  # PRODUCTION DEFAULT: ENABLED for generalization
+  # =============================================================
+  use_hyperlora: true        # ENABLED - critical for task-specific adaptation
+  hyperlora_rank: 8          # LoRA rank (lower = fewer params, less expressive)
+  hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
+  hyperlora_dropout: 0.0     # Dropout on LoRA activations
+  hyperlora_init_scale: 0.01 # Near-zero init for safe adoption
 
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
@@ -219,6 +251,40 @@ training:
   # =============================================================
   use_ema: false
   ema_decay: 0.999  # Not used when use_ema=false
+  
+  # =============================================================
+  # LOO TRAINING: LEAVE-ONE-OUT META-LEARNING LOSS
+  # =============================================================
+  # Teaches the model to generalize from N-1 examples to the Nth.
+  # Only active when use_hyperlora: true in model section.
+  #
+  # For each training task with N pairs:
+  #   1. Hold out one pair as the "test"
+  #   2. Pool context from remaining N-1 pairs
+  #   3. Predict LoRA weights from this context
+  #   4. Use LoRA to predict held-out pair
+  #   5. Backprop loss on held-out prediction
+  #
+  # This explicitly trains the HyperLoRA to GENERALIZE.
+  # =============================================================
+  loo_training:
+    enabled: true
+    loss_weight: 0.5       # Weight relative to task loss
+    min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
+  
+  # =============================================================
+  # AUGMENTATION EQUIVARIANCE LOSS
+  # =============================================================
+  # Encourages consistent LoRA predictions across augmented views.
+  # If a task is rotated 90°, the predicted LoRA weights should
+  # have similar magnitudes (the "rule" is the same, just rotated).
+  #
+  # Loss: L2 on Frobenius norm difference of LoRA matrices.
+  # =============================================================
+  equivariance_training:
+    enabled: true
+    loss_weight: 0.1       # Light regularization
+    num_augmentations: 4   # Number of random augmentations per task
 
 data:
   train_path: "./data/arc-agi/data/training"
@@ -355,11 +421,34 @@ inference:
   
   # Batch size for evaluation (can be larger than training)
   batch_size: 32
+  
+  # =============================================================
+  # HYPER-LORA INFERENCE SETTINGS
+  # =============================================================
+  # LOO Sanity Check: Verify predicted LoRA weights work on support set
+  # If accuracy on training pairs is below threshold, fall back to
+  # standard forward pass without LoRA (safety mechanism).
+  # =============================================================
+  loo_sanity_check: true
+  loo_threshold: 0.9    # Require 90% accuracy on support set
+  
+  # =============================================================
+  # ACW: AUGMENTED CONFIDENCE WEIGHTING
+  # =============================================================
+  # Instead of simple voting, weight each augmented prediction by
+  # how consistent it is with other augmentations. More consistent
+  # predictions get higher weight in the final vote.
+  #
+  # Consistency = 1 - mean(pairwise_disagreement_with_other_views)
+  # =============================================================
+  acw_enabled: true
+  acw_num_views: 8     # Number of augmented views to consider
 
 hardware:
   device: "cuda"
   seed: 42
-  deterministic: false
+  deterministic: false  # Set true for reproducibility (slower)
+  check_nan_inf: true   # Enable NaN/Inf detection in training loop
 
 device:
   use_cuda: true

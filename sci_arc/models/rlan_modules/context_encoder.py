@@ -373,15 +373,15 @@ class ContextEncoder(nn.Module):
             # Apply downsampling if configured
             if self.spatial_downsample > 1:
                 B, N, D, H, W = support_features.shape
-                # Reshape to (B*N, D, H, W) for pooling
-                support_features = support_features.view(B * N, D, H, W)
+                # Reshape to (B*N, D, H, W) for pooling - use reshape for non-contiguous
+                support_features = support_features.reshape(B * N, D, H, W)
                 support_features = self.downsampler(support_features)
                 # Add fresh positional encoding after downsampling
                 if self.downsample_pos_embed is not None:
                     support_features = support_features + self.downsample_pos_embed
                 # Reshape back: (B, N, D, H', W')
                 _, _, H_new, W_new = support_features.shape
-                support_features = support_features.view(B, N, D, H_new, W_new)
+                support_features = support_features.reshape(B, N, D, H_new, W_new)
             
             # Apply pair_mask if provided (zero out invalid pairs)
             if pair_mask is not None:

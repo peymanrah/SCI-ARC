@@ -143,7 +143,7 @@ class TestPadGrid:
         
         assert padded.shape == (5, 5)
         assert padded[0, 0] == 1
-        assert padded[4, 4] == 0  # Padding
+        assert padded[4, 4] == 10  # PAD_COLOR=10 for inputs (0 is black, a real color)
     
     def test_padding_equal_grid(self):
         """Test padding equal-sized grid."""

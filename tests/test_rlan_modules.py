@@ -300,8 +300,8 @@ class TestRecursiveSolver:
         
         assert len(all_logits) == 3, f"Expected 3 steps, got {len(all_logits)}"
         for i, logits in enumerate(all_logits):
-            assert logits.shape == (2, 11, 10, 10), \
-                f"Step {i}: Expected (2, 11, 10, 10), got {logits.shape}"
+            assert logits.shape == (2, 10, 10, 10), \
+                f"Step {i}: Expected (2, 10, 10, 10), got {logits.shape}"
     
     def test_with_attention_maps(self, solver):
         """Test that attention maps are used correctly."""
@@ -316,7 +316,7 @@ class TestRecursiveSolver:
             attention_maps=attention_maps
         )
         
-        assert logits.shape == (2, 11, 10, 10)
+        assert logits.shape == (2, 10, 10, 10)
     
     def test_deep_supervision_loss(self, solver):
         """Test deep supervision loss computation."""
@@ -324,7 +324,7 @@ class TestRecursiveSolver:
         count_embedding = torch.randn(2, 10, 64)
         predicates = torch.rand(2, 8)
         input_grid = torch.randint(0, 10, (2, 10, 10))
-        target = torch.randint(0, 11, (2, 10, 10))
+        target = torch.randint(0, 10, (2, 10, 10))  # 10 classes (colors 0-9)
         
         all_logits = solver(
             clue_features, count_embedding, predicates, input_grid,
