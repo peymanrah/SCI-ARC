@@ -7,6 +7,37 @@
 
 ---
 
+## 🚨 MISSION-CRITICAL EVALUATION AUDIT (December 2025)
+
+> **STATUS**: All evaluation code paths audited and aligned.
+
+### Critical Fixes Applied to Inference Evaluation
+
+The inference evaluation (`scripts/evaluate_rlan.py`) has been completely aligned with training evaluation (`scripts/train_rlan.py::evaluate_trm_style`).
+
+#### BUGS FIXED:
+
+| Issue | Before | After |
+|-------|--------|-------|
+| Crop before inverse | ❌ Missing | ✅ `crop_prediction_torch()` added |
+| Voting method | Pixel-wise one-hot | Hash-based (matching training) |
+| Per-sample voting | All samples mixed | Separate voting per batch item |
+| Pass@K computation | ❌ Missing | ✅ Using ranked candidates |
+| Return type | Single tensor | Tuple (tensor, ranked_candidates) |
+
+#### ALGORITHM PARITY (Verified):
+
+| Aspect | Training | Inference | Status |
+|--------|----------|-----------|--------|
+| Transform order | Color FIRST, dihedral SECOND | Same | ✅ |
+| Inverse order | Dihedral FIRST, color SECOND | Same | ✅ |
+| DIHEDRAL_INVERSE | `[0, 3, 2, 1, 4, 5, 6, 7]` | Same | ✅ |
+| Crop function | `crop_prediction(pad_value=10)` | `crop_prediction_torch(pad_value=10)` | ✅ |
+| Hash function | `grid.tobytes().hex()` | Same | ✅ |
+| Pass@K logic | Ranked by count, check top K | Same | ✅ |
+
+---
+
 ## 🚨 CRITICAL FIXES FOR GENERALIZATION (December 2024)
 
 > **PRODUCTION-READY**: All fixes verified with verify_fixes.py

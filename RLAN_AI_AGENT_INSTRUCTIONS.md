@@ -200,12 +200,44 @@ Get-ChildItem ".\data\arc-agi\data\" -Directory
 
 ### 4.2 Evaluation with Test-Time Augmentation (TTA)
 ```powershell
-# TTA applies 8 dihedral transforms for ensemble predictions
+# TTA applies 8 dihedral x 4 color perms = 32 views with voting
+# This matches training's evaluate_trm_style() for consistent metrics
 .\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
     --checkpoint checkpoints/rlan_base/best.pt `
     --data-path ./data/arc-agi/data/evaluation `
     --output ./evaluation_results/rlan_base_tta `
     --use-tta
+```
+
+### 4.2.1 TTA with Custom Settings
+```powershell
+# Customize TTA: fewer dihedral transforms or color permutations
+# --num-dihedral: 1-8 (default 8 = full D4 group)
+# --num-color-perms: 1+ (default 4 to match training)
+# --no-color-perms: disable color perms (only use dihedral)
+
+# Fast TTA: 8 dihedral only (no color perms)
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --use-tta `
+    --no-color-perms `
+    --output ./evaluation_results/tta_dihedral_only
+
+# Full TTA matching training: 8 dihedral x 4 color = 32 views
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --use-tta `
+    --num-dihedral 8 `
+    --num-color-perms 4 `
+    --output ./evaluation_results/tta_full_32views
+
+# Maximum TTA: 8 dihedral x 8 color = 64 views (slower but more robust)
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --use-tta `
+    --num-dihedral 8 `
+    --num-color-perms 8 `
+    --output ./evaluation_results/tta_max_64views
 ```
 
 ### 4.3 Detailed Output with Per-Task Predictions
@@ -232,13 +264,102 @@ Get-ChildItem ".\data\arc-agi\data\" -Directory
     --batch-size 16
 ```
 
-### 4.5 Evaluate on Training Set (Debug)
+### 4.5 Best-Step Selection (Dec 2025)
+```powershell
+# Use entropy-based best step selection (picks most confident step)
+# This can improve accuracy without retraining!
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --data-path ./data/arc-agi/data/evaluation `
+    --output ./evaluation_results/rlan_best_step `
+    --use-best-step
+
+# Force disable best-step (use last step only)
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --output ./evaluation_results/rlan_last_step `
+    --no-best-step
+```
+
+### 4.6 Override Solver Steps at Inference
+```powershell
+# Run more solver iterations than trained (e.g., train=6, infer=10)
+# Useful to test if complex tasks benefit from more refinement
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --data-path ./data/arc-agi/data/evaluation `
+    --output ./evaluation_results/rlan_10steps `
+    --num-steps 10
+
+# Compare different step counts
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --output ./evaluation_results/steps_4 --num-steps 4
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --output ./evaluation_results/steps_8 --num-steps 8
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --output ./evaluation_results/steps_12 --num-steps 12
+```
+
+### 4.7 Combined: Best-Step + More Iterations + TTA (Maximum Accuracy)
+```powershell
+# MAXIMUM ACCURACY MODE: Full TTA + best-step + more iterations
+# Recommended for final evaluation / competition submission
+.\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
+    --checkpoint checkpoints/rlan_base/best.pt `
+    --data-path ./data/arc-agi/data/evaluation `
+    --output ./evaluation_results/rlan_max_accuracy `
+    --use-tta `
+    --num-dihedral 8 `
+    --num-color-perms 4 `
+    --use-best-step `
+    --num-steps 10 `
+    --detailed-output
+```
+
+### 4.8 Evaluate on Training Set (Debug)
 ```powershell
 # For debugging - check if model is learning
 .\.venv\Scripts\python.exe -u scripts/evaluate_rlan.py `
     --checkpoint checkpoints/rlan_base/best.pt `
     --data-path ./data/arc-agi/data/training `
     --output ./evaluation_results/rlan_train_debug
+```
+
+### 4.9 Complete CLI Arguments Reference (Dec 2025)
+```
+evaluate_rlan.py arguments:
+
+REQUIRED:
+  --checkpoint PATH       Path to model checkpoint (.pt file)
+
+DATA:
+  --data-path PATH        Path to evaluation data (default: ./data/arc-agi/data/evaluation)
+  --output PATH           Output directory (default: ./evaluation_results)
+  --batch-size N          Batch size (default: 16)
+
+TTA (Test-Time Augmentation):
+  --use-tta               Enable TTA with voting (default: disabled)
+  --num-dihedral N        Dihedral transforms 1-8 (default: 8 = full D4 group)
+  --num-color-perms N     Color permutations per dihedral (default: 4)
+  --no-color-perms        Disable color permutations (use dihedral only)
+
+INFERENCE OPTIMIZATION:
+  --use-best-step         Enable entropy-based best step selection
+  --no-best-step          Force disable best step (use last step)
+  --num-steps N           Override solver iterations (default: use trained)
+  --temperature FLOAT     Softmax temperature (default: 0.1)
+
+OUTPUT:
+  --detailed-output       Save per-task prediction details
+  --visualize             Generate visualization images
+  --analyze-attention     Analyze attention patterns
+  --config PATH           Optional config file for defaults
+
+DEVICE:
+  --device DEVICE         Force device (cuda/cpu)
 ```
 
 ---
@@ -269,6 +390,29 @@ Get-Content ./evaluation_results/rlan_base_eval/evaluation_summary.json | Conver
 # ├── detailed_predictions.json             # Per-task predictions (if --detailed-output)
 # └── visualizations/                       # Images (if --visualize)
 ```
+
+### 5.4 Training Evaluation Output (Per-Epoch)
+When `use_trm_style_eval: true` is set in config, each epoch shows:
+
+```
+--- TRM-Style TTA Evaluation (8 dihedral x 4 color = 32 views) ---
+★ TTA Exact Match (Pass@1): 15/100 (15.0%)
+Pass@K: Pass@1: 15.0% | Pass@2: 22.0% | Pass@3: 27.0%
+Avg Unique Predictions: 3.2 / 32
+Avg Winner Votes: 18.5 / 32
+```
+
+**Metrics Explained:**
+- **Pass@1**: Is the top-voted prediction correct? (= exact match)
+- **Pass@2**: Is correct answer in top 2 voted predictions?
+- **Pass@3**: Is correct answer in top 3 voted predictions?
+- **Avg Unique Predictions**: How many different predictions across 32 views (lower = more consensus)
+- **Avg Winner Votes**: How many views agreed on winner (higher = more confidence)
+
+**Why Pass@K Matters:**
+- ARC-AGI competition allows 2 guesses per task
+- If Pass@2 >> Pass@1, your model "knows" the answer but voting picks wrong one
+- Pass@K improvement during training shows model learning dihedral/color invariance
 
 ---
 
@@ -505,6 +649,35 @@ evaluation_results/debug/
 
 ---
 
+## EVALUATION ARGUMENTS REFERENCE (Dec 2025)
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--checkpoint` | str | **required** | Path to model checkpoint |
+| `--data-path` | str | auto | Path to evaluation data |
+| `--output` | str | `./evaluation_results` | Output directory |
+| `--use-tta` | flag | false | Test-Time Augmentation (8 dihedral transforms) |
+| `--detailed-output` | flag | false | Save per-task predictions |
+| `--visualize` | flag | false | Generate visualization images |
+| `--analyze-attention` | flag | false | Analyze attention patterns |
+| `--batch-size` | int | 16 | Batch size for evaluation |
+| `--temperature` | float | 0.1 | Softmax temperature |
+| **`--use-best-step`** | flag | false | **Enable entropy-based best step selection** |
+| **`--no-best-step`** | flag | false | **Force disable best-step (use last step)** |
+| **`--num-steps`** | int | None | **Override solver iterations (e.g., 10)** |
+
+### When to Use Each Option
+
+| Scenario | Recommended Command |
+|----------|---------------------|
+| Quick baseline | `--checkpoint best.pt` |
+| Better accuracy | `--checkpoint best.pt --use-best-step` |
+| Test more iterations | `--checkpoint best.pt --num-steps 10` |
+| Maximum accuracy | `--checkpoint best.pt --use-tta --use-best-step --num-steps 10` |
+| Compare step counts | Run multiple with `--num-steps 4/6/8/10/12` |
+
+---
+
 ## QUICK REFERENCE COMMANDS
 
 ```powershell
@@ -527,6 +700,15 @@ python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt
 
 # With TTA and detailed output
 python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt --use-tta --detailed-output --output ./evaluation_results/full_eval
+
+# Best-step selection (entropy-based) - NEW!
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt --use-best-step
+
+# Override solver steps (e.g., train with 6, infer with 10) - NEW!
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt --num-steps 10
+
+# Maximum accuracy mode - NEW!
+python scripts/evaluate_rlan.py --checkpoint checkpoints/rlan_base/best.pt --use-tta --use-best-step --num-steps 10
 
 # === ANALYSIS ===
 # Generate HTML report

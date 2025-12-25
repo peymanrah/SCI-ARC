@@ -726,6 +726,7 @@ class RecursiveSolver(nn.Module):
         support_features: Optional[torch.Tensor] = None,  # Phase 2.5: (B, N, D, H', W')
         return_all_steps: bool = False,
         return_act_outputs: bool = False,
+        num_steps_override: Optional[int] = None,  # Override num_steps at inference
     ) -> torch.Tensor:
         """
         Generate output through iterative refinement.
@@ -743,6 +744,8 @@ class RecursiveSolver(nn.Module):
                              Phase 2.5: Allows solver to attend to support set at each step
             return_all_steps: If True, return predictions at all steps
             return_act_outputs: If True, also return ACT outputs for loss computation
+            num_steps_override: If provided, use this many steps instead of self.num_steps.
+                               Useful for inference-time experimentation with more/fewer steps.
             
         Returns:
             If return_all_steps:
@@ -794,7 +797,10 @@ class RecursiveSolver(nn.Module):
         # Store initial hidden state for residual connections
         h_initial = None
         
-        for t in range(self.num_steps):
+        # Allow overriding num_steps at inference (e.g., to test more iterations)
+        effective_num_steps = num_steps_override if num_steps_override is not None else self.num_steps
+        
+        for t in range(effective_num_steps):
             # Check if all samples have halted (inference only)
             if self.use_act and not self.training and act_state.halted.all():
                 break
@@ -869,7 +875,7 @@ class RecursiveSolver(nn.Module):
             # CRITICAL FIX (Dec 2025): Removed Gumbel noise!
             # Use soft argmax (differentiable) instead of Gumbel-softmax
             # to maintain train/eval consistency.
-            if self.use_feedback and t < self.num_steps - 1:
+            if self.use_feedback and t < effective_num_steps - 1:
                 # Use soft argmax for differentiable feedback - NO Gumbel noise
                 # This gives same behavior during training and inference
                 soft_pred = F.softmax(logits / 1.0, dim=1)  # (B, C, H, W)
@@ -921,3 +927,132 @@ class RecursiveSolver(nn.Module):
             total_weight += weight
         
         return total_loss / total_weight
+
+    def select_best_step_by_loss(
+        self,
+        all_logits: List[torch.Tensor],
+        targets: torch.Tensor,
+        loss_fn: nn.Module,
+    ) -> Tuple[torch.Tensor, int, List[float]]:
+        """
+        Select the best prediction step based on lowest loss (training mode).
+        
+        During training, we have ground truth so we can pick the step with
+        lowest loss. This prevents over-iteration from hurting accuracy.
+        
+        Args:
+            all_logits: List of (B, num_classes, H, W) predictions from each step
+            targets: Shape (B, H, W) ground truth
+            loss_fn: Loss function to evaluate each step. If RLANLoss, uses task_loss component.
+            
+        Returns:
+            best_logits: The logits from the step with lowest loss
+            best_step: Index of the best step (0-indexed)
+            step_losses: List of loss values for each step
+        """
+        step_losses = []
+        with torch.no_grad():
+            # Use task_loss component if available (for RLANLoss), else use loss_fn directly
+            task_loss_fn = getattr(loss_fn, 'task_loss', loss_fn)
+            for logits in all_logits:
+                if torch.isfinite(logits).all():
+                    loss = task_loss_fn(logits, targets)
+                    step_losses.append(loss.item())
+                else:
+                    step_losses.append(float('inf'))
+        
+        # Find step with minimum loss
+        best_step = min(range(len(step_losses)), key=lambda i: step_losses[i])
+        best_logits = all_logits[best_step]
+        
+        return best_logits, best_step, step_losses
+
+    def select_best_step_by_entropy(
+        self,
+        all_logits: List[torch.Tensor],
+    ) -> Tuple[torch.Tensor, int, List[float]]:
+        """
+        Select the best prediction step based on lowest entropy (inference mode).
+        
+        During inference, we don't have ground truth. We use prediction entropy
+        as a proxy for confidence - lower entropy = more confident = likely better.
+        
+        Args:
+            all_logits: List of (B, num_classes, H, W) predictions from each step
+            
+        Returns:
+            best_logits: The logits from the step with lowest entropy
+            best_step: Index of the best step (0-indexed)
+            step_entropies: List of mean entropy values for each step
+        """
+        step_entropies = []
+        with torch.no_grad():
+            for logits in all_logits:
+                if torch.isfinite(logits).all():
+                    # Compute per-pixel entropy, then average
+                    probs = F.softmax(logits, dim=1)  # (B, C, H, W)
+                    log_probs = F.log_softmax(logits, dim=1)
+                    entropy = -(probs * log_probs).sum(dim=1)  # (B, H, W)
+                    mean_entropy = entropy.mean().item()
+                    step_entropies.append(mean_entropy)
+                else:
+                    step_entropies.append(float('inf'))
+        
+        # Find step with minimum entropy (most confident)
+        best_step = min(range(len(step_entropies)), key=lambda i: step_entropies[i])
+        best_logits = all_logits[best_step]
+        
+        return best_logits, best_step, step_entropies
+
+    def select_best_step_combined(
+        self,
+        all_logits: List[torch.Tensor],
+        targets: Optional[torch.Tensor] = None,
+        loss_fn: Optional[nn.Module] = None,
+    ) -> Tuple[torch.Tensor, int, dict]:
+        """
+        Unified best-step selection: uses loss if targets available, else entropy.
+        
+        This is the main API for best-step selection.
+        
+        Args:
+            all_logits: List of predictions from each step
+            targets: Ground truth (optional, for training)
+            loss_fn: Loss function (optional, for training)
+            
+        Returns:
+            best_logits: Best prediction
+            best_step: Index of best step
+            info: Dict with 'method', 'step_values', 'all_step_values'
+                  During training, also includes 'entropy_best_step' and 'entropy_loss_agreement'
+        """
+        if targets is not None and loss_fn is not None:
+            # Training mode: use actual loss
+            best_logits, best_step, step_losses = self.select_best_step_by_loss(
+                all_logits, targets, loss_fn
+            )
+            
+            # Also compute entropy-based best step to track correlation
+            _, entropy_best_step, step_entropies = self.select_best_step_by_entropy(all_logits)
+            
+            # Track if entropy would have picked the same step as loss
+            agreement = (best_step == entropy_best_step)
+            
+            return best_logits, best_step, {
+                'method': 'loss',
+                'best_value': step_losses[best_step],
+                'all_step_values': step_losses,
+                'entropy_best_step': entropy_best_step,
+                'entropy_step_values': step_entropies,
+                'entropy_loss_agreement': agreement,  # True if entropy would pick same step
+            }
+        else:
+            # Inference mode: use entropy
+            best_logits, best_step, step_entropies = self.select_best_step_by_entropy(
+                all_logits
+            )
+            return best_logits, best_step, {
+                'method': 'entropy',
+                'best_value': step_entropies[best_step],
+                'all_step_values': step_entropies,
+            }

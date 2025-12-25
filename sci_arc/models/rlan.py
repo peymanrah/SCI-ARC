@@ -33,7 +33,7 @@ Example Usage:
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Union, List
+from typing import Dict, Optional, Union, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -112,6 +112,7 @@ class RLANConfig:
     use_solver_feedback: bool = False  # Use prediction feedback in solver (disabled - argmax breaks gradients)
     use_solver_context: bool = True  # Phase 2.5: Solver cross-attention to support set
     solver_context_heads: int = 4  # Number of attention heads for solver cross-attention
+    use_best_step_selection: bool = False  # Phase 3: Select best step by loss (train) or entropy (eval)
     
     # Context settings
     use_cross_attention_context: bool = False
@@ -317,7 +318,9 @@ class RLAN(nn.Module):
         # Recursive Solver - ALWAYS REQUIRED (core output generation)
         # Pass ablation flags so solver can skip unused components
         # Phase 2.5: Pass support set cross-attention flag
+        # Phase 3: Best-step selection for handling over-iteration
         self.use_solver_context = config.use_solver_context if config else True
+        self.use_best_step_selection = config.use_best_step_selection if config else False
         self.solver = RecursiveSolver(
             hidden_dim=hidden_dim,
             num_classes=num_classes,
@@ -380,6 +383,7 @@ class RLAN(nn.Module):
         temperature: float = 1.0,
         return_intermediates: bool = False,
         return_all_steps: bool = False,
+        num_steps_override: Optional[int] = None,  # Override solver steps at inference
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass through RLAN.
@@ -392,6 +396,8 @@ class RLAN(nn.Module):
             temperature: Gumbel-softmax temperature for DSC and SPH
             return_intermediates: If True, return all intermediate outputs
             return_all_steps: If True, return predictions at all solver steps
+            num_steps_override: If provided, run this many solver steps instead of default.
+                               Useful for inference-time experimentation (e.g., train with 6, infer with 10).
             
         Returns:
             If return_intermediates=False:
@@ -501,6 +507,7 @@ class RLAN(nn.Module):
                 support_features=support_features,  # Phase 2.5: Solver cross-attention
                 return_all_steps=True,
                 return_act_outputs=return_intermediates and self.use_act,
+                num_steps_override=num_steps_override,
             )
             # Handle ACT outputs if returned
             if isinstance(solver_output, tuple):
@@ -518,6 +525,7 @@ class RLAN(nn.Module):
                 stop_logits=stop_logits,  # For latent clue count learning
                 support_features=support_features,  # Phase 2.5: Solver cross-attention
                 return_all_steps=False,
+                num_steps_override=num_steps_override,
             )
             all_logits = None
         
@@ -551,29 +559,79 @@ class RLAN(nn.Module):
         train_inputs: Optional[torch.Tensor] = None,
         train_outputs: Optional[torch.Tensor] = None,
         temperature: float = 0.1,
+        num_steps_override: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Make a prediction (argmax of logits).
+        
+        If use_best_step_selection is enabled, uses the step with lowest
+        entropy (most confident prediction) instead of always using the last step.
         
         Args:
             input_grid: Shape (B, H, W) input grid
             train_inputs: Optional (B, N, H, W) training inputs for context
             train_outputs: Optional (B, N, H, W) training outputs for context
             temperature: Softmax temperature (should match training end temp)
+            num_steps_override: If provided, run this many solver steps instead of default.
+                               Example: Train with 6 steps, infer with 10 to see if more helps.
             
         Returns:
             prediction: Shape (B, H, W) predicted grid
         """
         self.eval()
         with torch.no_grad():
-            logits = self.forward(
-                input_grid,
-                train_inputs=train_inputs,
-                train_outputs=train_outputs,
-                temperature=temperature
-            )
+            if self.use_best_step_selection:
+                # Get all steps and select best by entropy
+                outputs = self.forward(
+                    input_grid,
+                    train_inputs=train_inputs,
+                    train_outputs=train_outputs,
+                    temperature=temperature,
+                    return_intermediates=True,
+                    return_all_steps=True,
+                    num_steps_override=num_steps_override,
+                )
+                all_logits = outputs['all_logits']
+                if all_logits and len(all_logits) > 1:
+                    # Use solver's entropy-based selection
+                    best_logits, best_step, info = self.solver.select_best_step_by_entropy(all_logits)
+                    logits = best_logits
+                else:
+                    logits = outputs['logits']
+            else:
+                # Use last step (default behavior)
+                logits = self.forward(
+                    input_grid,
+                    train_inputs=train_inputs,
+                    train_outputs=train_outputs,
+                    temperature=temperature,
+                    num_steps_override=num_steps_override,
+                )
             prediction = logits.argmax(dim=1)
         return prediction
+    
+    def get_best_step_logits(
+        self,
+        all_logits: List[torch.Tensor],
+        targets: Optional[torch.Tensor] = None,
+        loss_fn: Optional[torch.nn.Module] = None,
+    ) -> Tuple[torch.Tensor, int, dict]:
+        """
+        Select the best step's logits using the solver's selection method.
+        
+        Wrapper for solver.select_best_step_combined().
+        
+        Args:
+            all_logits: List of predictions from each step
+            targets: Ground truth (optional, for training)
+            loss_fn: Loss function (optional, for training)
+            
+        Returns:
+            best_logits: Best prediction
+            best_step: Index of best step
+            info: Dict with method, values
+        """
+        return self.solver.select_best_step_combined(all_logits, targets, loss_fn)
     
     def count_parameters(self) -> Dict[str, int]:
         """Count parameters per module (handles disabled modules)."""
@@ -616,6 +674,7 @@ class RLAN(nn.Module):
                 "use_lcr": self.use_lcr,
                 "use_sph": self.use_sph,
                 "use_solver_context": self.use_solver_context,  # Phase 2.5
+                "use_best_step_selection": self.use_best_step_selection,  # Phase 3
             },
             **extra_data,
         }

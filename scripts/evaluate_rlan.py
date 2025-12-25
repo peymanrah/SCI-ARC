@@ -40,6 +40,7 @@ sys.path.insert(0, str(project_root))
 
 from sci_arc.models import RLAN
 from sci_arc.data import ARCDataset
+from sci_arc.data.dataset import collate_fn  # CRITICAL: Use same collate as training!
 from sci_arc.evaluation import (
     pixel_accuracy,
     task_accuracy,
@@ -111,42 +112,233 @@ def inverse_dihedral_transform(grid: torch.Tensor, tid: int) -> torch.Tensor:
     return apply_dihedral_transform(grid, inv_tid)
 
 
+def apply_color_permutation(grid: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    """Apply color permutation to grid. perm[old_color] = new_color."""
+    # perm is shape (10,) mapping old color to new color
+    return perm[grid.long()]
+
+
+def inverse_color_permutation(grid: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    """Apply inverse of color permutation."""
+    # Create inverse permutation: inv_perm[new_color] = old_color
+    inv_perm = torch.argsort(perm)
+    return inv_perm[grid.long()]
+
+
+def generate_color_permutation(device: torch.device) -> torch.Tensor:
+    """Generate random color permutation (color 0=black stays fixed, 1-9 shuffled)."""
+    perm = torch.arange(10, device=device)
+    # Shuffle colors 1-9 only (keep 0=black fixed)
+    shuffled = torch.randperm(9, device=device) + 1
+    perm[1:] = shuffled
+    return perm
+
+
+def crop_prediction_torch(pred: torch.Tensor, pad_value: int = 10) -> torch.Tensor:
+    """
+    Crop prediction to remove padding - matching train_rlan.py's crop_prediction().
+    CRITICAL: Must crop BEFORE inverse transform to handle size changes correctly!
+    """
+    # Handle batch dimension
+    squeeze = False
+    if pred.dim() == 2:
+        pred = pred.unsqueeze(0)
+        squeeze = True
+    
+    batch_size = pred.shape[0]
+    cropped = []
+    
+    for b in range(batch_size):
+        p = pred[b]  # (H, W)
+        content_mask = (p != pad_value) & (p != -100)
+        
+        if not content_mask.any():
+            cropped.append(torch.zeros(1, 1, dtype=pred.dtype, device=pred.device))
+            continue
+        
+        rows = content_mask.any(dim=1)
+        cols = content_mask.any(dim=0)
+        
+        row_indices = torch.where(rows)[0]
+        col_indices = torch.where(cols)[0]
+        
+        if len(row_indices) == 0 or len(col_indices) == 0:
+            cropped.append(torch.zeros(1, 1, dtype=pred.dtype, device=pred.device))
+            continue
+        
+        rmin, rmax = row_indices[0], row_indices[-1]
+        cmin, cmax = col_indices[0], col_indices[-1]
+        
+        cropped.append(p[rmin:rmax+1, cmin:cmax+1])
+    
+    # Return first if we squeezed
+    if squeeze:
+        return cropped[0]
+    return cropped
+
+
+def grid_hash_torch(grid: torch.Tensor) -> str:
+    """Create a hash of a grid for voting (matching train_rlan.py)."""
+    return grid.cpu().numpy().tobytes().hex()
+
+
 def predict_with_tta(
     model: RLAN,
     input_grid: torch.Tensor,
-    num_transforms: int = 8,
+    train_inputs: Optional[torch.Tensor] = None,
+    train_outputs: Optional[torch.Tensor] = None,
+    pair_mask: Optional[torch.Tensor] = None,
+    num_dihedral: int = 8,
+    num_color_perms: int = 4,
     temperature: float = 0.1,
-) -> torch.Tensor:
+    num_steps_override: Optional[int] = None,
+) -> Tuple[torch.Tensor, List[List[Dict[str, Any]]]]:
     """
-    Predict with Test-Time Augmentation using dihedral transforms.
+    Predict with Test-Time Augmentation using dihedral transforms + color permutations.
     
-    Applies all 8 dihedral transforms, then aggregates via majority voting.
+    MATCHES train_rlan.py's evaluate_trm_style() EXACTLY!
+    
+    TRM-style TTA order (Dec 2025):
+    1. Apply color permutation FIRST to ALL grids (test + train context)
+    2. Apply dihedral transform SECOND
+    3. Get prediction
+    4. CROP prediction to remove padding  <-- CRITICAL!
+    5. Apply inverse dihedral FIRST
+    6. Apply inverse color permutation SECOND
+    7. Vote using hash-based aggregation (not pixel-wise)
+    
+    Args:
+        num_dihedral: Number of dihedral transforms (1-8, default 8 = full D4 group)
+        num_color_perms: Number of color permutations per dihedral (default 4)
+        
+    Returns:
+        (voted_predictions, ranked_candidates_list) where:
+        - voted_predictions: (B, H_max, W_max) tensor of voted predictions
+        - ranked_candidates_list: List of length B, each containing ranked candidates for Pass@K
     """
     device = input_grid.device
-    all_predictions = []
+    total_views = num_dihedral * num_color_perms
+    batch_size = input_grid.shape[0]
     
-    for tid in range(num_transforms):
-        # Transform input
-        transformed = apply_dihedral_transform(input_grid, tid)
+    # Collect all predictions PER BATCH ITEM as numpy arrays
+    all_predictions_per_sample = [[] for _ in range(batch_size)]  # List of lists
+    
+    for color_idx in range(num_color_perms):
+        # Generate color permutation (or identity if color_idx == 0)
+        if color_idx == 0:
+            color_perm = torch.arange(10, device=device)  # Identity
+        else:
+            color_perm = generate_color_permutation(device)
         
-        # Get prediction
-        with torch.no_grad():
-            logits = model(transformed, temperature=temperature)
-            pred = logits.argmax(dim=1)
+        # Apply color permutation to test input and training context
+        color_test = apply_color_permutation(input_grid, color_perm)
+        color_train_in = apply_color_permutation(train_inputs, color_perm) if train_inputs is not None else None
+        color_train_out = apply_color_permutation(train_outputs, color_perm) if train_outputs is not None else None
         
-        # Inverse transform prediction
-        pred_inv = inverse_dihedral_transform(pred, tid)
-        all_predictions.append(pred_inv)
+        for tid in range(num_dihedral):
+            # Apply dihedral transform to color-permuted grids
+            transformed_test = apply_dihedral_transform(color_test, tid)
+            transformed_train_in = apply_dihedral_transform(color_train_in, tid) if color_train_in is not None else None
+            transformed_train_out = apply_dihedral_transform(color_train_out, tid) if color_train_out is not None else None
+            
+            # Get prediction with optional step override
+            with torch.no_grad():
+                if getattr(model, 'use_best_step_selection', False):
+                    # Use best-step selection (entropy-based)
+                    outputs = model(
+                        transformed_test,
+                        train_inputs=transformed_train_in,
+                        train_outputs=transformed_train_out,
+                        pair_mask=pair_mask,
+                        temperature=temperature,
+                        return_intermediates=True,
+                        num_steps_override=num_steps_override,
+                    )
+                    all_logits = outputs['all_logits']
+                    if all_logits and len(all_logits) > 1:
+                        best_logits, _, _ = model.solver.select_best_step_by_entropy(all_logits)
+                        logits = best_logits
+                    else:
+                        logits = outputs['logits']
+                else:
+                    logits = model(
+                        transformed_test,
+                        train_inputs=transformed_train_in,
+                        train_outputs=transformed_train_out,
+                        pair_mask=pair_mask,
+                        temperature=temperature,
+                        num_steps_override=num_steps_override,
+                    )
+                pred = logits.argmax(dim=1)  # (B, H, W)
+            
+            # CRITICAL: Process each batch item separately, collect per sample
+            for b in range(batch_size):
+                # 1. Crop prediction to remove padding (BEFORE inverse transform!)
+                pred_cropped = crop_prediction_torch(pred[b], pad_value=10)
+                
+                # 2. Inverse dihedral FIRST
+                pred_inv_dihedral = inverse_dihedral_transform(pred_cropped, tid)
+                
+                # 3. Inverse color permutation SECOND
+                pred_canonical = inverse_color_permutation(pred_inv_dihedral, color_perm)
+                
+                # Store as numpy for hash-based voting
+                all_predictions_per_sample[b].append(pred_canonical.cpu().numpy())
     
-    # Stack predictions: (num_transforms, B, H, W)
-    stacked = torch.stack(all_predictions, dim=0)
+    # Vote SEPARATELY for each sample (matching train_rlan.py)
+    winner_tensors = []
+    ranked_candidates_list = []
+    max_h, max_w = 1, 1  # Track max dims for final tensor
     
-    # Majority voting
-    num_classes = 10
-    votes = F.one_hot(stacked.long(), num_classes=num_classes).sum(dim=0)  # (B, H, W, num_classes)
-    final_pred = votes.argmax(dim=-1)  # (B, H, W)
+    for b in range(batch_size):
+        sample_preds = all_predictions_per_sample[b]
+        
+        # Hash-based voting (matching train_rlan.py EXACTLY)
+        vote_counts = {}  # {hash: {'count': int, 'grid': np.array}}
+        
+        for pred in sample_preds:
+            h = pred.tobytes().hex()
+            if h not in vote_counts:
+                vote_counts[h] = {'count': 0, 'grid': pred}
+            vote_counts[h]['count'] += 1
+        
+        # Rank predictions by vote count (descending)
+        ranked_preds = sorted(vote_counts.values(), key=lambda x: x['count'], reverse=True)
+        
+        # Build ranked candidates list for Pass@K
+        ranked_candidates = []
+        for rank, p in enumerate(ranked_preds):
+            ranked_candidates.append({
+                'rank': rank + 1,
+                'grid': p['grid'],
+                'count': p['count'],
+                'frequency': p['count'] / total_views,
+            })
+        ranked_candidates_list.append(ranked_candidates)
+        
+        # Winner is top-ranked prediction
+        winner_grid = ranked_preds[0]['grid'] if ranked_preds else np.array([[0]])
+        winner_tensors.append(torch.from_numpy(winner_grid).to(device))
+        
+        # Track max dimensions
+        max_h = max(max_h, winner_grid.shape[0])
+        max_w = max(max_w, winner_grid.shape[1])
     
-    return final_pred
+    # Pad all winners to same size and stack (using pad_value=10 for consistency)
+    padded_winners = []
+    for wt in winner_tensors:
+        h, w = wt.shape
+        if h < max_h or w < max_w:
+            padded = torch.full((max_h, max_w), 10, dtype=wt.dtype, device=device)
+            padded[:h, :w] = wt
+            padded_winners.append(padded)
+        else:
+            padded_winners.append(wt)
+    
+    # Stack into batch tensor
+    predictions = torch.stack(padded_winners, dim=0)  # (B, max_H, max_W)
+    
+    return predictions, ranked_candidates_list
 
 
 def save_detailed_predictions(
@@ -325,18 +517,26 @@ def evaluate_model(
     dataloader: DataLoader,
     device: torch.device,
     use_tta: bool = False,
+    num_dihedral: int = 8,
+    num_color_perms: int = 4,
     output_dir: Optional[Path] = None,
     detailed_output: bool = False,
     visualize: bool = False,
     temperature: float = 0.1,
+    num_steps_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate model with comprehensive metrics.
+    
+    CRITICAL: This function MUST use the same logic as train_rlan.py's evaluate()!
+    - Passes train_inputs, train_outputs, pair_mask to model (for context encoder)
+    - Uses collate_fn output format: test_inputs (plural), input_grids, output_grids
     
     Returns results matching CISL's evaluate.py output format.
     
     Args:
         temperature: Softmax temperature (should match training end temperature)
+        num_steps_override: If provided, run this many solver steps instead of model default
     """
     model.eval()
     
@@ -345,13 +545,43 @@ def evaluate_model(
     correct_count = 0
     incorrect_count = 0
     
+    # Pass@K tracking (matching train_rlan.py's evaluate_trm_style)
+    pass_at_k_correct = {1: 0, 2: 0, 3: 0}
+    total_evaluated = 0
+    
     print("\nRunning evaluation...")
     
     for batch_idx, batch in enumerate(dataloader):
-        # Get data
-        test_inputs = batch['test_input'].to(device)
-        test_outputs = batch['test_output'].to(device)
-        task_ids = batch.get('task_id', [f'task_{batch_idx}_{i}' for i in range(test_inputs.shape[0])])
+        # =============================================================
+        # CRITICAL: Use same keys as train_rlan.py's evaluate()!
+        # =============================================================
+        # The collate_fn returns: test_inputs, test_outputs, input_grids, output_grids, grid_masks
+        # We MUST pass training context to the model for context encoder to work!
+        
+        # Handle both collate_fn format (plural) and raw dataset format (singular)
+        if 'test_inputs' in batch:
+            # Collate format (from collate_fn) - PREFERRED
+            test_inputs = batch['test_inputs'].to(device)
+            test_outputs = batch['test_outputs'].to(device)
+            train_inputs = batch['input_grids'].to(device)
+            train_outputs = batch['output_grids'].to(device)
+            pair_mask = batch.get('grid_masks')
+            if pair_mask is not None:
+                pair_mask = pair_mask.to(device)
+        else:
+            # Raw dataset format (singular) - FALLBACK (less accurate!)
+            test_inputs = batch['test_input'].to(device)
+            test_outputs = batch['test_output'].to(device)
+            # Extract train inputs/outputs from batch if available
+            train_inputs = batch.get('input_grids')
+            train_outputs = batch.get('output_grids')
+            if train_inputs is not None:
+                train_inputs = torch.stack([t.to(device) if isinstance(t, torch.Tensor) else torch.tensor(t, device=device) for t in train_inputs])
+                train_outputs = torch.stack([t.to(device) if isinstance(t, torch.Tensor) else torch.tensor(t, device=device) for t in train_outputs])
+            pair_mask = None
+            print(f"[WARN] Using raw dataset format without collate_fn - context may be incomplete!")
+        
+        task_ids = batch.get('task_ids', batch.get('task_id', [f'task_{batch_idx}_{i}' for i in range(test_inputs.shape[0])]))
         
         if isinstance(task_ids, torch.Tensor):
             task_ids = [str(t.item()) if t.dim() == 0 else str(t.tolist()) for t in task_ids]
@@ -359,28 +589,89 @@ def evaluate_model(
             task_ids = [str(task_ids)]
         
         with torch.no_grad():
+            ranked_candidates = None  # For Pass@K computation
             if use_tta:
-                predictions = predict_with_tta(model, test_inputs, temperature=temperature)
+                predictions, ranked_candidates = predict_with_tta(
+                    model, test_inputs,
+                    train_inputs=train_inputs,
+                    train_outputs=train_outputs,
+                    pair_mask=pair_mask,
+                    num_dihedral=num_dihedral,
+                    num_color_perms=num_color_perms,
+                    temperature=temperature,
+                    num_steps_override=num_steps_override
+                )
             else:
-                logits = model(test_inputs, temperature=temperature)
+                # Check if best-step selection is enabled
+                if getattr(model, 'use_best_step_selection', False):
+                    outputs = model(
+                        test_inputs,
+                        train_inputs=train_inputs,
+                        train_outputs=train_outputs,
+                        pair_mask=pair_mask,
+                        temperature=temperature,
+                        return_intermediates=True,
+                        num_steps_override=num_steps_override,
+                    )
+                    all_logits = outputs['all_logits']
+                    if all_logits and len(all_logits) > 1:
+                        best_logits, best_step, _ = model.solver.select_best_step_by_entropy(all_logits)
+                        logits = best_logits
+                    else:
+                        logits = outputs['logits']
+                else:
+                    logits = model(
+                        test_inputs,
+                        train_inputs=train_inputs,
+                        train_outputs=train_outputs,
+                        pair_mask=pair_mask,
+                        temperature=temperature,
+                        num_steps_override=num_steps_override,
+                    )
                 predictions = logits.argmax(dim=1)
         
         # Process each sample
         batch_size = test_inputs.shape[0]
         for i in range(batch_size):
             task_id = task_ids[i] if i < len(task_ids) else f'task_{batch_idx}_{i}'
+            total_evaluated += 1
             
             # Get numpy arrays
             input_np = test_inputs[i].cpu().numpy()
             target_np = test_outputs[i].cpu().numpy()
             pred_np = predictions[i].cpu().numpy()
             
-            # Trim padding
+            # Trim padding from target
             target_trimmed = trim_grid(target_np)
+            
+            # For TTA with ranked candidates, compute Pass@K
+            if use_tta and ranked_candidates is not None:
+                # Get this sample's ranked candidates
+                sample_candidates = ranked_candidates[i] if i < len(ranked_candidates) else []
+                
+                # Compute Pass@K using ranked candidates (matching train_rlan.py EXACTLY)
+                for k in [1, 2, 3]:
+                    top_k_preds = sample_candidates[:k]
+                    is_in_top_k = any(
+                        p['grid'].shape == target_trimmed.shape and 
+                        np.array_equal(p['grid'], target_trimmed) 
+                        for p in top_k_preds
+                    )
+                    if is_in_top_k:
+                        pass_at_k_correct[k] += 1
+            else:
+                # Without TTA, Pass@K is same as Pass@1
+                pred_trimmed = pred_np[:target_trimmed.shape[0], :target_trimmed.shape[1]]
+                is_correct_now = np.array_equal(pred_trimmed, target_trimmed)
+                for k in [1, 2, 3]:
+                    if is_correct_now:
+                        pass_at_k_correct[k] += 1
+            
+            # Trim prediction for regular metrics
             pred_trimmed = pred_np[:target_trimmed.shape[0], :target_trimmed.shape[1]]
             input_trimmed = trim_grid(input_np)
             
-            # Check correctness
+            # Check correctness (Pass@1)
             is_correct = np.array_equal(pred_trimmed, target_trimmed)
             
             if is_correct:
@@ -439,20 +730,31 @@ def evaluate_model(
     # Get final summary
     summary = metrics.get_summary()
     
+    # Compute Pass@K rates
+    pass_at_k_rates = {}
+    if total_evaluated > 0:
+        for k in [1, 2, 3]:
+            pass_at_k_rates[f'pass@{k}'] = pass_at_k_correct[k] / total_evaluated
+    else:
+        for k in [1, 2, 3]:
+            pass_at_k_rates[f'pass@{k}'] = 0.0
+    
     # Build results
     results = {
         'metrics': summary,
-        'summary': _format_summary(summary, correct_count, incorrect_count, use_tta),
+        'summary': _format_summary(summary, correct_count, incorrect_count, use_tta, pass_at_k_rates),
         'per_task': metrics.per_task_results,
         'all_details': all_details,
         'correct_count': correct_count,
         'incorrect_count': incorrect_count,
+        'pass_at_k': pass_at_k_rates,
+        'total_evaluated': total_evaluated,
     }
     
     return results
 
 
-def _format_summary(summary: Dict, correct: int, incorrect: int, use_tta: bool) -> str:
+def _format_summary(summary: Dict, correct: int, incorrect: int, use_tta: bool, pass_at_k: Dict[str, float] = None) -> str:
     """Format summary as string for printing."""
     lines = [
         "=" * 60,
@@ -468,8 +770,18 @@ def _format_summary(summary: Dict, correct: int, incorrect: int, use_tta: bool) 
         f"Non-Background Accuracy: {summary['non_background_accuracy']:.4f} ({summary['non_background_accuracy']*100:.2f}%)",
         f"Color Accuracy:          {summary['color_accuracy']:.4f} ({summary['color_accuracy']*100:.2f}%)",
         f"Mean IoU:                {summary['mean_iou']:.4f} ({summary['mean_iou']*100:.2f}%)",
-        "=" * 60,
     ]
+    
+    # Add Pass@K metrics if available
+    if pass_at_k:
+        lines.append("-" * 40)
+        lines.append("Pass@K Metrics (Ranked Candidates):")
+        for k in [1, 2, 3]:
+            key = f'pass@{k}'
+            if key in pass_at_k:
+                lines.append(f"  Pass@{k}:               {pass_at_k[key]:.4f} ({pass_at_k[key]*100:.2f}%)")
+    
+    lines.append("=" * 60)
     
     if use_tta:
         lines.insert(-1, "(with Test-Time Augmentation)")
@@ -543,7 +855,33 @@ def main():
                         help='Batch size for evaluation')
     parser.add_argument('--temperature', type=float, default=0.1,
                         help='Temperature for softmax (lower = sharper, use same as training end)')
+    
+    # =============================================================
+    # BEST-STEP SELECTION & SOLVER OVERRIDE (Dec 2025)
+    # =============================================================
+    parser.add_argument('--use-best-step', action='store_true',
+                        help='Enable best-step selection using lowest entropy (most confident step)')
+    parser.add_argument('--no-best-step', action='store_true',
+                        help='Force disable best-step selection (use last step)')
+    parser.add_argument('--num-steps', type=int, default=None,
+                        help='Override solver steps (e.g., train with 6, infer with 10)')
+    
+    # =============================================================
+    # TTA CONFIGURATION (Dec 2025)
+    # =============================================================
+    # Match training evaluation settings for consistent results
+    parser.add_argument('--num-dihedral', type=int, default=8,
+                        help='Number of dihedral transforms for TTA (1-8, default 8 = full D4 group)')
+    parser.add_argument('--num-color-perms', type=int, default=4,
+                        help='Number of color permutations per dihedral (default 4 to match training)')
+    parser.add_argument('--no-color-perms', action='store_true',
+                        help='Disable color permutations in TTA (only use dihedral transforms)')
     args = parser.parse_args()
+    
+    # Determine TTA settings
+    num_color_perms = 1 if args.no_color_perms else args.num_color_perms
+    num_dihedral = args.num_dihedral
+    total_views = num_dihedral * num_color_perms if args.use_tta else 1
     
     # Create output directory
     output_dir = Path(args.output)
@@ -563,7 +901,13 @@ def main():
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Output directory: {args.output}")
     print(f"Use TTA: {args.use_tta}")
+    if args.use_tta:
+        print(f"  Dihedral transforms: {num_dihedral}")
+        print(f"  Color permutations: {num_color_perms}")
+        print(f"  Total views: {total_views}")
     print(f"Detailed output: {args.detailed_output}")
+    print(f"Best-step selection: {'enabled' if args.use_best_step else 'disabled' if args.no_best_step else 'from config'}")
+    print(f"Solver steps override: {args.num_steps if args.num_steps else 'None (use model default)'}")
     print("=" * 60)
     
     # Setup device
@@ -586,6 +930,27 @@ def main():
     # Load model
     model = load_model(args.checkpoint, device)
     
+    # =============================================================
+    # APPLY INFERENCE OVERRIDES (Dec 2025)
+    # =============================================================
+    # Best-step selection: use entropy to pick most confident step
+    if args.use_best_step:
+        model.use_best_step_selection = True
+        print(f"\n[OVERRIDE] Best-step selection: ENABLED (entropy-based)")
+    elif args.no_best_step:
+        model.use_best_step_selection = False
+        print(f"\n[OVERRIDE] Best-step selection: DISABLED (use last step)")
+    else:
+        # Use model's saved setting (from checkpoint or config)
+        best_step_status = getattr(model, 'use_best_step_selection', False)
+        print(f"\n[CONFIG] Best-step selection: {best_step_status}")
+    
+    # Solver steps override: run more/fewer iterations
+    num_steps_override = args.num_steps
+    if num_steps_override:
+        original_steps = model.solver.num_steps
+        print(f"[OVERRIDE] Solver steps: {original_steps} -> {num_steps_override}")
+    
     # Log model configuration
     print("\n" + "=" * 60)
     print("Model Configuration:")
@@ -593,6 +958,8 @@ def main():
     print(f"  Hidden dim: {model.hidden_dim}")
     print(f"  Num colors: {model.num_colors}")
     print(f"  Num classes: {model.num_classes}")
+    print(f"  Solver steps: {model.solver.num_steps} (override: {num_steps_override})")
+    print(f"  Best-step selection: {getattr(model, 'use_best_step_selection', False)}")
     print("=" * 60)
     
     # Create dataset
@@ -604,7 +971,15 @@ def main():
     
     print(f"\nLoading data from: {data_path}")
     dataset = ARCDataset(data_path, augment=False)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    # CRITICAL: Use same collate_fn as training for proper batch format!
+    # This ensures train_inputs/outputs are properly batched for context encoder
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=0,
+        collate_fn=collate_fn,  # MUST use for context encoder to work!
+    )
     
     print(f"Evaluating on {len(dataset)} tasks")
     
@@ -617,15 +992,20 @@ def main():
     
     # Run evaluation
     print(f"\nUsing temperature: {args.temperature}")
+    if args.use_tta:
+        print(f"TTA: {num_dihedral} dihedral x {num_color_perms} color perms = {total_views} views")
     results = evaluate_model(
         model=model,
         dataloader=dataloader,
         device=device,
         use_tta=args.use_tta,
+        num_dihedral=num_dihedral,
+        num_color_perms=num_color_perms,
         output_dir=output_dir,
         detailed_output=args.detailed_output,
         visualize=args.visualize,
         temperature=args.temperature,
+        num_steps_override=num_steps_override,
     )
     
     # Print results

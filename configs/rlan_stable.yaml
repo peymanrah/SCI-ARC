@@ -63,6 +63,24 @@ model:
   use_act: false       # DISABLED
   dropout: 0.1
   
+  # =============================================================
+  # BEST-STEP SELECTION (Dec 2025)
+  # =============================================================
+  # When enabled, selects the best prediction from all solver steps:
+  # - Training: Uses lowest loss (ground truth available)
+  # - Inference: Uses lowest entropy (confidence-based)
+  # 
+  # This prevents over-iteration from hurting accuracy. If step 3
+  # is better than step 6 for a simple task, we use step 3.
+  # 
+  # Recommended workflow:
+  # 1. Train with use_best_step_selection: false (default)
+  # 2. At inference, set use_best_step_selection: true to use entropy
+  # 3. The model doesn't need retraining - this is inference-only
+  #
+  # Can also enable during training to track best-step histograms.
+  use_best_step_selection: false
+  
   dsc_num_heads: 4
   lcr_num_heads: 4     # Not used
   
@@ -273,7 +291,7 @@ evaluation:
   num_color_perms: 4      # 4 color permutations per dihedral = 32 total views
   use_voting: true        # Aggregate predictions
   use_inverse_aug: true   # CRITICAL: Undo augmentations before comparison
-  pass_ks: [1, 2, 5, 10]  # Report Pass@K metrics like TRM
+  pass_ks: [1, 2, 3]      # Report Pass@K: is answer in top K voted predictions?
   max_eval_tasks: 100     # Number of eval tasks to run TTA on (100 for full eval)
 
 # =============================================================
@@ -300,6 +318,43 @@ logging:
   use_wandb: false
   wandb_project: "rlan-arc"
   wandb_run_name: null
+
+# =============================================================
+# INFERENCE SETTINGS (Dec 2025)
+# =============================================================
+# These settings can be overridden via command-line arguments:
+#   --use-best-step, --no-best-step, --num-steps <N>
+#
+# Example commands:
+#   # Use entropy-based best step + 10 solver iterations
+#   python evaluate_rlan.py --checkpoint best.pt --use-best-step --num-steps 10
+#
+#   # Compare 6 vs 10 steps
+#   python evaluate_rlan.py --checkpoint best.pt --num-steps 6
+#   python evaluate_rlan.py --checkpoint best.pt --num-steps 10
+#
+inference:
+  # Temperature for softmax (lower = sharper predictions)
+  # Should match training end temperature for consistency
+  temperature: 0.1
+  
+  # Best-step selection: pick step with lowest entropy (most confident)
+  # - false: Always use last step (default, matches training)
+  # - true: Use entropy-based selection (may improve accuracy)
+  use_best_step_selection: false
+  
+  # Solver steps override (null = use model's trained default)
+  # Can test with more steps than trained (e.g., train=6, infer=10)
+  num_steps_override: null
+  
+  # Test-Time Augmentation (matches training TTA for consistent results)
+  # With 8 dihedral x 4 color perms = 32 views, same as evaluate_trm_style()
+  use_tta: true
+  num_dihedral: 8      # Full D4 group (identity + 3 rotations + 4 reflections)
+  num_color_perms: 4   # Color permutations per dihedral (keeps color 0 fixed)
+  
+  # Batch size for evaluation (can be larger than training)
+  batch_size: 32
 
 hardware:
   device: "cuda"

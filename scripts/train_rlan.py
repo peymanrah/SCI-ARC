@@ -841,7 +841,22 @@ def train_epoch(
         'stop_prob_mean': 0.0,         # Mean stop probability (how many clues used)
         
         # Per-step loss (is deep supervision working?)
-        'per_step_loss': [],           # Loss at each solver step
+        'per_step_loss': [],           # Loss at each solver step (last batch only, for display)
+        'per_step_loss_sum': None,     # Accumulator: sum of losses per step (for epoch average)
+        'per_step_loss_count': 0,      # Number of batches accumulated
+        
+        # =============================================================
+        # BEST-STEP SELECTION TRACKING (solver health monitoring)
+        # =============================================================
+        'best_step_histogram': [0] * 10,  # Count how often each step is best (supports up to 10 steps)
+        'last_step_was_best_count': 0,    # Count batches where last step was best (healthy)
+        'earlier_step_was_best_count': 0, # Count batches where earlier step was best (over-iterating)
+        'step_improvement_sum': 0.0,      # Sum of (step0_loss - stepN_loss) / step0_loss
+        'solver_health_warnings': [],     # List of warning messages
+        
+        # ENTROPY-LOSS CORRELATION TRACKING (validates inference heuristic)
+        'entropy_loss_agreement_count': 0,  # How often entropy picks same step as loss
+        'entropy_loss_total_count': 0,      # Total comparisons
         
         # =============================================================
         # PER-SAMPLE ACCURACY TRACKING (for early stopping decisions)
@@ -1207,6 +1222,40 @@ def train_epoch(
                             step_losses.append(float('nan'))
                     epoch_diagnostics['per_step_loss'] = step_losses
                     epoch_diagnostics['per_step_logits_stats'] = step_logits_stats
+                    
+                    # Accumulate per-step losses for epoch average
+                    valid_step_losses = [l if l < 100 and l == l else 0.0 for l in step_losses]  # Replace NaN/100 with 0
+                    if epoch_diagnostics['per_step_loss_sum'] is None:
+                        epoch_diagnostics['per_step_loss_sum'] = valid_step_losses.copy()
+                    else:
+                        # Accumulate element-wise
+                        for i, l in enumerate(valid_step_losses):
+                            if i < len(epoch_diagnostics['per_step_loss_sum']):
+                                epoch_diagnostics['per_step_loss_sum'][i] += l
+                    epoch_diagnostics['per_step_loss_count'] += 1
+                    
+                    # =============================================================
+                    # BEST-STEP TRACKING (solver health monitoring)
+                    # =============================================================
+                    valid_losses_indexed = [(i, l) for i, l in enumerate(valid_step_losses) if l > 0]
+                    if valid_losses_indexed:
+                        best_step_idx = min(valid_losses_indexed, key=lambda x: x[1])[0]
+                        last_step_idx = len(valid_step_losses) - 1
+                        
+                        # Track best step histogram
+                        if best_step_idx < len(epoch_diagnostics['best_step_histogram']):
+                            epoch_diagnostics['best_step_histogram'][best_step_idx] += 1
+                        
+                        # Track if last step was best (healthy) vs earlier step (over-iterating)
+                        if best_step_idx == last_step_idx:
+                            epoch_diagnostics['last_step_was_best_count'] += 1
+                        else:
+                            epoch_diagnostics['earlier_step_was_best_count'] += 1
+                        
+                        # Track improvement from step 0 to last step
+                        if valid_step_losses[0] > 0 and valid_step_losses[-1] > 0:
+                            improvement = (valid_step_losses[0] - valid_step_losses[-1]) / max(valid_step_losses[0], 1e-6)
+                            epoch_diagnostics['step_improvement_sum'] += improvement
             
             # Per-clue entropy breakdown
             if 'attention_maps' in outputs:
@@ -1393,7 +1442,32 @@ def train_epoch(
         batch_fg_acc = 0.0    # Initialize for logging access
         batch_bg_acc = 0.0    # Initialize for logging access
         with torch.no_grad():
-            logits = outputs['logits']  # (B, C, H, W)
+            # Best-step selection for accuracy tracking
+            # Use loss-based best step since we have ground truth during training
+            if hasattr(model, 'use_best_step_selection') and model.use_best_step_selection:
+                all_logits = outputs.get('all_logits')
+                if all_logits and len(all_logits) > 1:
+                    best_logits, best_step, step_info = model.get_best_step_logits(
+                        all_logits, test_outputs, loss_fn
+                    )
+                    logits = best_logits
+                    # Track which step was selected for diagnostics
+                    epoch_diagnostics['best_step_histogram'][best_step] = \
+                        epoch_diagnostics['best_step_histogram'].get(best_step, 0) + 1
+                    if best_step < len(all_logits) - 1:
+                        epoch_diagnostics['earlier_step_was_best_count'] += 1
+                    else:
+                        epoch_diagnostics['last_step_was_best_count'] += 1
+                    
+                    # Track entropy-loss agreement (validates inference heuristic)
+                    if 'entropy_loss_agreement' in step_info:
+                        epoch_diagnostics['entropy_loss_total_count'] += 1
+                        if step_info['entropy_loss_agreement']:
+                            epoch_diagnostics['entropy_loss_agreement_count'] += 1
+                else:
+                    logits = outputs['logits']
+            else:
+                logits = outputs['logits']  # (B, C, H, W)
             preds = logits.argmax(dim=1)  # (B, H, W)
             targets = test_outputs  # (B, H, W)
             
@@ -1563,6 +1637,22 @@ def train_epoch(
                 else:
                     running_class_strs.append(f"{c}:-")
             print(f"    Running50: [{' '.join(running_class_strs)}]")
+            
+            # =============================================================
+            # PER-BATCH SOLVER STEP LOSSES (for detailed monitoring)
+            # =============================================================
+            per_step_loss = epoch_diagnostics.get('per_step_loss', [])
+            if per_step_loss and batch_idx % 50 == 0:  # Log every 50 batches to avoid spam
+                loss_str = ', '.join(f"{l:.3f}" for l in per_step_loss)
+                valid_losses = [(i, l) for i, l in enumerate(per_step_loss) if l < 100 and l == l]
+                if valid_losses:
+                    best_step_idx = min(valid_losses, key=lambda x: x[1])[0]
+                    last_step_idx = len(per_step_loss) - 1
+                    if best_step_idx == last_step_idx:
+                        status = "✓"
+                    else:
+                        status = f"⚠ best={best_step_idx}"
+                    print(f"    Solver: [{loss_str}] {status}")
     
     # Average losses
     for key in total_losses:
@@ -1650,7 +1740,17 @@ def evaluate(
                 return_intermediates=True,
             )
             
-            logits = outputs['logits']
+            # Best-step selection: use lowest-entropy step instead of always last step
+            if hasattr(model, 'use_best_step_selection') and model.use_best_step_selection:
+                all_logits = outputs.get('all_logits')
+                if all_logits and len(all_logits) > 1:
+                    # Select step with lowest prediction entropy (most confident)
+                    best_logits, best_step, step_info = model.get_best_step_logits(all_logits, None, None)
+                    logits = best_logits
+                else:
+                    logits = outputs['logits']
+            else:
+                logits = outputs['logits']
             predictions = logits.argmax(dim=1)
             
             # Initialize color tracking on first batch (after we know num_classes)
@@ -1875,6 +1975,7 @@ def evaluate_trm_style(
     num_dihedral: int = 8,
     num_color_perms: int = 1,
     max_size: int = 30,
+    pass_ks: List[int] = None,
 ) -> Dict[str, float]:
     """
     Proper TTA evaluation with inverse augmentation and voting.
@@ -1893,11 +1994,16 @@ def evaluate_trm_style(
         num_dihedral: Number of dihedral views (1-8)
         num_color_perms: Number of color permutations per dihedral view
         max_size: Max grid size for padding
+        pass_ks: List of K values for Pass@K metrics (default: [1, 2, 3])
         
     Returns:
         Dict with exact_match, pass@k, and voting analysis metrics
     """
     model.eval()
+    
+    # Default Pass@K values
+    if pass_ks is None:
+        pass_ks = [1, 2, 3]
     
     correct = 0
     total = len(eval_tasks)
@@ -1906,6 +2012,9 @@ def evaluate_trm_style(
     # Track voting statistics
     all_unique_predictions = []
     all_winner_votes = []
+    
+    # Track Pass@K metrics
+    pass_at_k_correct = {k: 0 for k in pass_ks}
     
     with torch.no_grad():
         for task in eval_tasks:
@@ -1982,7 +2091,16 @@ def evaluate_trm_style(
                         return_intermediates=True,
                     )
                     
-                    logits = outputs['logits']  # (1, C, H, W)
+                    # Best-step selection: use lowest-entropy step for most confident prediction
+                    if hasattr(model, 'use_best_step_selection') and model.use_best_step_selection:
+                        all_logits = outputs.get('all_logits')
+                        if all_logits and len(all_logits) > 1:
+                            best_logits, _, _ = model.get_best_step_logits(all_logits, None, None)
+                            logits = best_logits
+                        else:
+                            logits = outputs['logits']
+                    else:
+                        logits = outputs['logits']  # (1, C, H, W)
                     pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()  # (H, W)
                     
                     # Inverse transform to canonical space
@@ -2002,16 +2120,25 @@ def evaluate_trm_style(
                     vote_counts[h] = {'count': 0, 'grid': pred}
                 vote_counts[h]['count'] += 1
             
-            # Find winner (by count)
-            winner_hash = max(vote_counts.keys(), key=lambda h: vote_counts[h]['count'])
-            winner_grid = vote_counts[winner_hash]['grid']
-            winner_votes = vote_counts[winner_hash]['count']
+            # Rank predictions by vote count (descending)
+            ranked_preds = sorted(vote_counts.values(), key=lambda x: x['count'], reverse=True)
             
             # Track voting stats
             all_unique_predictions.append(len(vote_counts))
-            all_winner_votes.append(winner_votes)
+            all_winner_votes.append(ranked_preds[0]['count'] if ranked_preds else 0)
             
-            # Compare with ground truth
+            # Check Pass@K: is ground truth among top K predictions?
+            for k in pass_ks:
+                top_k_preds = ranked_preds[:k]
+                is_in_top_k = any(
+                    p['grid'].shape == test_output.shape and np.array_equal(p['grid'], test_output)
+                    for p in top_k_preds
+                )
+                if is_in_top_k:
+                    pass_at_k_correct[k] += 1
+            
+            # Also check exact match (Pass@1)
+            winner_grid = ranked_preds[0]['grid'] if ranked_preds else np.array([[0]])
             is_correct = (
                 winner_grid.shape == test_output.shape and
                 np.array_equal(winner_grid, test_output)
@@ -2026,9 +2153,10 @@ def evaluate_trm_style(
     avg_winner_votes = sum(all_winner_votes) / max(len(all_winner_votes), 1)
     max_agreement = max(all_winner_votes) if all_winner_votes else 0
     
-    return {
-        'pass@1': exact_match,
-        'pass@2': exact_match,  # With voting, pass@2 ≈ pass@1 unless ties
+    # Compute Pass@K metrics
+    pass_at_k = {f'pass@{k}': pass_at_k_correct[k] / max(total, 1) for k in pass_ks}
+    
+    result = {
         'exact_match': exact_match,
         'correct_tasks': correct,
         'total_tasks': total,
@@ -2036,7 +2164,12 @@ def evaluate_trm_style(
         'avg_winner_votes': avg_winner_votes,
         'max_agreement': max_agreement,
         'total_views': total_views,
+        'pass_ks': pass_ks,
     }
+    # Add Pass@K metrics
+    result.update(pass_at_k)
+    
+    return result
 
 
 def save_checkpoint(
@@ -2748,33 +2881,107 @@ Config Overrides:
             if all_logits_count > 0:
                 print(f"  Solver Steps: {all_logits_count} (deep supervision active)")
                 
-                # Per-step loss breakdown
-                per_step_loss = diagnostics.get('per_step_loss', [])
-                if per_step_loss:
-                    loss_str = ', '.join(f"{l:.3f}" for l in per_step_loss)
-                    print(f"  Per-Step Loss: [{loss_str}]")
+                # Per-step loss breakdown - EPOCH AVERAGE (more reliable than single batch)
+                per_step_loss_sum = diagnostics.get('per_step_loss_sum')
+                per_step_loss_count = diagnostics.get('per_step_loss_count', 0)
+                
+                if per_step_loss_sum and per_step_loss_count > 0:
+                    # Compute epoch average per step
+                    per_step_avg = [s / per_step_loss_count for s in per_step_loss_sum]
+                    avg_str = ', '.join(f"{l:.4f}" for l in per_step_avg)
+                    print(f"  Per-Step Loss (epoch avg, {per_step_loss_count} batches): [{avg_str}]")
                     
-                    # Find best step (should ideally be the last)
-                    valid_losses = [(i, l) for i, l in enumerate(per_step_loss) if l < 100 and not (l != l)]  # exclude 100 and NaN
+                    # Find best step based on epoch average (should ideally be the last)
+                    valid_losses = [(i, l) for i, l in enumerate(per_step_avg) if l > 0]
                     if valid_losses:
                         best_step, best_loss = min(valid_losses, key=lambda x: x[1])
                         worst_step, worst_loss = max(valid_losses, key=lambda x: x[1])
                         
-                        if best_step == len(per_step_loss) - 1:
-                            improvement = (per_step_loss[0] - per_step_loss[-1]) / max(per_step_loss[0], 0.001) * 100
-                            print(f"    Step improvement: {improvement:.1f}% (later steps better - GOOD!)")
+                        if best_step == len(per_step_avg) - 1:
+                            improvement = (per_step_avg[0] - per_step_avg[-1]) / max(per_step_avg[0], 0.001) * 100
+                            print(f"    ✓ Step improvement: {improvement:.1f}% (later steps better - GOOD!)")
                         elif best_step == 0:
-                            degradation = (per_step_loss[-1] - per_step_loss[0]) / max(per_step_loss[0], 0.001) * 100
+                            degradation = (per_step_avg[-1] - per_step_avg[0]) / max(per_step_avg[0], 0.001) * 100
                             print(f"    [!] SOLVER DEGRADATION: Step 0 is best! Later steps {degradation:.1f}% worse!")
-                            print(f"    [!] Best: step {best_step} ({best_loss:.3f}), Worst: step {worst_step} ({worst_loss:.3f})")
+                            print(f"    [!] Best: step {best_step} ({best_loss:.4f}), Worst: step {worst_step} ({worst_loss:.4f})")
                         else:
-                            print(f"    [!] Best step is {best_step} (middle), not last - solver unstable!")
-                            print(f"    [!] Best: step {best_step} ({best_loss:.3f}), Final: step {len(per_step_loss)-1} ({per_step_loss[-1]:.3f})")
+                            print(f"    [!] Best step is {best_step} (middle), not last - solver may be over-iterating!")
+                            print(f"    [!] Best: step {best_step} ({best_loss:.4f}), Final: step {len(per_step_avg)-1} ({per_step_avg[-1]:.4f})")
+                            # Show how much we'd gain by stopping at best step
+                            potential_gain = (per_step_avg[-1] - best_loss) / max(per_step_avg[-1], 0.001) * 100
+                            print(f"    [!] Potential gain from best-step selection: {potential_gain:.1f}% lower loss")
+                else:
+                    # Fallback to last batch (legacy display)
+                    per_step_loss = diagnostics.get('per_step_loss', [])
+                    if per_step_loss:
+                        loss_str = ', '.join(f"{l:.3f}" for l in per_step_loss)
+                        print(f"  Per-Step Loss (last batch only): [{loss_str}]")
                     
-                    # Check for loss = 100 (clamped infinite loss)
-                    if 100.0 in per_step_loss:
-                        bad_steps = [i for i, l in enumerate(per_step_loss) if l >= 100.0]
-                        print(f"    [CRITICAL] Steps {bad_steps} have loss >= 100 (numerical explosion!)")
+                        # Find best step (should ideally be the last)
+                        valid_losses = [(i, l) for i, l in enumerate(per_step_loss) if l < 100 and not (l != l)]  # exclude 100 and NaN
+                        if valid_losses:
+                            best_step, best_loss = min(valid_losses, key=lambda x: x[1])
+                            worst_step, worst_loss = max(valid_losses, key=lambda x: x[1])
+                            
+                            if best_step == len(per_step_loss) - 1:
+                                improvement = (per_step_loss[0] - per_step_loss[-1]) / max(per_step_loss[0], 0.001) * 100
+                                print(f"    Step improvement: {improvement:.1f}% (later steps better - GOOD!)")
+                            elif best_step == 0:
+                                degradation = (per_step_loss[-1] - per_step_loss[0]) / max(per_step_loss[0], 0.001) * 100
+                                print(f"    [!] SOLVER DEGRADATION: Step 0 is best! Later steps {degradation:.1f}% worse!")
+                                print(f"    [!] Best: step {best_step} ({best_loss:.3f}), Worst: step {worst_step} ({worst_loss:.3f})")
+                            else:
+                                print(f"    [!] Best step is {best_step} (middle), not last - solver unstable!")
+                                print(f"    [!] Best: step {best_step} ({best_loss:.3f}), Final: step {len(per_step_loss)-1} ({per_step_loss[-1]:.3f})")
+                        
+                        # Check for loss = 100 (clamped infinite loss)
+                        if 100.0 in per_step_loss:
+                            bad_steps = [i for i, l in enumerate(per_step_loss) if l >= 100.0]
+                            print(f"    [CRITICAL] Steps {bad_steps} have loss >= 100 (numerical explosion!)")
+                
+                # =============================================================
+                # SOLVER HEALTH SUMMARY (aggregate best-step statistics)
+                # =============================================================
+                last_best = diagnostics.get('last_step_was_best_count', 0)
+                earlier_best = diagnostics.get('earlier_step_was_best_count', 0)
+                total_checks = last_best + earlier_best
+                
+                if total_checks > 0:
+                    last_best_pct = last_best / total_checks * 100
+                    earlier_best_pct = earlier_best / total_checks * 100
+                    
+                    # Best step histogram
+                    histogram = diagnostics.get('best_step_histogram', [])
+                    num_steps = len([h for h in histogram if h > 0])
+                    if num_steps > 0:
+                        hist_str = ', '.join(f"s{i}:{h}" for i, h in enumerate(histogram[:num_steps]) if h > 0)
+                        print(f"  Best-Step Histogram: [{hist_str}]")
+                    
+                    print(f"  Solver Health: Last step best: {last_best_pct:.1f}%, Earlier step best: {earlier_best_pct:.1f}%")
+                    
+                    # Average improvement from step 0 to step N
+                    improvement_sum = diagnostics.get('step_improvement_sum', 0.0)
+                    avg_improvement = improvement_sum / total_checks * 100
+                    print(f"  Avg Step Improvement: {avg_improvement:.1f}% (step0→stepN)")
+                    
+                    # Health warnings
+                    if earlier_best_pct > 30:
+                        print(f"    ⚠️ SOLVER OVER-ITERATION WARNING: {earlier_best_pct:.0f}% of batches had earlier step as best!")
+                        print(f"    ⚠️ Consider: (1) enabling best-step selection, (2) reducing num_solver_steps, (3) enabling ACT")
+                    if avg_improvement < 0:
+                        print(f"    ⚠️ SOLVER DEGRADATION: Avg improvement is negative! More steps = worse predictions!")
+                    
+                    # Entropy-Loss Agreement (validates inference heuristic)
+                    entropy_total = diagnostics.get('entropy_loss_total_count', 0)
+                    entropy_agree = diagnostics.get('entropy_loss_agreement_count', 0)
+                    if entropy_total > 0:
+                        agree_pct = entropy_agree / entropy_total * 100
+                        print(f"  Entropy-Loss Agreement: {agree_pct:.1f}% ({entropy_agree}/{entropy_total})")
+                        if agree_pct < 50:
+                            print(f"    ⚠️ LOW AGREEMENT: Entropy picks same step as loss only {agree_pct:.0f}% of time!")
+                            print(f"    ⚠️ Inference best-step selection may not be reliable!")
+                        elif agree_pct >= 80:
+                            print(f"    ✓ High agreement - entropy is a good proxy for loss during inference")
                 
                 # Per-step logit statistics (numerical stability check)
                 per_step_stats = diagnostics.get('per_step_logits_stats', [])
@@ -3517,15 +3724,28 @@ Config Overrides:
                 if eval_tasks:
                     num_dihedral = config.get('evaluation', {}).get('num_augmented_views', 8)
                     num_color_perms = config.get('evaluation', {}).get('num_color_perms', 4)
+                    pass_ks = config.get('evaluation', {}).get('pass_ks', [1, 2, 3])
                     trm_metrics = evaluate_trm_style(
                         eval_model, eval_tasks, device, 
                         temperature=eval_temp,
                         num_dihedral=num_dihedral,
                         num_color_perms=num_color_perms,  # TTA with color permutation for max generalization
                         max_size=max_grid_size,
+                        pass_ks=pass_ks,
                     )
-                    print(f"\n  --- TRM-Style TTA Evaluation ({num_dihedral} dihedral views, voting) ---")
-                    print(f"  ★ TTA Exact Match: {trm_metrics['correct_tasks']}/{trm_metrics['total_tasks']} ({trm_metrics['exact_match']*100:.1f}%)")
+                    total_views = num_dihedral * num_color_perms
+                    print(f"\n  --- TRM-Style TTA Evaluation ({num_dihedral} dihedral x {num_color_perms} color = {total_views} views) ---")
+                    print(f"  ★ TTA Exact Match (Pass@1): {trm_metrics['correct_tasks']}/{trm_metrics['total_tasks']} ({trm_metrics['exact_match']*100:.1f}%)")
+                    
+                    # Report Pass@K metrics
+                    pass_k_parts = []
+                    for k in pass_ks:
+                        pass_k_key = f'pass@{k}'
+                        if pass_k_key in trm_metrics:
+                            pass_k_parts.append(f"Pass@{k}: {trm_metrics[pass_k_key]*100:.1f}%")
+                    if pass_k_parts:
+                        print(f"  Pass@K: {' | '.join(pass_k_parts)}")
+                    
                     print(f"  Avg Unique Predictions: {trm_metrics['avg_unique_predictions']:.1f} / {trm_metrics['total_views']}")
                     print(f"  Avg Winner Votes: {trm_metrics['avg_winner_votes']:.1f} / {trm_metrics['total_views']}")
                     
