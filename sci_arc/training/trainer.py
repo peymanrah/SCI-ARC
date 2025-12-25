@@ -245,23 +245,47 @@ class SCIARCTrainer:
             self.loss_logger.wandb_run = self.wandb_run
     
     def _create_optimizer(self) -> AdamW:
-        """Create AdamW optimizer with weight decay filtering."""
-        # Separate parameters that should and shouldn't have weight decay
+        """Create AdamW optimizer with weight decay filtering.
+        
+        SCIENTIFIC FIX: HyperLoRA parameters get 10x higher learning rate
+        to compensate for gradient scale disparity (avg 0.006 vs 0.058 main).
+        This prevents meta-learner starvation during early training.
+        """
+        # Separate parameters into groups:
+        # 1. HyperLoRA params (higher LR to fix vanishing meta-gradients)
+        # 2. Regular decay params (bias/norm excluded)
+        # 3. No decay params (bias, norm, embedding)
+        hyperlora_params = []
         decay_params = []
         no_decay_params = []
         
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
-            if 'bias' in name or 'norm' in name or 'embedding' in name:
+            if 'hyper_lora' in name:
+                # HyperLoRA gets 10x learning rate to fix gradient disparity
+                hyperlora_params.append(param)
+            elif 'bias' in name or 'norm' in name or 'embedding' in name:
                 no_decay_params.append(param)
             else:
                 decay_params.append(param)
+        
+        # Meta-learning LR multiplier (10x to compensate for ~10x smaller gradients)
+        hyperlora_lr_multiplier = 10.0
         
         param_groups = [
             {'params': decay_params, 'weight_decay': self.config.weight_decay},
             {'params': no_decay_params, 'weight_decay': 0.0},
         ]
+        
+        # Add HyperLoRA group with higher LR if we have any HyperLoRA params
+        if hyperlora_params:
+            param_groups.append({
+                'params': hyperlora_params,
+                'weight_decay': self.config.weight_decay,
+                'lr': self.config.learning_rate * hyperlora_lr_multiplier,
+            })
+            print(f"[Optimizer] HyperLoRA params: {len(hyperlora_params)} tensors @ {hyperlora_lr_multiplier}x LR")
         
         return AdamW(param_groups, lr=self.config.learning_rate)
     

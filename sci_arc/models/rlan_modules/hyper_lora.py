@@ -44,7 +44,13 @@ import torch.nn.functional as F
 
 @dataclass
 class HyperLoRAConfig:
-    """Configuration for HyperLoRA module."""
+    """Configuration for HyperLoRA module.
+    
+    SCIENTIFIC FIX (2025-12-25):
+    - Increased init_scale from 0.01 to 0.1 to fix weak initialization coupling.
+    - At init_scale=0.01, adaptation effect was only 0.0001 loss delta (negligible).
+    - Higher init_scale = stronger initial signal for meta-learning to latch onto.
+    """
     enabled: bool = True
     rank: int = 8                          # LoRA rank (8-16 recommended)
     hidden_dim: int = 256                  # Model hidden dimension
@@ -54,7 +60,7 @@ class HyperLoRAConfig:
     target_gru: bool = True                # Adapt GRU weights
     target_output_head: bool = True        # Adapt output head weights
     num_gru_gates: int = 3                 # reset, update, candidate (GRU has 3 gates)
-    init_scale: float = 0.01              # Near-zero init for safety
+    init_scale: float = 0.1               # Stronger init for better adaptation signal (was 0.01)
 
 
 class LoRAPredictor(nn.Module):
