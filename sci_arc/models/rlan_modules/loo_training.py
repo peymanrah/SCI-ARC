@@ -167,20 +167,35 @@ class LOOTrainingLoss(nn.Module):
         else:
             num_valid_pairs = torch.full((B,), N, device=device)
         
-        # Encode support inputs to get features
-        # RLAN encoder expects (B, H, W) input, so we flatten and reshape
-        input_grids_flat = input_grids.view(B * N, H, W)  # (B*N, H, W)
+        # Check if model has ContextEncoder with spatial features enabled
+        if not hasattr(model, 'context_encoder') or model.context_encoder is None:
+            return {
+                'loo_loss': torch.tensor(0.0, device=device),
+                'loo_accuracy': 0.0,
+                'loo_num_holdouts': 0,
+                'loo_skipped': True,
+                'loo_reason': 'Model does not have ContextEncoder (required for LOO)',
+            }
         
-        # Get encoder features - use model's encoding method
-        with torch.no_grad():
-            # Embed to one-hot and encode
-            x_onehot = F.one_hot(input_grids_flat.long(), num_classes=model.num_colors).float()
-            x_onehot = x_onehot.permute(0, 3, 1, 2)  # (B*N, C, H, W)
-            support_features_flat = model.encoder(x_onehot)  # (B*N, D, Hs, Ws)
+        if not getattr(model.context_encoder, 'use_spatial_features', False):
+            return {
+                'loo_loss': torch.tensor(0.0, device=device),
+                'loo_accuracy': 0.0,
+                'loo_num_holdouts': 0,
+                'loo_skipped': True,
+                'loo_reason': 'ContextEncoder must have use_spatial_features=True for LOO',
+            }
         
-        D = support_features_flat.shape[1]
-        Hs, Ws = support_features_flat.shape[2], support_features_flat.shape[3]
-        support_features = support_features_flat.view(B, N, D, Hs, Ws)
+        # CRITICAL FIX: Use context_encoder to encode input-output PAIRS
+        # This ensures HyperLoRA learns from the same distribution as inference.
+        # context_encoder returns (B, N, D, H, W) spatial features encoding
+        # the transformation pattern from each input-output pair.
+        support_features = model.context_encoder(
+            input_grids, output_grids, pair_mask
+        )  # (B, N, D, H, W)
+        
+        D = support_features.shape[2]
+        Hs, Ws = support_features.shape[3], support_features.shape[4]
         
         # Now compute LOO loss
         total_loss = torch.tensor(0.0, device=device)
@@ -209,10 +224,19 @@ class LOOTrainingLoss(nn.Module):
             holdout_target = output_grids[:, holdout_idx]  # (B, H, W)
             
             # Forward pass with LoRA weights
-            # Use full support features for cross-attention (context is from N-1 only via LoRA)
+            # CRITICAL FIX (Dec 2025): Use remaining_features for cross-attention
+            # to prevent data leakage. Previously we passed support_features which
+            # contained the held-out pair's output - allowing the model to "cheat"
+            # by attending to the answer via CrossAttentionInjector.
+            #
+            # Why remaining_features is correct:
+            # 1. At inference, the test output is NEVER in the support set
+            # 2. LOO should simulate this by hiding the held-out output
+            # 3. This teaches the model to generalize without seeing the answer
+            # 4. CrossAttentionInjector handles variable N gracefully
             logits = model.forward_with_lora(
                 holdout_input,
-                support_features,
+                remaining_features,  # Only N-1 pairs - no data leakage!
                 lora_deltas,
             )  # (B, num_classes, H, W)
             
@@ -320,25 +344,18 @@ class LOOTrainingLoss(nn.Module):
             holdout_input = holdout_input.squeeze(1)  # (B, H, W)
             holdout_target = support_targets[:, holdout_idx]  # (B, H, W)
             
-            # For remaining features to pass to solver, flatten N-1 pairs
-            # Shape: (B, N-1, D, Hs, Ws) -> (B*(N-1), D, Hs, Ws)
-            B_remaining = B * (N - 1)
-            remaining_flat = remaining_features.reshape(B_remaining, D, Hs, Ws)
-            
-            # We need to expand holdout input to match, then gather back
-            # Actually, let's just use the full support features for cross-attention
-            # but only use remaining pairs for context pooling
-            support_flat = support_features.reshape(B * N, D, Hs, Ws)
-            
-            # Forward pass through solver with predicted LoRA weights
-            # We pass remaining_features reshaped appropriately
-            # The solver expects support_features in a specific format
-            
-            # For simplicity, use full support for cross-attention
-            # but the context was pooled from remaining only
+            # CRITICAL FIX (Dec 2025): Use remaining_features for cross-attention
+            # to prevent data leakage. The held-out pair's output must NOT be
+            # visible to the model during LOO training, otherwise it can "cheat"
+            # by attending to the answer via CrossAttentionInjector.
+            #
+            # Why this simulates inference correctly:
+            # - At inference, we have N training pairs + 1 test INPUT (no test output)
+            # - LOO simulates this: N-1 pairs + 1 held-out INPUT (no held-out output)
+            # - The model must generalize from patterns, not copy answers
             logits = rlan.forward_with_lora(
                 holdout_input,
-                support_features,  # Full support for cross-attention
+                remaining_features,  # Only N-1 pairs - no data leakage!
                 lora_deltas,
             )  # (B, num_classes, H, W)
             

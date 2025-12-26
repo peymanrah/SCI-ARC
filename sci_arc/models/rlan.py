@@ -236,12 +236,14 @@ class RLAN(nn.Module):
         use_cross_attn_context = config.use_cross_attention_context if config and hasattr(config, 'use_cross_attention_context') else False
         spatial_downsample = config.spatial_downsample if config and hasattr(config, 'spatial_downsample') else 1
         
-        # CRITICAL FIX: Need spatial features if EITHER:
+        # CRITICAL FIX: Need spatial features if ANY of:
         # 1. CrossAttentionInjector is used (use_cross_attention_context=True)
         # 2. Solver cross-attention to support set is used (use_solver_context=True)
-        # Both modes need (B, N, D, H, W) spatial features from ContextEncoder
+        # 3. HyperLoRA is used (use_hyperlora=True) - requires (B, N, D, H, W) for LOO training
+        # All modes need (B, N, D, H, W) spatial features from ContextEncoder
         use_solver_context_flag = config.use_solver_context if config else True
-        needs_spatial_features = use_cross_attn_context or use_solver_context_flag
+        use_hyperlora_flag = config.use_hyperlora if config else False
+        needs_spatial_features = use_cross_attn_context or use_solver_context_flag or use_hyperlora_flag
         
         if self.use_context_encoder:
             self.context_encoder = ContextEncoder(

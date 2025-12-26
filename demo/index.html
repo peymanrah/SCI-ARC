@@ -761,48 +761,153 @@
     <span class="keyword">return</span> <span class="function">Stablemax</span>(logits)  <span class="comment"># final grid prediction</span>
 
 <span class="comment"># ===========================================</span>
-<span class="comment"># TRAINING: How HyperLoRA learns to generalize</span>
+<span class="comment"># TRAINING: Complete Meta-Learning Pipeline</span>
 <span class="comment"># ===========================================</span>
 <span class="keyword">function</span> <span class="function">RLAN_Train_Step</span>(batch):
-    <span class="comment"># Standard task loss</span>
-    pred = <span class="function">RLAN_Forward</span>(batch.train_pairs, batch.test_input)
-    L_task = <span class="function">CrossEntropy</span>(pred, batch.test_output)
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 1: Encode Training Context (all N pairs)</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    train_pairs = batch.train_pairs              <span class="comment"># List of (input, output) tuples</span>
+    N = len(train_pairs)
     
-    <span class="comment"># LOO Loss: Leave-One-Out meta-learning (trains HyperLoRA to generalize)</span>
+    F_support = <span class="function">Encoder</span>(train_pairs)             <span class="comment"># [N, H, W, D] - all pairs encoded</span>
+    F_pooled = <span class="function">SpatialPool</span>(F_support)            <span class="comment"># [N, D] - spatially pooled</span>
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 2: HyperLoRA Weight Prediction (from all N pairs)</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    z_struct = <span class="function">StructProjector</span>(<span class="function">AvgPool</span>(F_pooled))  <span class="comment"># [d_z] structure latent</span>
+    ΔW_A, ΔW_B = <span class="function">HyperNet</span>(z_struct)              <span class="comment"># LoRA weight deltas</span>
+    W_adapted = W_base + α * (ΔW_A @ ΔW_B.T)    <span class="comment"># Task-adapted weights</span>
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 3: Standard Forward Pass → Task Loss</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    context = <span class="function">CrossAttention</span>(test_input, F_support)  <span class="comment"># Attend to all N pairs</span>
+    pred = <span class="function">RecursiveSolver</span>(test_input, context, W_adapted)
+    L_task = <span class="function">FocalLoss</span>(pred, batch.test_output)
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 4: Leave-One-Out Loss (Meta-Learning Signal)</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># Forces HyperLoRA to learn GENERALIZABLE patterns</span>
+    <span class="comment"># by predicting held-out pairs from remaining context</span>
+    
     L_loo = 0
-    <span class="keyword">for</span> k <span class="keyword">in</span> 1..N:  <span class="comment"># for each training pair</span>
-        pairs_minus_k = train_pairs <span class="keyword">without</span> pair[k]  <span class="comment"># hold out pair k</span>
-        z_struct_k = <span class="function">StructProjector</span>(<span class="function">Encode</span>(pairs_minus_k))
-        ΔW = <span class="function">HyperNet</span>(z_struct_k)  <span class="comment"># predict weights from N-1 pairs</span>
-        pred_k = <span class="function">SolveWithLoRA</span>(pair[k].input, ΔW)  <span class="comment"># predict held-out</span>
-        L_loo += <span class="function">CrossEntropy</span>(pred_k, pair[k].output)
-    L_loo = L_loo / N
+    <span class="keyword">for</span> k <span class="keyword">in</span> 1..N:                                 <span class="comment"># Rotate through each holdout</span>
+        <span class="comment"># 4a: Remove pair k from context</span>
+        remaining_pairs = train_pairs \ {pair[k]}  <span class="comment"># N-1 pairs only!</span>
+        held_input, held_output = pair[k]
+        
+        <span class="comment"># 4b: Re-encode with N-1 pairs (CRITICAL: no leakage!)</span>
+        F_remaining = <span class="function">Encoder</span>(remaining_pairs)     <span class="comment"># [N-1, H, W, D]</span>
+        F_rem_pooled = <span class="function">SpatialPool</span>(F_remaining)   <span class="comment"># [N-1, D]</span>
+        
+        <span class="comment"># 4c: HyperLoRA predicts weights from N-1 pairs</span>
+        z_struct_k = <span class="function">StructProjector</span>(<span class="function">AvgPool</span>(F_rem_pooled))
+        ΔW_k = <span class="function">HyperNet</span>(z_struct_k)
+        W_k = W_base + α * ΔW_k
+        
+        <span class="comment"># 4d: Cross-attention sees only N-1 pairs</span>
+        context_k = <span class="function">CrossAttention</span>(held_input, F_remaining)
+        
+        <span class="comment"># 4e: Solve held-out pair with adapted weights</span>
+        pred_k = <span class="function">RecursiveSolver</span>(held_input, context_k, W_k)
+        L_loo += <span class="function">CrossEntropy</span>(pred_k, held_output)
     
-    <span class="comment"># Total loss with orthogonality regularization</span>
+    L_loo = L_loo / N                              <span class="comment"># Average over all holdouts</span>
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 5: Augmentation Equivariance Loss</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># Ensures structure latent is invariant to augmentations</span>
+    aug_pairs = <span class="function">RandomAugment</span>(train_pairs)
+    z_struct_aug = <span class="function">StructProjector</span>(<span class="function">Encode</span>(aug_pairs))
+    L_equiv = <span class="function">MSE</span>(z_struct, z_struct_aug)
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 6: Orthogonality Loss (Disentanglement)</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
     z_content = <span class="function">ContentProjector</span>(test_features)
-    L_ortho = |z_struct · z_content|²  <span class="comment"># structure ⊥ content</span>
+    L_ortho = (z_struct · z_content)²             <span class="comment"># Structure ⊥ Content</span>
     
-    <span class="keyword">return</span> L_task + λ_loo * L_loo + λ_ortho * L_ortho
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 7: Combined Loss</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    L_total = L_task + λ_loo*L_loo + λ_equiv*L_equiv + λ_ortho*L_ortho
+    
+    <span class="keyword">return</span> L_total
 
 <span class="comment"># ===========================================</span>
-<span class="comment"># INFERENCE: TTA + ACW for robust predictions</span>
+<span class="comment"># INFERENCE: Complete Pipeline with TTA + ACW</span>
 <span class="comment"># ===========================================</span>
 <span class="keyword">function</span> <span class="function">RLAN_Inference</span>(train_pairs, test_input):
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 1: Encode Training Context</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    F_support = <span class="function">Encoder</span>(train_pairs)             <span class="comment"># [N, H, W, D]</span>
+    F_pooled = <span class="function">SpatialPool</span>(F_support)            <span class="comment"># [N, D]</span>
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 2: HyperLoRA Weight Prediction</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    z_struct = <span class="function">StructProjector</span>(<span class="function">AvgPool</span>(F_pooled))
+    ΔW_gru, ΔW_head = <span class="function">HyperNet</span>(z_struct)
+    
+    <span class="comment"># Apply LoRA to GRU gates and output head</span>
+    W_gru_adapted = W_gru + α * ΔW_gru
+    W_head_adapted = W_head + α * ΔW_head
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 3: DSC + MSRE + LCR Feature Extraction</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    F_test = <span class="function">Encoder</span>(test_input)
+    clues = <span class="function">DSC</span>(F_test)                          <span class="comment"># Discover clue anchors</span>
+    P_rel = <span class="function">MSRE</span>(clues)                          <span class="comment"># Relative coordinates</span>
+    C = <span class="function">LCR</span>(clues, test_input)                  <span class="comment"># Color counting</span>
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 4: Cross-Attention Context Injection</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    context = <span class="function">CrossAttention</span>(
+        query=F_test,
+        keys=F_support,
+        values=F_support
+    )  <span class="comment"># Order-invariant attention (no positional encoding on N)</span>
+    
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    <span class="comment"># STEP 5: Recursive Solver with Adapted Weights</span>
+    <span class="comment"># ─────────────────────────────────────────────────────────────</span>
+    H = <span class="function">zeros</span>(H_out, W_out, D)
+    <span class="keyword">for</span> s <span class="keyword">in</span> 1..S_max:
+        X_hat = <span class="function">Concat</span>(F_test, context, P_rel, C, H)
+        H = <span class="function">ConvGRU</span>(X_hat, H, W_gru_adapted)     <span class="comment"># Task-adapted GRU</span>
+        logits = <span class="function">OutputHead</span>(H, W_head_adapted)  <span class="comment"># Task-adapted head</span>
+        <span class="keyword">if</span> <span class="function">HaltingCondition</span>(H): <span class="keyword">break</span>
+    
+    <span class="keyword">return</span> <span class="function">Stablemax</span>(logits)
+
+<span class="comment"># ─────────────────────────────────────────────────────────────</span>
+<span class="comment"># STEP 6: Test-Time Augmentation + ACW</span>
+<span class="comment"># ─────────────────────────────────────────────────────────────</span>
+<span class="keyword">function</span> <span class="function">RLAN_Inference_TTA</span>(train_pairs, test_input):
     predictions = []
     
-    <span class="comment"># Test-Time Augmentation: 8 dihedral × 4 color perms = 32 views</span>
+    <span class="comment"># 32 augmented views: 8 dihedral × 4 color permutations</span>
     <span class="keyword">for</span> T <span class="keyword">in</span> Dihedral8 × ColorPerms4:
         aug_pairs = <span class="function">ApplyAug</span>(train_pairs, T)
         aug_test = <span class="function">ApplyAug</span>(test_input, T)
-        pred = <span class="function">RLAN_Forward</span>(aug_pairs, aug_test)
-        pred = <span class="function">InverseAug</span>(pred, T)  <span class="comment"># undo augmentation</span>
+        
+        <span class="comment"># HyperLoRA runs on augmented context</span>
+        pred = <span class="function">RLAN_Inference</span>(aug_pairs, aug_test)
+        pred = <span class="function">InverseAug</span>(pred, T)  <span class="comment"># Undo augmentation</span>
         predictions.append(pred)
     
-    <span class="comment"># ACW: Augmented Confidence Weighting</span>
+    <span class="comment"># ACW: Weight by prediction consistency</span>
     <span class="keyword">for</span> i <span class="keyword">in</span> predictions:
-        consistency[i] = 1 - <span class="function">MeanDisagreement</span>(pred[i], all_others)
+        consistency[i] = 1 - <span class="function">MeanDisagreement</span>(pred[i], others)
     
-    <span class="keyword">return</span> <span class="function">WeightedVote</span>(predictions, consistency)</code></pre>
+    <span class="keyword">return</span> <span class="function">WeightedMajorityVote</span>(predictions, consistency)</code></pre>
                 </div>
                 
                 <div class="formula-reference">

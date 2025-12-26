@@ -137,12 +137,14 @@ Before diving into technical details, let's understand RLAN through three visual
 6. [Module 3: Latent Counting Registers (LCR)](#6-module-3-latent-counting-registers-lcr)
 7. [Module 4: Symbolic Predicate Heads (SPH)](#7-module-4-symbolic-predicate-heads-sph)
 8. [The Recursive Solver](#8-the-recursive-solver)
-9. [Loss Functions & Training](#9-loss-functions--training)
-10. [ARC Task Analysis & Examples](#10-arc-task-analysis--examples)
-11. [Architecture Diagram](#11-architecture-diagram)
-12. [Recent Technical Innovations](#12-recent-technical-innovations)
-13. [Implementation Considerations](#13-implementation-considerations)
-14. [Conclusion](#14-conclusion)
+9. [Context Encoder & Cross-Attention](#9-context-encoder--cross-attention)
+10. [**HyperLoRA & Meta-Learning**](#10-hyperlora--meta-learning) ⭐ NEW
+11. [Loss Functions & Training](#11-loss-functions--training)
+12. [ARC Task Analysis & Examples](#12-arc-task-analysis--examples)
+13. [Architecture Diagram](#13-architecture-diagram)
+14. [Recent Technical Innovations](#14-recent-technical-innovations)
+15. [Implementation Considerations](#15-implementation-considerations)
+16. [Conclusion](#16-conclusion)
 
 ---
 
@@ -762,15 +764,358 @@ Final output: Y = argmax(logits_S)
 
 ---
 
-## 10. Loss Functions & Training
+## 10. HyperLoRA & Meta-Learning
 
-### 10.1 The Complete Loss Function
+### 10.1 Motivation: Fast Adaptation Without Gradients
 
-$$\mathcal{L}_{total} = \mathcal{L}_{focal} + \lambda_1 \mathcal{L}_{entropy} + \lambda_2 \mathcal{L}_{sparsity} + \lambda_3 \mathcal{L}_{predicate} + \lambda_4 \mathcal{L}_{curriculum}$$
+Standard neural networks require gradient-based fine-tuning to adapt to new tasks. This is impractical for ARC, where:
+- Each task has only 2-5 training examples
+- We need instant adaptation at inference time
+- Gradient updates risk overfitting to small support sets
 
-### 10.2 Component Losses
+**Solution**: HyperLoRA—a hypernetwork that **predicts task-specific weight adaptations** from context, enabling zero-shot generalization to novel tasks.
 
-#### 10.2.1 Focal Loss (Main Task Loss)
+### 10.2 HyperLoRA Architecture
+
+#### 10.2.1 Context Aggregation
+
+Given $N$ input-output training pairs, we first encode them into a joint representation:
+
+$$F_{support} = \text{Encoder}(\{(X_i, Y_i)\}_{i=1}^{N}) \in \mathbb{R}^{N \times D}$$
+
+The support features are pooled into a task-level structure vector:
+
+$$\mathbf{z}_{struct} = \text{StructProjector}(\text{AvgPool}_{N}(F_{support})) \in \mathbb{R}^{d_z}$$
+
+Where:
+- $\text{AvgPool}_{N}$ averages across the $N$ example dimension (order-invariant)
+- $\text{StructProjector}$ is an MLP mapping to the structure latent space
+- $\mathbf{z}_{struct}$ captures the **transformation rule** (e.g., "rotate 90°", "fill enclosed regions")
+
+#### 10.2.2 LoRA Weight Prediction
+
+The HyperNet predicts low-rank weight deltas for target modules:
+
+$$\Delta W_A, \Delta W_B = \text{HyperNet}(\mathbf{z}_{struct})$$
+
+Where:
+- $\Delta W_A \in \mathbb{R}^{d_{out} \times r}$ and $\Delta W_B \in \mathbb{R}^{d_{in} \times r}$ (rank $r=8$ by default)
+- These target the GRU gates and output head in the Recursive Solver
+
+The adapted weights are computed as:
+
+$$W' = W + \alpha \cdot (\Delta W_A \cdot \Delta W_B^T)$$
+
+Where:
+- $W$ is the frozen pretrained weight
+- $\alpha$ is a learned or fixed scaling factor (default 1.0)
+- The low-rank structure keeps the parameter count tractable
+
+#### 10.2.3 Target Modules
+
+HyperLoRA adapts the following components:
+
+| Module | Purpose | Adaptation Benefit |
+|--------|---------|-------------------|
+| GRU Input Gate | Controls information flow | Task-specific feature gating |
+| GRU Hidden Gate | Controls memory update | Task-specific reasoning patterns |
+| GRU Output Gate | Controls output selection | Task-specific output emphasis |
+| Output Head | Final prediction layer | Task-specific color mapping |
+
+### 10.3 Leave-One-Out (LOO) Training
+
+#### 10.3.1 The Generalization Problem
+
+If HyperLoRA sees all $N$ training pairs when predicting weights, it might **memorize** specific input-output mappings rather than learning the **general transformation rule**.
+
+**Solution**: Leave-One-Out training forces HyperLoRA to predict held-out examples.
+
+#### 10.3.2 LOO Training Algorithm
+
+```
+function LOO_Training_Step(train_pairs):
+    L_loo = 0
+    N = len(train_pairs)
+    
+    for k in 1..N:                                    # Rotate through each holdout
+        # Step 1: Hold out pair k
+        remaining_pairs = train_pairs \ {pair_k}      # N-1 pairs
+        held_out_input, held_out_output = pair_k
+        
+        # Step 2: Encode remaining context (N-1 pairs only)
+        F_remaining = Encoder(remaining_pairs)         # Shape: [N-1, D]
+        
+        # Step 3: Predict LoRA weights from N-1 pairs
+        z_struct = StructProjector(AvgPool(F_remaining))
+        ΔW_A, ΔW_B = HyperNet(z_struct)
+        
+        # Step 4: Adapt GRU and output head weights
+        W'_gru = W_gru + α · (ΔW_A @ ΔW_B.T)
+        W'_head = W_head + α · (ΔW_A_head @ ΔW_B_head.T)
+        
+        # Step 5: Cross-attention also sees only N-1 pairs
+        context = CrossAttention(query=held_out_input, keys=F_remaining)
+        
+        # Step 6: Solve with adapted weights
+        pred_k = RecursiveSolver(held_out_input, context, W'_gru, W'_head)
+        
+        # Step 7: Accumulate loss
+        L_loo += CrossEntropy(pred_k, held_out_output)
+    
+    return L_loo / N
+```
+
+**Critical Implementation Detail**: The held-out output $Y_k$ must be **physically absent** from:
+1. HyperLoRA's context pooling (uses `F_remaining`, not `F_support`)
+2. Cross-attention keys (attends to N-1 pairs only)
+3. Any other component that could leak information
+
+#### 10.3.3 Why LOO Works
+
+| Training Signal | Effect |
+|-----------------|--------|
+| "Predict pair 3 using only pairs 1,2" | Forces learning of **transferable** patterns |
+| "Predict pair 1 using only pairs 2,3" | Ensures **all** pairs contribute to rule learning |
+| Average over all holdouts | Balanced gradients, no pair is "special" |
+
+**Intuition**: If HyperLoRA can predict pair 3's output having **never seen** pair 3, it must have learned the **general transformation rule**, not memorized specific pixels.
+
+### 10.4 Augmentation Equivariance Loss
+
+#### 10.4.1 Motivation
+
+The LoRA weights predicted by HyperLoRA should be **invariant to how we present the context**. Rotating all training pairs by 90° should produce equivalent weights (modulo the rotation).
+
+#### 10.4.2 Equivariance Loss Formulation
+
+$$\mathcal{L}_{equiv} = \| \text{HyperLoRA}(T(X)) - T'(\text{HyperLoRA}(X)) \|^2$$
+
+Where:
+- $T$ is an augmentation (rotation, color permutation)
+- $T'$ is the corresponding transformation on weight space
+
+In practice, we encourage consistency:
+
+$$\mathcal{L}_{equiv} = \| \mathbf{z}_{struct}^{(aug_1)} - \mathbf{z}_{struct}^{(aug_2)} \|^2$$
+
+This ensures the structure latent $\mathbf{z}_{struct}$ captures **semantic** properties that are stable across augmentations.
+
+### 10.5 Orthogonality Regularization
+
+To ensure the structure and content latents are disentangled:
+
+$$\mathcal{L}_{ortho} = |\langle \mathbf{z}_{struct}, \mathbf{z}_{content} \rangle|^2$$
+
+Where:
+- $\mathbf{z}_{struct}$ = structure/transformation latent (from HyperLoRA)
+- $\mathbf{z}_{content}$ = content latent (from test input encoding)
+
+**Effect**: Forces $\mathbf{z}_{struct}$ to encode **what transformation to apply** rather than **what content is present**.
+
+### 10.6 Training Flow: Complete Pseudocode
+
+```
+function RLAN_Training_Step(batch):
+    # =====================================================
+    # STEP 1: Standard Forward Pass (Task Loss)
+    # =====================================================
+    train_pairs = batch.train_pairs              # List of (input, output) tuples
+    test_input = batch.test_input
+    test_output = batch.test_output
+    N = len(train_pairs)
+    
+    # Encode all training pairs
+    F_support = Encoder(train_pairs)             # [N, H, W, D]
+    F_support_pooled = SpatialPool(F_support)    # [N, D]
+    
+    # HyperLoRA: predict task-specific weights
+    z_struct = StructProjector(AvgPool(F_support_pooled))  # [d_z]
+    ΔW = HyperNet(z_struct)                      # LoRA deltas
+    
+    # Cross-attention: inject context into test encoding
+    F_test = Encoder(test_input)                 # [H, W, D]
+    context = CrossAttention(F_test, F_support)  # Attend to all N pairs
+    
+    # Solve with adapted weights
+    pred = RecursiveSolver(F_test, context, base_weights + ΔW)
+    L_task = FocalLoss(pred, test_output)
+    
+    # =====================================================
+    # STEP 2: Leave-One-Out Loss (Meta-Learning)
+    # =====================================================
+    L_loo = 0
+    for k in 1..N:
+        # Remove pair k from context
+        remaining_pairs = train_pairs \ {pair_k}
+        held_out_input, held_out_output = train_pairs[k]
+        
+        # Re-encode with N-1 pairs only
+        F_remaining = Encoder(remaining_pairs)    # [N-1, H, W, D]
+        F_remaining_pooled = SpatialPool(F_remaining)  # [N-1, D]
+        
+        # HyperLoRA sees N-1 pairs
+        z_struct_k = StructProjector(AvgPool(F_remaining_pooled))
+        ΔW_k = HyperNet(z_struct_k)
+        
+        # Cross-attention sees N-1 pairs
+        F_held = Encoder(held_out_input)
+        context_k = CrossAttention(F_held, F_remaining)
+        
+        # Solve held-out with adapted weights
+        pred_k = RecursiveSolver(F_held, context_k, base_weights + ΔW_k)
+        L_loo += CrossEntropy(pred_k, held_out_output)
+    
+    L_loo = L_loo / N
+    
+    # =====================================================
+    # STEP 3: Augmentation Equivariance Loss
+    # =====================================================
+    # Apply random augmentation to training pairs
+    aug_pairs = ApplyAugmentation(train_pairs, random_aug)
+    F_aug = Encoder(aug_pairs)
+    z_struct_aug = StructProjector(AvgPool(SpatialPool(F_aug)))
+    
+    L_equiv = MSE(z_struct, z_struct_aug)  # Structure latent should be invariant
+    
+    # =====================================================
+    # STEP 4: Orthogonality Loss
+    # =====================================================
+    z_content = ContentProjector(F_test)
+    L_ortho = (z_struct @ z_content)^2      # Encourage orthogonality
+    
+    # =====================================================
+    # STEP 5: Total Loss
+    # =====================================================
+    L_total = L_task + λ_loo * L_loo + λ_equiv * L_equiv + λ_ortho * L_ortho
+    
+    return L_total
+```
+
+### 10.7 Inference Flow: Complete Pseudocode
+
+```
+function RLAN_Inference(train_pairs, test_input):
+    # =====================================================
+    # STEP 1: Encode Training Context
+    # =====================================================
+    F_support = Encoder(train_pairs)             # [N, H, W, D]
+    F_support_pooled = SpatialPool(F_support)    # [N, D]
+    
+    # =====================================================
+    # STEP 2: HyperLoRA Weight Prediction
+    # =====================================================
+    z_struct = StructProjector(AvgPool(F_support_pooled))
+    ΔW_A, ΔW_B = HyperNet(z_struct)
+    
+    # Compute adapted weights for GRU and output head
+    W'_gru_ih = W_gru_ih + α · (ΔW_A_ih @ ΔW_B_ih.T)
+    W'_gru_hh = W_gru_hh + α · (ΔW_A_hh @ ΔW_B_hh.T)
+    W'_head = W_head + α · (ΔW_A_head @ ΔW_B_head.T)
+    
+    # =====================================================
+    # STEP 3: Cross-Attention Context Injection
+    # =====================================================
+    F_test = Encoder(test_input)
+    
+    # DSC: Find clue anchors
+    clues = DynamicSaliencyController(F_test)
+    
+    # MSRE: Compute relative coordinates
+    P_rel = MultiScaleRelativeEncoding(clues)
+    
+    # LCR: Count colors per clue
+    C = LatentCountingRegisters(clues, test_input)
+    
+    # Cross-attention: inject training context
+    context = CrossAttention(
+        query=F_test,
+        keys=F_support,
+        values=F_support
+    )  # Order-invariant attention over N pairs
+    
+    # =====================================================
+    # STEP 4: Recursive Solving with Adapted Weights
+    # =====================================================
+    H = zeros(H_out, W_out, D)
+    
+    for s in 1..S_max:
+        # Concatenate all features
+        X_hat = Concat(F_test, context, P_rel, C, H)
+        
+        # ConvGRU with task-adapted weights W'
+        H = ConvGRU(X_hat, H, weights=W'_gru_ih, W'_gru_hh)
+        
+        # Output head with task-adapted weights
+        logits = OutputHead(H, weights=W'_head)
+        logits = clamp(logits, -50, 50)
+        
+        if HaltingCondition(H):
+            break
+    
+    # =====================================================
+    # STEP 5: Final Prediction
+    # =====================================================
+    return Stablemax(logits)  # Numerically stable softmax → argmax
+```
+
+### 10.8 Test-Time Augmentation with HyperLoRA
+
+At inference, we combine HyperLoRA with TTA + ACW:
+
+```
+function RLAN_Inference_TTA(train_pairs, test_input):
+    predictions = []
+    
+    # 32 augmented views: 8 dihedral × 4 color permutations
+    for T in Dihedral8 × ColorPerms4:
+        # Augment both training pairs and test input
+        aug_train = ApplyAugmentation(train_pairs, T)
+        aug_test = ApplyAugmentation(test_input, T)
+        
+        # HyperLoRA predicts weights from augmented context
+        # (should be approximately invariant due to L_equiv)
+        pred = RLAN_Inference(aug_train, aug_test)
+        
+        # Inverse augmentation to align predictions
+        pred = InverseAugmentation(pred, T)
+        predictions.append(pred)
+    
+    # ACW: Weight predictions by consistency
+    weights = ComputeConsistencyWeights(predictions)
+    
+    return WeightedMajorityVote(predictions, weights)
+```
+
+### 10.9 Summary: Meta-Learning Benefits
+
+| Aspect | Without HyperLoRA | With HyperLoRA |
+|--------|------------------|----------------|
+| Adaptation | Single fixed model | Task-specific weights |
+| Context Utilization | Cross-attention only | Cross-attention + weight modulation |
+| Generalization | Implicit | Explicit via LOO training |
+| Inference Cost | Same | +Small HyperNet overhead |
+| Training Signal | Task loss only | Task + LOO + Equivariance |
+
+**Key Insight**: HyperLoRA transforms RLAN from a fixed model that must handle all tasks with the same weights into a **meta-learner** that adapts its weights per-task based on the training examples.
+
+---
+
+## 11. Loss Functions & Training
+
+### 11.1 The Complete Loss Function
+
+The complete RLAN loss combines task-specific losses with meta-learning losses:
+
+$$\mathcal{L}_{total} = \underbrace{\mathcal{L}_{focal} + \lambda_1 \mathcal{L}_{entropy} + \lambda_2 \mathcal{L}_{sparsity} + \lambda_3 \mathcal{L}_{predicate} + \lambda_4 \mathcal{L}_{curriculum}}_{\text{Task-Specific Losses}} + \underbrace{\lambda_5 \mathcal{L}_{LOO} + \lambda_6 \mathcal{L}_{equiv} + \lambda_7 \mathcal{L}_{ortho}}_{\text{Meta-Learning Losses}}$$
+
+**Meta-Learning Loss Terms** (see Section 10):
+- $\mathcal{L}_{LOO}$ = Leave-One-Out loss for generalization (default $\lambda_5 = 1.0$)
+- $\mathcal{L}_{equiv}$ = Augmentation equivariance loss (default $\lambda_6 = 0.1$)
+- $\mathcal{L}_{ortho}$ = Structure-content orthogonality (default $\lambda_7 = 0.01$)
+
+### 11.2 Component Losses
+
+#### 11.2.1 Focal Loss (Main Task Loss)
 
 Standard cross-entropy fails because ARC grids are ~85% background (color 0). Focal loss down-weights easy examples:
 
@@ -784,7 +1129,7 @@ Where:
 
 **Effect**: A model predicting "all black" is heavily penalized for the 15% of colored pixels it misses.
 
-#### 10.2.2 Adaptive Entropy Loss (Attention Sharpness)
+#### 11.2.2 Adaptive Entropy Loss (Attention Sharpness)
 
 Attention maps should be sharp (focused) but not prematurely collapsed:
 
@@ -804,7 +1149,7 @@ $$\tau(epoch) = \tau_{max} \cdot e^{-\alpha \cdot epoch} + \tau_{min}$$
 
 Starting with $\tau_{max} = 5.0$ (soft attention) and annealing to $\tau_{min} = 0.1$ (hard attention).
 
-#### 10.2.3 Clue Usage Regularization (Three-Component Penalty)
+#### 11.2.3 Clue Usage Regularization (Three-Component Penalty)
 
 The clue regularization system is critical for learning efficient, task-adaptive reasoning. A **three-component penalty** is introduced that couples attention quality directly to clue usage:
 
@@ -847,7 +1192,7 @@ Where $H_{norm}(M_k) = \frac{H(M_k)}{\log(HW)}$ is the normalized entropy of att
 | Mid (30-100) | Medium (~2.5) | 4-5 clues | Pondering cost → learn when to stop |
 | Late (100+) | Low (~1.5) | 2-3 clues | Task-optimal efficiency |
 
-#### 10.2.4 Entropy-Aware Stop Predictor
+#### 11.2.4 Entropy-Aware Stop Predictor
 
 The stop predictor in DSC receives both content AND attention quality:
 
@@ -861,7 +1206,7 @@ Where $h_k$ is the attended feature vector and $H_{norm}(M_k)$ is the normalized
 
 This coupling ensures that clue count naturally adapts to both task complexity AND attention quality.
 
-#### 10.2.5 Clue Count as a True Latent Variable
+#### 11.2.5 Clue Count as a True Latent Variable
 
 **Critical Implementation Detail**: For clue count to be learned from task loss (not just regularization), the aggregation mechanism must preserve clue count information in its gradient.
 
@@ -911,7 +1256,7 @@ The solver learns to work with varying input magnitudes, and task loss gradient 
 - Mid training: Model correlates clue count with task difficulty
 - Late training: Stable per-task clue counts with positive loss correlation
 
-#### 10.2.6 Per-Sample Gradient Coupling for Task-Adaptive Clue Learning
+#### 11.2.6 Per-Sample Gradient Coupling for Task-Adaptive Clue Learning
 
 **The Problem with Batch-Averaged Clue Penalties**:
 
@@ -1019,7 +1364,7 @@ When $f$ and $g$ share intermediate variables (like stop logits affecting both t
 
 In our case, the interaction is: "If my task loss is high AND my clue count is low, I should increase clue usage more aggressively than if only one of these is true."
 
-#### 10.2.7 Sparsity Loss (Distinct Clues)
+#### 11.2.7 Sparsity Loss (Distinct Clues)
 
 Encourages clues to be spatially distinct:
 
@@ -1027,7 +1372,7 @@ $$\mathcal{L}_{sparsity} = \sum_{t} \|M_t\|_1 + \sum_{t \neq t'} \max(0, \text{C
 
 The second term penalizes clues that overlap too much.
 
-#### 10.2.8 Predicate Diversity Loss
+#### 11.2.8 Predicate Diversity Loss
 
 Prevents predicates from collapsing to trivial values:
 
@@ -1037,7 +1382,7 @@ Where $H(p_k) = -p_k \log(p_k) - (1-p_k) \log(1-p_k)$.
 
 **Effect**: Pushes predicates away from 0.5 (uninformative) toward decisive 0 or 1.
 
-#### 10.2.9 Curriculum Loss (Occam's Razor)
+#### 11.2.9 Curriculum Loss (Occam's Razor)
 
 Penalizes using more clues than necessary:
 
@@ -1045,7 +1390,7 @@ $$\mathcal{L}_{curriculum} = \lambda_{curr} \cdot N_{clues}$$
 
 **Effect**: Forces the network to find the **simplest explanation**. If a task can be solved with 1 clue, don't use 3.
 
-### 10.3 Training Protocol
+### 11.3 Training Protocol
 
 #### Phase 1: Curriculum Pre-training (Epochs 0-50)
 
@@ -1071,9 +1416,9 @@ $$\mathcal{L}_{curriculum} = \lambda_{curr} \cdot N_{clues}$$
 
 ---
 
-## 11. ARC Task Analysis & Examples
+## 12. ARC Task Analysis & Examples
 
-### 11.1 Task Category Coverage
+### 12.1 Task Category Coverage
 
 | Category | Example Tasks | Key RLAN Module |
 |----------|---------------|-----------------|
@@ -1085,7 +1430,7 @@ $$\mathcal{L}_{curriculum} = \lambda_{curr} \cdot N_{clues}$$
 | Line Drawing | 0934a4d8, 08ed6ac7 | DSC (multi-clue) + MSRE |
 | Pattern Completion | 00d62c1b, 06df4c85 | All modules |
 
-### 11.2 Detailed Example: Task 007bbfb7
+### 12.2 Detailed Example: Task 007bbfb7
 
 **Task Description**: The input contains a small pattern and a larger "canvas" pattern. Copy the small pattern onto the canvas, aligned to a specific anchor.
 
@@ -1122,7 +1467,7 @@ G = Grey (source), R = Red (destination anchor)
 - If the grid is resized, normalized coords handle it
 - One training pair teaches a general rule
 
-### 11.3 Detailed Example: Task 0c786b71 (Conditional)
+### 12.3 Detailed Example: Task 0c786b71 (Conditional)
 
 **Task Description**: If input is horizontally symmetric, flip vertically. Otherwise, flip horizontally.
 
@@ -1160,9 +1505,9 @@ Input:          Output:
 
 ---
 
-## 12. Architecture Diagram
+## 13. Architecture Diagram
 
-### 12.1 Complete Data Flow Diagram
+### 13.1 Complete Data Flow Diagram
 
 ```
     TRAINING EXAMPLES                        TEST INPUT
@@ -1305,7 +1650,7 @@ Input:          Output:
                    └───────────────┘
 ```
 
-### 12.2 Tensor Dimension Summary
+### 13.2 Tensor Dimension Summary
 
 | Component | Input Shape | Output Shape | Parameters |
 |-----------|-------------|--------------|------------|
@@ -1324,7 +1669,7 @@ Input:          Output:
 
 *Note: K = number of training pairs (typically 2-5), D = hidden dimension (128)*
 
-### 12.3 Recursive Loop Visualization
+### 13.3 Recursive Loop Visualization
 
 ```
                     ┌─────────────────────────────────────┐
@@ -1360,11 +1705,11 @@ Input:          Output:
 
 ---
 
-## 13. Recent Technical Innovations
+## 14. Recent Technical Innovations
 
 This section documents critical training innovations discovered during development that significantly improve RLAN's learning dynamics.
 
-### 13.1 2D Spatial Structure (No Boundary Markers)
+### 14.1 2D Spatial Structure (No Boundary Markers)
 
 **Key Difference from TRM**: TRM flattens grids to 1D sequences and uses boundary markers to separate rows. RLAN maintains **native 2D spatial structure** throughout, eliminating the need for boundary tokens.
 
@@ -1380,7 +1725,7 @@ This section documents critical training innovations discovered during developme
 
 **Effect**: Simpler encoding, preserves spatial locality for convolutions, and avoids the complexity of sequence-based attention over flattened grids.
 
-### 13.2 Module-Specific Learning Rates
+### 14.2 Module-Specific Learning Rates
 
 **Problem**: DSC and MSRE gradients are ~50× smaller than Solver gradients due to the coordinate computation chain (differentiation through centroid → relative coords → Fourier encoding).
 
@@ -1401,7 +1746,7 @@ param_groups = [
 
 This brings effective update magnitudes to the same order, ensuring DSC actually learns during training.
 
-### 13.3 Per-Sample Clue Penalty Coupling
+### 14.3 Per-Sample Clue Penalty Coupling
 
 **Problem**: When clue penalties are computed as batch averages, there's no coupling between "how hard is this task?" and "how many clues should I use?". All samples get the same gradient regardless of individual task difficulty.
 
@@ -1418,7 +1763,7 @@ total_loss = per_sample_loss.mean()
 
 **Effect**: The stop predictor for each sample receives gradient proportional to BOTH its task difficulty AND its clue usage—enabling task-adaptive clue learning.
 
-### 13.4 Weighted Stablemax for Class Imbalance
+### 14.4 Weighted Stablemax for Class Imbalance
 
 **Problem**: Focal loss can be unstable; simple cross-entropy leads to background collapse.
 
@@ -1432,13 +1777,13 @@ Combined with class weights:
 
 This ensures the model receives ~4× stronger gradients for foreground pixels.
 
-### 13.5 EMA Decay Tuning
+### 14.5 EMA Decay Tuning
 
 **Problem**: Exponential Moving Average (EMA) of model weights with decay 0.995 was too slow—the EMA model lagged behind actual learning.
 
 **Solution**: Reduce EMA decay to 0.99 for faster tracking of training progress.
 
-### 13.6 Numerical Stability for DSC Attention
+### 14.6 Numerical Stability for DSC Attention
 
 **Problem**: The DSC softmax over spatial positions $H \times W$ (up to $30 \times 30 = 900$ positions) produces extremely small probability values. For focused attention:
 
@@ -1510,9 +1855,9 @@ This avoids the problematic $\log(\text{softmax})$ computation entirely.
 
 ---
 
-## 14. Implementation Considerations
+## 15. Implementation Considerations
 
-### 14.1 Normalization Strategy
+### 15.1 Normalization Strategy
 
 **Critical**: Do NOT use BatchNorm.
 
@@ -1624,19 +1969,20 @@ def predict_with_tta(model, input_grid):
 
 ---
 
-## 15. Conclusion
+## 16. Conclusion
 
-### 15.1 Summary
+### 16.1 Summary
 
-RLAN addresses the core challenges of ARC through five key innovations:
+RLAN addresses the core challenges of ARC through six key innovations:
 
 1. **Context Encoder**: Learns transformation patterns from training examples using cross-attention and FiLM conditioning
 2. **Dynamic Saliency Controller**: Discovers task-relevant spatial anchors with entropy-aware stopping
 3. **Multi-Scale Relative Encoding**: Provides translation, scale, and rotation invariant representations
 4. **Latent Counting Registers**: Enables non-spatial numerical reasoning
 5. **Symbolic Predicate Heads**: Supports compositional conditional logic
+6. **HyperLoRA & Meta-Learning**: Predicts task-specific weight adaptations for instant few-shot generalization via Leave-One-Out training
 
-Together, these modules create an architecture that reasons in **relative coordinate spaces**, learns **abstract rules** from few examples, and handles the full spectrum of ARC task types.
+Together, these modules create an architecture that reasons in **relative coordinate spaces**, learns **abstract rules** from few examples, adapts its weights **per-task** without gradient updates, and handles the full spectrum of ARC task types.
 
 ### 15.2 Experimental Results
 
