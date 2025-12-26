@@ -18,19 +18,30 @@ from collections import defaultdict
 import numpy as np
 
 
-def pixel_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
+def pixel_accuracy(
+    pred: np.ndarray,
+    target: np.ndarray,
+    ignore_index: int = -100,
+    strict_shape: bool = False,
+) -> float:
     """
     Compute pixel-wise accuracy between prediction and target.
     
     Args:
         pred: Predicted grid, shape (H, W)
         target: Target grid, shape (H, W)
+        ignore_index: Value in target to ignore (default -100, matching trainer)
+        strict_shape: If True, return 0.0 on shape mismatch instead of overlap-cropping.
+                      Default False for backward compatibility.
         
     Returns:
         Accuracy in [0, 1]
     """
     if pred.shape != target.shape:
-        # Size mismatch - compare minimum overlap
+        if strict_shape:
+            # Strict mode: shape mismatch is a failure
+            return 0.0
+        # Backward-compat: compare minimum overlap (legacy behavior)
         min_h = min(pred.shape[0], target.shape[0])
         min_w = min(pred.shape[1], target.shape[1])
         pred = pred[:min_h, :min_w]
@@ -38,24 +49,46 @@ def pixel_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
         
     if pred.size == 0:
         return 1.0 if target.size == 0 else 0.0
+    
+    # Mask out ignore_index pixels (e.g., padding)
+    valid_mask = target != ignore_index
+    if not valid_mask.any():
+        # No valid pixels to compare
+        return 1.0
         
-    return (pred == target).mean()
+    return (pred[valid_mask] == target[valid_mask]).mean()
 
 
-def task_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
+def task_accuracy(
+    pred: np.ndarray,
+    target: np.ndarray,
+    ignore_index: Optional[int] = -100,
+) -> float:
     """
-    Compute task-level accuracy (exact match).
+    Compute task-level accuracy (exact match on valid pixels).
     
     Args:
         pred: Predicted grid
         target: Target grid
+        ignore_index: Value in target to ignore (default -100, matching trainer).
+                      Set to None to compare all pixels (legacy behavior).
         
     Returns:
-        1.0 if exact match, 0.0 otherwise
+        1.0 if exact match on valid pixels, 0.0 otherwise
     """
     if pred.shape != target.shape:
         return 0.0
-    return 1.0 if np.array_equal(pred, target) else 0.0
+    
+    if ignore_index is not None:
+        # Compare only valid (non-padding) pixels
+        valid_mask = target != ignore_index
+        if not valid_mask.any():
+            # No valid pixels - consider it a match
+            return 1.0
+        return 1.0 if np.array_equal(pred[valid_mask], target[valid_mask]) else 0.0
+    else:
+        # Legacy behavior: compare all pixels
+        return 1.0 if np.array_equal(pred, target) else 0.0
 
 
 def size_accuracy(pred: np.ndarray, target: np.ndarray) -> float:

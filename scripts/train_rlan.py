@@ -49,6 +49,10 @@ sys.path.insert(0, str(project_root))
 from sci_arc.models import RLAN, RLANConfig
 from sci_arc.training import RLANLoss
 from sci_arc.training.ema import EMAHelper
+from sci_arc.models.rlan_modules.loo_training import (
+    LOOTrainingLoss, LOOConfig,
+    AugmentationEquivarianceLoss, EquivarianceConfig,
+)
 from sci_arc.data import ARCDataset, collate_sci_arc
 from sci_arc.evaluation.trm_style_evaluator import TRMStyleEvaluator
 from sci_arc.utils.gap_monitor import GapHealthMonitor
@@ -471,6 +475,12 @@ def create_model(config: dict) -> RLAN:
         # Phase 2.5: Solver cross-attention to support set
         use_solver_context=model_config.get('use_solver_context', True),
         solver_context_heads=model_config.get('solver_context_heads', 4),
+        # HyperLoRA: Meta-learning weight adaptation
+        use_hyperlora=model_config.get('use_hyperlora', False),
+        hyperlora_rank=model_config.get('hyperlora_rank', 8),
+        hyperlora_scaling=model_config.get('hyperlora_scaling', 1.0),
+        hyperlora_dropout=model_config.get('hyperlora_dropout', 0.0),
+        hyperlora_init_scale=model_config.get('hyperlora_init_scale', 0.01),
     )
     
     model = RLAN(config=rlan_config)
@@ -531,17 +541,21 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     # Get LR multipliers from config (default: 10x for DSC/MSRE to compensate for ~60x smaller gradients)
     dsc_lr_mult = train_config.get('dsc_lr_multiplier', 10.0)
     msre_lr_mult = train_config.get('msre_lr_multiplier', 10.0)
+    hyperlora_lr_mult = train_config.get('hyperlora_lr_multiplier', 10.0)  # HyperLoRA often needs higher LR
     
     # Separate parameters into groups:
     # 1. DSC parameters (higher LR)
-    # 2. MSRE parameters (higher LR)  
-    # 3. Other parameters with decay
-    # 4. Other parameters without decay (bias, norm, embedding)
+    # 2. MSRE parameters (higher LR)
+    # 3. HyperLoRA parameters (higher LR - critical for meta-learning)
+    # 4. Other parameters with decay
+    # 5. Other parameters without decay (bias, norm, embedding)
     
     dsc_decay_params = []
     dsc_no_decay_params = []
     msre_decay_params = []
     msre_no_decay_params = []
+    hyperlora_decay_params = []
+    hyperlora_no_decay_params = []
     other_decay_params = []
     other_no_decay_params = []
     
@@ -562,6 +576,12 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
                 msre_no_decay_params.append(param)
             else:
                 msre_decay_params.append(param)
+        elif 'hyper_lora' in name or '.hyperlora' in name:
+            # HyperLoRA params for meta-learning weight prediction
+            if is_no_decay:
+                hyperlora_no_decay_params.append(param)
+            else:
+                hyperlora_decay_params.append(param)
         else:
             if is_no_decay:
                 other_no_decay_params.append(param)
@@ -603,6 +623,22 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
             'name': 'msre_no_decay'
         })
     
+    # HyperLoRA params with higher LR (critical for meta-learning)
+    if hyperlora_decay_params:
+        param_groups.append({
+            'params': hyperlora_decay_params, 
+            'weight_decay': weight_decay,
+            'lr': base_lr * hyperlora_lr_mult,
+            'name': 'hyperlora_decay'
+        })
+    if hyperlora_no_decay_params:
+        param_groups.append({
+            'params': hyperlora_no_decay_params, 
+            'weight_decay': 0.0,
+            'lr': base_lr * hyperlora_lr_mult,
+            'name': 'hyperlora_no_decay'
+        })
+    
     # Other params with base LR
     if other_decay_params:
         param_groups.append({
@@ -622,10 +658,13 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     # Log param group sizes for verification
     dsc_count = len(dsc_decay_params) + len(dsc_no_decay_params)
     msre_count = len(msre_decay_params) + len(msre_no_decay_params)
+    hyperlora_count = len(hyperlora_decay_params) + len(hyperlora_no_decay_params)
     other_count = len(other_decay_params) + len(other_no_decay_params)
     print(f"  Optimizer param groups:")
     print(f"    DSC: {dsc_count} params @ {dsc_lr_mult}x LR ({base_lr * dsc_lr_mult:.2e})")
     print(f"    MSRE: {msre_count} params @ {msre_lr_mult}x LR ({base_lr * msre_lr_mult:.2e})")
+    if hyperlora_count > 0:
+        print(f"    HyperLoRA: {hyperlora_count} params @ {hyperlora_lr_mult}x LR ({base_lr * hyperlora_lr_mult:.2e}) [META-LEARNING]")
     print(f"    Other: {other_count} params @ 1x LR ({base_lr:.2e})")
     
     # Get optimizer betas (TRM uses beta2=0.95 instead of default 0.999)
@@ -787,9 +826,25 @@ def train_epoch(
     scaler: Optional[GradScaler] = None,
     global_step: int = 0,
     ema: Optional[EMAHelper] = None,
+    loo_loss_fn: Optional[LOOTrainingLoss] = None,
+    equiv_loss_fn: Optional[AugmentationEquivarianceLoss] = None,
 ) -> Dict[str, float]:
     """
     Train for one epoch with augmentation diversity tracking.
+    
+    Args:
+        model: RLAN model
+        dataloader: Training data loader
+        loss_fn: Main task loss (RLANLoss)
+        optimizer: Optimizer
+        device: Device
+        epoch: Current epoch
+        config: Full config dict
+        scaler: GradScaler for mixed precision
+        global_step: Global step counter
+        ema: Optional EMA helper
+        loo_loss_fn: Optional LOO training loss for meta-learning
+        equiv_loss_fn: Optional Augmentation Equivariance loss for meta-learning
     
     Returns losses dict AND augmentation statistics for debugging.
     """
@@ -801,6 +856,8 @@ def train_epoch(
         'entropy_loss': 0.0,
         'sparsity_loss': 0.0,
         'predicate_loss': 0.0,
+        'loo_loss': 0.0,  # LOO meta-learning loss
+        'equiv_loss': 0.0,  # Augmentation equivariance loss
         'curriculum_loss': 0.0,
         'deep_supervision_loss': 0.0,  # FIX: Was missing, caused zero reporting
         'act_loss': 0.0,  # ACT halting loss
@@ -887,6 +944,19 @@ def train_epoch(
         # =============================================================
         'batch_class_accuracies': [],             # List of per-class acc dicts per batch
         'per_class_running_window': [[] for _ in range(num_classes)],  # Last 50 batch accuracies per class
+        
+        # =============================================================
+        # META-LEARNING HEALTH METRICS (HyperLoRA + LOO)
+        # =============================================================
+        # These metrics prove that meta-learning is working correctly
+        'loo_loss_sum': 0.0,                      # Accumulated LOO loss
+        'loo_accuracy_sum': 0.0,                  # Accumulated LOO accuracy (N-1 to Nth prediction)
+        'loo_num_holdouts_sum': 0,                # Total holdout predictions made
+        'loo_batch_count': 0,                     # Batches with LOO loss computed
+        'loo_skipped_count': 0,                   # Batches where LOO was skipped (not enough pairs)
+        'hyperlora_grad_norm_sum': 0.0,           # Gradient norm for HyperLoRA params
+        'hyperlora_weight_norm_sum': 0.0,         # Weight magnitude of HyperLoRA (should be small)
+        'hyperlora_update_count': 0,              # Number of batches with HyperLoRA updates
     }
     
     temperature = get_temperature(epoch, config)
@@ -968,6 +1038,74 @@ def train_epoch(
                     all_logits=outputs.get('all_logits'),
                     act_outputs=outputs.get('act_outputs'),
                 )
+                
+                # Compute LOO loss if enabled (meta-learning via HyperLoRA)
+                loo_loss = torch.tensor(0.0, device=device)
+                loo_metrics = None
+                if loo_loss_fn is not None and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                    # LOO requires at least min_pairs training pairs
+                    num_pairs = pair_mask.sum(dim=1).min().item() if pair_mask is not None else train_inputs.shape[1]
+                    if num_pairs >= loo_loss_fn.config.min_pairs_for_loo:
+                        loo_result = loo_loss_fn(
+                            model=model,
+                            input_grids=train_inputs,
+                            output_grids=train_outputs,
+                            pair_mask=pair_mask,
+                            temperature=temperature,
+                        )
+                        loo_loss = loo_result['loo_loss'] * loo_loss_fn.config.loss_weight
+                        loo_metrics = loo_result  # Store full metrics for logging
+                        losses['loo_loss'] = loo_loss
+                        losses['total_loss'] = losses['total_loss'] + loo_loss
+                        # Track meta-learning health metrics
+                        epoch_diagnostics['loo_loss_sum'] += loo_loss.item()
+                        epoch_diagnostics['loo_accuracy_sum'] += loo_result.get('loo_accuracy', 0.0)
+                        epoch_diagnostics['loo_num_holdouts_sum'] += loo_result.get('loo_num_holdouts', 0)
+                        epoch_diagnostics['loo_batch_count'] += 1
+                    else:
+                        epoch_diagnostics['loo_skipped_count'] += 1
+                
+                # Compute Augmentation Equivariance loss if enabled (meta-learning)
+                # This encourages HyperLoRA to predict consistent weights for rotated/flipped tasks
+                equiv_loss = torch.tensor(0.0, device=device)
+                if equiv_loss_fn is not None and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                    support_features = outputs.get('support_features')  # (B, N, D, H, W)
+                    lora_deltas = outputs.get('lora_deltas')  # Dict with original deltas
+                    
+                    if support_features is not None and lora_deltas is not None:
+                        # Get original context from HyperLoRA output
+                        original_context = lora_deltas.get('context')  # (B, D)
+                        
+                        if original_context is not None:
+                            # Generate augmented contexts by applying transforms to support_features
+                            # and re-pooling through HyperLoRA
+                            augmented_contexts = {}
+                            aug_types = ['rotate_90', 'rotate_180', 'flip_h', 'flip_v']
+                            num_augs = min(equiv_loss_fn.config.num_augmentations, len(aug_types))
+                            selected_augs = random.sample(aug_types, num_augs)
+                            
+                            for aug_type in selected_augs:
+                                # Apply augmentation to support_features spatial dimensions
+                                # support_features shape: (B, N, D, H, W)
+                                aug_features = equiv_loss_fn.apply_augmentation(
+                                    support_features.permute(0, 1, 3, 4, 2),  # (B, N, H, W, D) for spatial aug
+                                    aug_type
+                                ).permute(0, 1, 4, 2, 3)  # Back to (B, N, D, H, W)
+                                
+                                # Pool augmented features to get context
+                                aug_context = model.hyper_lora.pool_context(aug_features)
+                                augmented_contexts[aug_type] = aug_context
+                            
+                            if augmented_contexts:
+                                equiv_loss, equiv_metrics = equiv_loss_fn(
+                                    hyper_lora=model.hyper_lora,
+                                    original_context=original_context,
+                                    augmented_contexts=augmented_contexts,
+                                )
+                                losses['equiv_loss'] = equiv_loss
+                                losses['total_loss'] = losses['total_loss'] + equiv_loss
+                                epoch_diagnostics['equiv_loss_sum'] = epoch_diagnostics.get('equiv_loss_sum', 0.0) + equiv_loss.item()
+                                epoch_diagnostics['equiv_batch_count'] = epoch_diagnostics.get('equiv_batch_count', 0) + 1
                 
                 # Scale loss for gradient accumulation
                 loss = losses['total_loss'] / grad_accumulation_steps
@@ -1093,6 +1231,32 @@ def train_epoch(
                 all_logits=outputs.get('all_logits'),
                 act_outputs=outputs.get('act_outputs'),
             )
+            
+            # Compute LOO loss if enabled (meta-learning via HyperLoRA)
+            loo_loss = torch.tensor(0.0, device=device)
+            loo_metrics = None
+            if loo_loss_fn is not None and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                # LOO requires at least min_pairs training pairs
+                num_pairs = pair_mask.sum(dim=1).min().item() if pair_mask is not None else train_inputs.shape[1]
+                if num_pairs >= loo_loss_fn.config.min_pairs_for_loo:
+                    loo_result = loo_loss_fn(
+                        model=model,
+                        input_grids=train_inputs,
+                        output_grids=train_outputs,
+                        pair_mask=pair_mask,
+                        temperature=temperature,
+                    )
+                    loo_loss = loo_result['loo_loss'] * loo_loss_fn.config.loss_weight
+                    loo_metrics = loo_result  # Store full metrics for logging
+                    losses['loo_loss'] = loo_loss
+                    losses['total_loss'] = losses['total_loss'] + loo_loss
+                    # Track meta-learning health metrics
+                    epoch_diagnostics['loo_loss_sum'] += loo_loss.item()
+                    epoch_diagnostics['loo_accuracy_sum'] += loo_result.get('loo_accuracy', 0.0)
+                    epoch_diagnostics['loo_num_holdouts_sum'] += loo_result.get('loo_num_holdouts', 0)
+                    epoch_diagnostics['loo_batch_count'] += 1
+                else:
+                    epoch_diagnostics['loo_skipped_count'] += 1
             
             loss = losses['total_loss'] / grad_accumulation_steps
             
@@ -2701,6 +2865,39 @@ Config Overrides:
         ema = EMAHelper(model, mu=ema_decay, device=device)
         print(f"EMA enabled with decay={ema_decay}")
     
+    # Initialize LOO training for meta-learning (requires HyperLoRA)
+    loo_config = config.get('training', {}).get('loo_training', {})
+    use_loo = loo_config.get('enabled', False) and config.get('model', {}).get('use_hyperlora', False)
+    loo_loss_fn = None
+    if use_loo:
+        loo_weight = loo_config.get('loss_weight', 0.5)
+        loo_min_pairs = loo_config.get('min_pairs_for_loo', 2)
+        loo_loss_fn = LOOTrainingLoss(
+            config=LOOConfig(
+                loss_weight=loo_weight,
+                min_pairs_for_loo=loo_min_pairs,
+                use_gradient_checkpointing=False,
+            )
+        )
+        print(f"LOO training enabled: weight={loo_weight}, min_pairs={loo_min_pairs}")
+    
+    # Initialize equivariance training (consistency across augmentations)
+    equiv_config = config.get('training', {}).get('equivariance_training', {})
+    use_equivariance = equiv_config.get('enabled', False) and config.get('model', {}).get('use_hyperlora', False)
+    equiv_weight = equiv_config.get('loss_weight', 0.1) if use_equivariance else 0.0
+    equiv_loss_fn = None
+    if use_equivariance:
+        hidden_dim = config.get('model', {}).get('hidden_dim', 256)
+        equiv_loss_fn = AugmentationEquivarianceLoss(
+            config=EquivarianceConfig(
+                enabled=True,
+                loss_weight=equiv_weight,
+                num_augmentations=equiv_config.get('num_augmentations', 4),
+            ),
+            hidden_dim=hidden_dim,
+        )
+        print(f"Equivariance training enabled: weight={equiv_weight}, num_augs={equiv_config.get('num_augmentations', 4)}")
+    
     # Training loop
     max_epochs = config['training']['max_epochs']
     save_every = log_cfg.get('save_every', 10)
@@ -2759,7 +2956,7 @@ Config Overrides:
         # Train
         train_losses, global_step = train_epoch(
             model, train_loader, loss_fn, optimizer, device,
-            epoch, config, scaler, global_step, ema
+            epoch, config, scaler, global_step, ema, loo_loss_fn, equiv_loss_fn
         )
         
         # Update scheduler (if using one)
@@ -3166,6 +3363,101 @@ Config Overrides:
                 print(f"  [CRITICAL] Numerical instability: NaN={has_nan}, Inf={has_inf}")
             if logits_max is not None and (logits_max > 50 or logits_min < -50):
                 print(f"  [WARNING] Extreme logit values: [{logits_min:.1f}, {logits_max:.1f}]")
+            
+            # ================================================================
+            # META-LEARNING HEALTH METRICS (HyperLoRA + LOO Training)
+            # ================================================================
+            loo_loss_sum = diagnostics.get('loo_loss_sum', 0.0)
+            loo_accuracy_sum = diagnostics.get('loo_accuracy_sum', 0.0)
+            loo_num_holdouts = diagnostics.get('loo_num_holdouts_sum', 0)
+            loo_batch_count = diagnostics.get('loo_batch_count', 0)
+            loo_skipped = diagnostics.get('loo_skipped_count', 0)
+            hyperlora_grad_norm = diagnostics.get('hyperlora_grad_norm_sum', 0.0)
+            
+            if loo_batch_count > 0 or loo_skipped > 0:
+                print(f"  --- META-LEARNING (HyperLoRA + LOO) ---")
+                
+                if loo_batch_count > 0:
+                    avg_loo_loss = loo_loss_sum / loo_batch_count
+                    avg_loo_accuracy = loo_accuracy_sum / loo_batch_count
+                    avg_holdouts = loo_num_holdouts / loo_batch_count
+                    
+                    print(f"  LOO Loss (avg): {avg_loo_loss:.4f}")
+                    print(f"  LOO Accuracy (N-1→Nth): {avg_loo_accuracy:.1%}")
+                    print(f"  LOO Holdouts/batch: {avg_holdouts:.1f}")
+                    print(f"  LOO Batches: {loo_batch_count} computed, {loo_skipped} skipped")
+                    
+                    # Interpret LOO accuracy
+                    if avg_loo_accuracy > 0.8:
+                        print(f"    ✓ EXCELLENT meta-learning: HyperLoRA generalizes from N-1 to Nth!")
+                    elif avg_loo_accuracy > 0.5:
+                        print(f"    Learning: HyperLoRA starting to generalize")
+                    elif avg_loo_accuracy > 0.2:
+                        print(f"    Early stage: LOO accuracy improving...")
+                    else:
+                        print(f"    [!] Low LOO accuracy - HyperLoRA not yet generalizing")
+                        print(f"    [!] Check: hyperlora_lr_multiplier, LOO loss weight")
+                else:
+                    print(f"  LOO: Skipped all {loo_skipped} batches (not enough pairs)")
+                
+                # HyperLoRA gradient flow
+                if hyperlora_grad_norm > 0:
+                    print(f"  HyperLoRA Grad Norm: {hyperlora_grad_norm:.6f}")
+                    if hyperlora_grad_norm < 0.0001:
+                        print(f"    [!] HyperLoRA gradients near zero - not learning!")
+                
+                # Equivariance Loss Metrics
+                equiv_loss_sum = diagnostics.get('equiv_loss_sum', 0.0)
+                equiv_batch_count = diagnostics.get('equiv_batch_count', 0)
+                if equiv_batch_count > 0:
+                    avg_equiv_loss = equiv_loss_sum / equiv_batch_count
+                    print(f"  Equivariance Loss (avg): {avg_equiv_loss:.4f}")
+                    # Interpret equivariance loss
+                    if avg_equiv_loss < 0.05:
+                        print(f"    ✓ EXCELLENT: LoRA predictions consistent across augmentations")
+                    elif avg_equiv_loss < 0.2:
+                        print(f"    ✓ Good: HyperLoRA learning augmentation invariance")
+                    elif avg_equiv_loss < 0.5:
+                        print(f"    Learning: Equivariance still converging...")
+                    else:
+                        print(f"    [!] High equivariance loss - LoRA predictions vary with augmentation")
+                
+                # Meta-Learning Health Summary (combined status)
+                print(f"  --- Meta-Learning Health Summary ---")
+                meta_health_score = 0.0
+                meta_health_reasons = []
+                
+                if loo_batch_count > 0 and avg_loo_accuracy > 0.5:
+                    meta_health_score += 0.5
+                    meta_health_reasons.append("LOO ✓")
+                elif loo_batch_count > 0:
+                    meta_health_reasons.append("LOO learning")
+                else:
+                    meta_health_reasons.append("LOO skipped")
+                    
+                if equiv_batch_count > 0 and avg_equiv_loss < 0.2:
+                    meta_health_score += 0.3
+                    meta_health_reasons.append("Equiv ✓")
+                elif equiv_batch_count > 0:
+                    meta_health_reasons.append("Equiv learning")
+                else:
+                    meta_health_reasons.append("Equiv skipped")
+                    
+                if hyperlora_grad_norm > 0.0001:
+                    meta_health_score += 0.2
+                    meta_health_reasons.append("Grads ✓")
+                elif hyperlora_grad_norm > 0:
+                    meta_health_reasons.append("Grads low")
+                else:
+                    meta_health_reasons.append("No HyperLoRA grads")
+                
+                # Overall meta-learning status
+                status_icons = {0.0: "❌", 0.2: "⚠️", 0.5: "🔄", 0.8: "✓", 1.0: "✓✓"}
+                icon = "❌"
+                for threshold, ico in sorted(status_icons.items()):
+                    if meta_health_score >= threshold:
+                        icon = ico
+                print(f"  Overall: {icon} [{' | '.join(meta_health_reasons)}] (score={meta_health_score:.1f}/1.0)")
             
             # NEW: Color embedding diversity check
             color_embed_sim = diagnostics.get('color_embed_similarity', None)

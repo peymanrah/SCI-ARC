@@ -298,10 +298,11 @@ class TRMStyleEvaluator:
                         count, total_conf = hash_votes[pred_hash]
                         hash_votes[pred_hash] = (count + 1, total_conf + conf)
                     
-                    # Rank by (average confidence * count) for robust voting
+                    # Rank by (average confidence * count) = total_confidence for robust voting
+                    # This gives preference to predictions that are both frequent AND confident
                     ranked = sorted(
                         hash_votes.items(),
-                        key=lambda x: x[1][1] / max(x[1][0], 1),  # Average confidence
+                        key=lambda x: x[1][1],  # total_confidence (= avg_conf * count)
                         reverse=True
                     )
                     ranked_hashes = [h for h, _ in ranked]
@@ -412,12 +413,25 @@ def evaluate_with_trm_style(
             aug_infos = batch['aug_info']
             
             outputs = model(inputs, batch.get('demos', None))
-            predictions = outputs['pred'].argmax(dim=1)  # (B, H, W)
+            
+            # Handle both tensor outputs (RLAN) and dict outputs (legacy models)
+            if isinstance(outputs, torch.Tensor):
+                logits = outputs
+                stop_logits = None
+            else:
+                # Dict output - look for 'logits' or 'pred' key for backward compatibility
+                logits = outputs.get('logits', outputs.get('pred', None))
+                stop_logits = outputs.get('stop_logits', None)
+            
+            if logits is None:
+                raise ValueError(f"Model output must be tensor or dict with 'logits'/'pred' key, got: {type(outputs)}")
+            
+            predictions = logits.argmax(dim=1)  # (B, H, W)
             
             # Get confidence from stop probability if available
-            if 'stop_logits' in outputs:
+            if stop_logits is not None:
                 # Use average stop probability as confidence (lower = more confident)
-                stop_probs = torch.sigmoid(outputs['stop_logits'])
+                stop_probs = torch.sigmoid(stop_logits)
                 confidence = 1.0 - stop_probs.mean(dim=1)  # (B,)
             else:
                 confidence = None

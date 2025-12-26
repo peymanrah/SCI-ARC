@@ -198,6 +198,22 @@ class RLAN(nn.Module):
         self.use_sph = config.use_sph if config else True
         self.use_learned_pos = config.use_learned_pos if config else False
         
+        # Structure/Content Disentanglement for SCL and orthogonality losses
+        # z_struct: captures transformation rule (should be same across demo pairs)
+        # z_content: captures grid content/appearance (varies across pairs)
+        self.structure_projector = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.content_projector = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        
         # Grid Encoder (reuse existing implementation) - ALWAYS REQUIRED
         self.encoder = GridEncoder(
             hidden_dim=hidden_dim,
@@ -575,6 +591,28 @@ class RLAN(nn.Module):
             }
             if support_features is not None:
                 result["support_features"] = support_features
+                
+                # ===== BUG FIX #2: Compute z_struct and z_content for SCL/ortho losses =====
+                # z_struct: Structure embedding from aggregated context (transformation rule)
+                # This captures WHAT transformation is being applied (same across all demos)
+                # Pool support features spatially and across pairs: (B, N, D, H, W) -> (B, D)
+                z_struct_raw = support_features.mean(dim=(1, 3, 4))  # (B, D)
+                z_struct = self.structure_projector(z_struct_raw)  # (B, D)
+                result["z_struct"] = z_struct
+                
+                # z_struct_demos: Per-demo structure embeddings for consistency loss
+                # Shape: (B, N, D) - one embedding per demo pair
+                B_sf, N_sf, D_sf, H_sf, W_sf = support_features.shape
+                z_struct_demos_raw = support_features.mean(dim=(3, 4))  # (B, N, D)
+                z_struct_demos = self.structure_projector(z_struct_demos_raw)  # (B, N, D)
+                result["z_struct_demos"] = z_struct_demos
+                
+                # z_content: Content embedding from test input features (appearance)
+                # This captures the CONTENT (colors, patterns) which should vary
+                z_content_raw = features.mean(dim=(2, 3))  # (B, D) - pool spatial dims
+                z_content = self.content_projector(z_content_raw)  # (B, D)
+                result["z_content"] = z_content
+                
             if lora_deltas is not None:
                 result["lora_deltas"] = lora_deltas
             if act_outputs is not None:
@@ -587,6 +625,97 @@ class RLAN(nn.Module):
             return result
         else:
             return logits
+    
+    def forward_training(
+        self,
+        input_grids: torch.Tensor,
+        output_grids: torch.Tensor,
+        test_input: torch.Tensor,
+        test_output: torch.Tensor = None,
+        grid_mask: torch.Tensor = None,
+        temperature: float = 1.0,
+        return_intermediates: bool = True,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass with SCIARCTrainer-compatible argument names.
+        
+        This is a wrapper around forward() that maps the trainer's argument names
+        to the forward() method's expected argument names for backward compatibility.
+        
+        Args:
+            input_grids: Shape (B, N, H, W) training input grids
+            output_grids: Shape (B, N, H, W) training output grids  
+            test_input: Shape (B, H, W) test input grid to predict
+            test_output: Shape (B, H, W) test output (not used in forward, for loss computation)
+            grid_mask: Shape (B, N) boolean mask for valid training pairs
+            temperature: Gumbel-softmax temperature
+            return_intermediates: If True, return dict with intermediate outputs
+            **kwargs: Additional arguments passed to forward()
+            
+        Returns:
+            Dict with 'logits' and intermediate outputs if return_intermediates=True
+        """
+        # Map trainer argument names to forward() argument names:
+        # - test_input -> input_grid (the grid we're predicting)
+        # - input_grids -> train_inputs (context/support examples)
+        # - output_grids -> train_outputs (context/support labels)
+        # - grid_mask -> pair_mask (which context pairs are valid)
+        return self.forward(
+            input_grid=test_input,
+            train_inputs=input_grids,
+            train_outputs=output_grids,
+            pair_mask=grid_mask,
+            temperature=temperature,
+            return_intermediates=return_intermediates,
+            **kwargs,
+        )
+    
+    def encode_structure_only(
+        self,
+        input_grids: torch.Tensor,
+        output_grids: torch.Tensor,
+        pair_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Encode only the structure (transformation rule) from input-output pairs.
+        
+        This is an efficient method that skips the full solver and only computes
+        the z_struct embedding. Used for CISL content invariance loss where we
+        need to compare structure embeddings of original vs color-permuted tasks.
+        
+        BUG FIX #3: This method was missing and caused AttributeError when
+        CISL was enabled with cicl_color_inv_weight > 0.
+        
+        Args:
+            input_grids: Shape (B, N, H, W) training input grids
+            output_grids: Shape (B, N, H, W) training output grids
+            pair_mask: Shape (B, N) boolean mask for valid training pairs
+            
+        Returns:
+            z_struct: Shape (B, D) structure embedding capturing transformation rule
+        """
+        if not self.use_context_encoder or self.context_encoder is None:
+            # No context encoder - return zeros
+            B = input_grids.shape[0]
+            return torch.zeros(B, self.hidden_dim, device=input_grids.device)
+        
+        # Encode training pairs to get support features
+        context_output = self.context_encoder(input_grids, output_grids, pair_mask)
+        
+        if self.context_encoder.use_spatial_features:
+            # Spatial features mode: (B, N, D, H, W)
+            support_features = context_output
+            # Pool to get z_struct: (B, N, D, H, W) -> (B, D)
+            z_struct_raw = support_features.mean(dim=(1, 3, 4))
+        else:
+            # FiLM mode: already (B, D)
+            z_struct_raw = context_output
+        
+        # Project through structure projector
+        z_struct = self.structure_projector(z_struct_raw)
+        
+        return z_struct
     
     def pool_context_from_support(
         self,
@@ -923,8 +1052,13 @@ class RLAN(nn.Module):
                     # Apply to all grids (clamp to valid range for safety)
                     color_input = color_perm[input_grid.clamp(0, 10).long()]
                     if train_inputs is not None:
-                        color_train_inputs = color_perm[train_inputs.long()]
-                        color_train_outputs = color_perm[train_outputs.long()]
+                        color_train_inputs = color_perm[train_inputs.clamp(0, 10).long()]
+                        # For train_outputs, handle ignore_index=-100 (from target padding)
+                        # Mask out -100, apply permutation, then restore -100
+                        ignore_mask = train_outputs < 0
+                        safe_outputs = train_outputs.clamp(0, 10).long()
+                        color_train_outputs = color_perm[safe_outputs]
+                        color_train_outputs[ignore_mask] = train_outputs[ignore_mask]
                     else:
                         color_train_inputs = None
                         color_train_outputs = None

@@ -182,9 +182,12 @@ training:
   weight_decay: 0.01     # Light regularization
   gradient_clip: 1.0     # Conservative
   
-  # NO per-module LR boosting (ablation showed it can cause NaN)
+  # Per-module LR boosting
+  # NOTE: Set to 1.0 for stable training. Higher values may cause NaN.
+  # HyperLoRA benefits from higher LR to learn meta-weight prediction faster.
   dsc_lr_multiplier: 1.0
   msre_lr_multiplier: 1.0
+  hyperlora_lr_multiplier: 10.0  # HyperLoRA needs faster learning for meta-adaptation
   
   # Temperature for DSC attention
   temperature_start: 1.0
@@ -285,6 +288,42 @@ training:
     enabled: true
     loss_weight: 0.1       # Light regularization
     num_augmentations: 4   # Number of random augmentations per task
+  
+  # =============================================================
+  # META-LEARNING STRATEGY SUMMARY (COMPLEMENTARY LOSSES)
+  # =============================================================
+  # The three meta-learning losses work together without conflict:
+  #
+  # 1. TASK LOSS (weight=1.0): Standard cross-entropy on predictions
+  #    - Objective: Predict correct output grids
+  #    - Target: Direct task performance
+  #
+  # 2. LOO LOSS (weight=0.5): Leave-one-out generalization
+  #    - Objective: Predict Nth pair from N-1 context
+  #    - Target: Few-shot generalization within a task
+  #    - Complementary: Doesn't conflict with task loss - both want correct predictions
+  #                     LOO adds EXPLICIT generalization signal during training
+  #
+  # 3. EQUIVARIANCE LOSS (weight=0.1): Augmentation consistency
+  #    - Objective: Same LoRA weights for rotated/flipped versions
+  #    - Target: Transform-invariant representations
+  #    - Complementary: Acts as REGULARIZER - prevents overfitting to specific orientations
+  #                     Light weight (0.1) ensures it doesn't dominate task learning
+  #
+  # MATHEMATICAL RELATIONSHIP:
+  #   L_total = L_task + 0.5 * L_loo + 0.1 * L_equiv
+  #
+  # WHY THIS IS OPTIMAL (NOT OVERKILL):
+  # - Task loss drives direct performance
+  # - LOO loss adds explicit generalization pressure (meta-learning signal)
+  # - Equivariance loss adds regularization (prevents orientation bias)
+  # - Weights are calibrated so task loss dominates, meta-losses support
+  #
+  # HYPERLORA LR MULTIPLIER (10x):
+  # - HyperLoRA needs faster learning to adapt its meta-prediction
+  # - Base model has stable pretrained weights, HyperLoRA learns from scratch
+  # - 10x ensures HyperLoRA doesn't become a bottleneck
+  # =============================================================
 
 data:
   train_path: "./data/arc-agi/data/training"

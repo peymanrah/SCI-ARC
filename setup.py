@@ -47,9 +47,11 @@ setup(
         ],
     },
     entry_points={
-        "console_scripts": [
-            "sci-arc-train=scripts.train:main",
-            "sci-arc-evaluate=scripts.evaluate:main",
-        ],
+        # NOTE: Console scripts are disabled because 'scripts' is excluded from packages.
+        # Use scripts directly via: python scripts/train_rlan.py --config configs/...
+        # "console_scripts": [
+        #     "sci-arc-train=scripts.train:main",
+        #     "sci-arc-evaluate=scripts.evaluate:main",
+        # ],
     },
 )

@@ -594,12 +594,113 @@
                                 <p><strong>Key insight:</strong> Each iteration corrects errors from the previous—like sketching then refining.</p>
                             </div>
                         </div>
+                        
+                        <!-- HyperLoRA (NEW - Meta-Learning) -->
+                        <div class="module-card" data-module="hyperlora">
+                            <div class="module-header">
+                                <div class="module-icon">🧬</div>
+                                <h4>HyperLoRA (Meta-Learning)</h4>
+                            </div>
+                            <p class="module-summary">Predicts task-specific weight adaptations from context—enabling fast adaptation without gradient updates at inference.</p>
+                            <button class="expand-btn">Deep Dive ▼</button>
+                            <div class="module-details hidden">
+                                <div class="equation-box">
+                                    <p class="equation-label">Context pooling for HyperNet input:</p>
+                                    <div class="katex-equation">$$\mathbf{z}_{struct} = \text{StructProjector}\left(\text{AvgPool}(F_{support})\right)$$</div>
+                                    <div class="variable-definitions">
+                                        <p><strong>Variables:</strong></p>
+                                        <ul>
+                                            <li>$F_{support}$ = encoded features from all training pairs</li>
+                                            <li>$\mathbf{z}_{struct}$ = structure latent (captures the transformation rule)</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                                <div class="equation-box">
+                                    <p class="equation-label">LoRA weight prediction:</p>
+                                    <div class="katex-equation">$$\Delta W_A, \Delta W_B = \text{HyperNet}(\mathbf{z}_{struct})$$</div>
+                                    <div class="katex-equation">$$W' = W + \alpha \cdot \Delta W_A \cdot \Delta W_B^T$$</div>
+                                    <div class="variable-definitions">
+                                        <p><strong>Variables:</strong></p>
+                                        <ul>
+                                            <li>$\Delta W_A \in \mathbb{R}^{d \times r}$, $\Delta W_B \in \mathbb{R}^{d \times r}$ = low-rank adapters (rank $r=8$)</li>
+                                            <li>$W$ = original GRU/output head weights</li>
+                                            <li>$W'$ = task-adapted weights</li>
+                                            <li>$\alpha$ = scaling factor (default 1.0)</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                                <p><strong>Why this matters:</strong> Unlike fine-tuning (needs gradients), HyperLoRA adapts weights <em>instantly</em> from context—enabling true few-shot generalization.</p>
+                            </div>
+                        </div>
+                        
+                        <!-- LOO Training (NEW - Meta-Learning Training) -->
+                        <div class="module-card" data-module="loo">
+                            <div class="module-header">
+                                <div class="module-icon">🎓</div>
+                                <h4>LOO Training (Leave-One-Out)</h4>
+                            </div>
+                            <p class="module-summary">Trains HyperLoRA to generalize by predicting held-out pairs from remaining context.</p>
+                            <button class="expand-btn">Deep Dive ▼</button>
+                            <div class="module-details hidden">
+                                <div class="equation-box">
+                                    <p class="equation-label">Leave-One-Out loss:</p>
+                                    <div class="katex-equation">$$\mathcal{L}_{LOO} = \frac{1}{N} \sum_{k=1}^{N} \mathcal{L}_{CE}\left(\hat{Y}^{(-k)}, Y^{(k)}\right)$$</div>
+                                    <div class="variable-definitions">
+                                        <p><strong>Variables:</strong></p>
+                                        <ul>
+                                            <li>$N$ = number of training pairs</li>
+                                            <li>$\hat{Y}^{(-k)}$ = prediction using LoRA from pairs $\{1,...,N\} \setminus \{k\}$</li>
+                                            <li>$Y^{(k)}$ = ground truth output for held-out pair $k$</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                                <p><strong>Intuition:</strong> If HyperLoRA can predict pair 3 using only pairs 1 and 2, it learned the <em>general rule</em>, not memorized specific pixels.</p>
+                                <p><strong>Training signal:</strong> "Learn weights that transfer to unseen examples"</p>
+                            </div>
+                        </div>
+                        
+                        <!-- TTA + ACW (NEW - Inference Robustness) -->
+                        <div class="module-card" data-module="tta">
+                            <div class="module-header">
+                                <div class="module-icon">🔄</div>
+                                <h4>TTA + ACW (Inference Robustness)</h4>
+                            </div>
+                            <p class="module-summary">Test-Time Augmentation with Augmented Confidence Weighting for robust predictions.</p>
+                            <button class="expand-btn">Deep Dive ▼</button>
+                            <div class="module-details hidden">
+                                <div class="equation-box">
+                                    <p class="equation-label">Test-Time Augmentation:</p>
+                                    <div class="katex-equation">$$\hat{Y} = \text{Vote}\left(\{T^{-1}(\text{Model}(T(X)))\}_{T \in \mathcal{T}}\right)$$</div>
+                                    <div class="variable-definitions">
+                                        <p><strong>Variables:</strong></p>
+                                        <ul>
+                                            <li>$\mathcal{T}$ = set of 32 augmentations (8 dihedral × 4 color permutations)</li>
+                                            <li>$T$ = augmentation, $T^{-1}$ = inverse augmentation</li>
+                                            <li>$\text{Vote}$ = majority voting across predictions</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                                <div class="equation-box">
+                                    <p class="equation-label">Augmented Confidence Weighting (ACW):</p>
+                                    <div class="katex-equation">$$w_i = 1 - \frac{1}{|\mathcal{T}|} \sum_{j \neq i} \mathbb{1}[\hat{Y}_i \neq \hat{Y}_j]$$</div>
+                                    <div class="katex-equation">$$\hat{Y}_{final} = \arg\max_c \sum_{i} w_i \cdot \mathbb{1}[\hat{Y}_i = c]$$</div>
+                                    <div class="variable-definitions">
+                                        <p><strong>Variables:</strong></p>
+                                        <ul>
+                                            <li>$w_i$ = weight for view $i$ (higher if consistent with others)</li>
+                                            <li>More consistent predictions get higher voting weight</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                                <p><strong>Why this works:</strong> Correct predictions are usually consistent across augmentations; wrong ones vary randomly.</p>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
             
             <div class="takeaway">
-                <strong>Takeaway:</strong> RLAN's six modules form a complete spatial reasoning system: encode context → focus attention → build relative coords → count objects → predict size → iteratively solve.
+                <strong>Takeaway:</strong> RLAN's modular architecture combines spatial reasoning (DSC, MSRE, Solver) with meta-learning (HyperLoRA, LOO) and robust inference (TTA, ACW) for true few-shot generalization.
             </div>
             
             <!-- PSEUDOCODE SECTION -->
@@ -614,7 +715,13 @@
     F = <span class="function">GridEncoder</span>(test_input)  <span class="comment"># F ∈ ℝ^(H×W×D)</span>
     F = <span class="function">FiLM</span>(F, context)  <span class="comment"># condition on context</span>
     
-    <span class="comment"># Step 3: Dynamic Saliency Controller (find clue anchors)</span>
+    <span class="comment"># Step 3: HyperLoRA - Meta-Learning Weight Adaptation (NEW!)</span>
+    <span class="keyword">if</span> use_hyperlora:
+        z_struct = <span class="function">StructProjector</span>(<span class="function">AvgPool</span>(F_support))  <span class="comment"># structure latent</span>
+        ΔW_A, ΔW_B = <span class="function">HyperNet</span>(z_struct)  <span class="comment"># predict LoRA weights</span>
+        <span class="comment"># Apply LoRA to GRU and output head: W' = W + ΔW_A @ ΔW_B.T</span>
+    
+    <span class="comment"># Step 4: Dynamic Saliency Controller (find clue anchors)</span>
     clues = []
     H_dsc = zeros(D)
     <span class="keyword">for</span> t <span class="keyword">in</span> 1..N_clues:
@@ -623,7 +730,7 @@
         clues.append((M_t, μ_t))
         H_dsc = <span class="function">GRU</span>(H_dsc, <span class="function">Pool</span>(M_t ⊙ F))
     
-    <span class="comment"># Step 4: Multi-Scale Relative Encoding</span>
+    <span class="comment"># Step 5: Multi-Scale Relative Encoding</span>
     P_rel = []
     <span class="keyword">for</span> (M_t, μ_t) <span class="keyword">in</span> clues:
         P_abs = <span class="function">RelativeCoords</span>(μ_t)  <span class="comment"># P_abs(i,j) = [i-μ_y, j-μ_x]</span>
@@ -631,27 +738,71 @@
         P_polar = <span class="function">LogPolar</span>(μ_t)  <span class="comment"># (r, φ) for rotation</span>
         P_rel.append(<span class="function">Concat</span>(P_abs, P_norm, P_polar))
     
-    <span class="comment"># Step 5: Latent Counting Registers</span>
+    <span class="comment"># Step 6: Latent Counting Registers</span>
     C = []
     <span class="keyword">for</span> (M_t, _) <span class="keyword">in</span> clues:
         c_t = Σ_{i,j} M_t[i,j] · <span class="function">OneHot</span>(X[i,j])  <span class="comment"># color histogram</span>
         C.append(c_t)
     C_broadcast = <span class="function">SpatialBroadcast</span>(C)  <span class="comment"># ℝ^(H×W×10)</span>
     
-    <span class="comment"># Step 6: Symbolic Predicate Heads</span>
+    <span class="comment"># Step 7: Symbolic Predicate Heads</span>
     p = <span class="function">SPH</span>(<span class="function">GlobalPool</span>(F))  <span class="comment"># p_k ∈ [0,1] for K predicates</span>
     g = <span class="function">SizePredictor</span>(p)  <span class="comment"># output grid size</span>
     
-    <span class="comment"># Step 7: Recursive Solver (iterative refinement)</span>
+    <span class="comment"># Step 8: Recursive Solver (iterative refinement with task-adapted weights)</span>
     H = zeros(H_out, W_out, D)
     <span class="keyword">for</span> s <span class="keyword">in</span> 1..S_max:
         X_hat = <span class="function">Concat</span>(X, P_rel, C_broadcast, H)
-        H = <span class="function">ConvGRU</span>(X_hat, H)
+        H = <span class="function">ConvGRU</span>(X_hat, H)  <span class="comment"># uses adapted weights W' if HyperLoRA active</span>
         logits = <span class="function">clamp</span>(<span class="function">OutputHead</span>(H), -50, 50)
         <span class="keyword">if</span> <span class="function">HaltingCondition</span>(H):
             <span class="keyword">break</span>
     
-    <span class="keyword">return</span> <span class="function">Stablemax</span>(logits)  <span class="comment"># final grid prediction</span></code></pre>
+    <span class="keyword">return</span> <span class="function">Stablemax</span>(logits)  <span class="comment"># final grid prediction</span>
+
+<span class="comment"># ===========================================</span>
+<span class="comment"># TRAINING: How HyperLoRA learns to generalize</span>
+<span class="comment"># ===========================================</span>
+<span class="keyword">function</span> <span class="function">RLAN_Train_Step</span>(batch):
+    <span class="comment"># Standard task loss</span>
+    pred = <span class="function">RLAN_Forward</span>(batch.train_pairs, batch.test_input)
+    L_task = <span class="function">CrossEntropy</span>(pred, batch.test_output)
+    
+    <span class="comment"># LOO Loss: Leave-One-Out meta-learning (trains HyperLoRA to generalize)</span>
+    L_loo = 0
+    <span class="keyword">for</span> k <span class="keyword">in</span> 1..N:  <span class="comment"># for each training pair</span>
+        pairs_minus_k = train_pairs <span class="keyword">without</span> pair[k]  <span class="comment"># hold out pair k</span>
+        z_struct_k = <span class="function">StructProjector</span>(<span class="function">Encode</span>(pairs_minus_k))
+        ΔW = <span class="function">HyperNet</span>(z_struct_k)  <span class="comment"># predict weights from N-1 pairs</span>
+        pred_k = <span class="function">SolveWithLoRA</span>(pair[k].input, ΔW)  <span class="comment"># predict held-out</span>
+        L_loo += <span class="function">CrossEntropy</span>(pred_k, pair[k].output)
+    L_loo = L_loo / N
+    
+    <span class="comment"># Total loss with orthogonality regularization</span>
+    z_content = <span class="function">ContentProjector</span>(test_features)
+    L_ortho = |z_struct · z_content|²  <span class="comment"># structure ⊥ content</span>
+    
+    <span class="keyword">return</span> L_task + λ_loo * L_loo + λ_ortho * L_ortho
+
+<span class="comment"># ===========================================</span>
+<span class="comment"># INFERENCE: TTA + ACW for robust predictions</span>
+<span class="comment"># ===========================================</span>
+<span class="keyword">function</span> <span class="function">RLAN_Inference</span>(train_pairs, test_input):
+    predictions = []
+    
+    <span class="comment"># Test-Time Augmentation: 8 dihedral × 4 color perms = 32 views</span>
+    <span class="keyword">for</span> T <span class="keyword">in</span> Dihedral8 × ColorPerms4:
+        aug_pairs = <span class="function">ApplyAug</span>(train_pairs, T)
+        aug_test = <span class="function">ApplyAug</span>(test_input, T)
+        pred = <span class="function">RLAN_Forward</span>(aug_pairs, aug_test)
+        pred = <span class="function">InverseAug</span>(pred, T)  <span class="comment"># undo augmentation</span>
+        predictions.append(pred)
+    
+    <span class="comment"># ACW: Augmented Confidence Weighting</span>
+    <span class="keyword">for</span> i <span class="keyword">in</span> predictions:
+        consistency[i] = 1 - <span class="function">MeanDisagreement</span>(pred[i], all_others)
+    
+    <span class="keyword">return</span> <span class="function">WeightedVote</span>(predictions, consistency)</code></pre>
                 </div>
                 
                 <div class="formula-reference">
@@ -673,11 +824,19 @@
                             <span class="formula-name">Solver:</span>
                             <span class="katex-inline">$H_{s} = \text{ConvGRU}(\hat{X}_s, H_{s-1})$</span>
                         </div>
+                        <div class="formula-item">
+                            <span class="formula-name">HyperLoRA:</span>
+                            <span class="katex-inline">$W' = W + \alpha \Delta W_A \Delta W_B^T$</span>
+                        </div>
+                        <div class="formula-item">
+                            <span class="formula-name">LOO Loss:</span>
+                            <span class="katex-inline">$\mathcal{L}_{LOO} = \frac{1}{N}\sum_k \mathcal{L}(\hat{Y}^{(-k)}, Y^{(k)})$</span>
+                        </div>
                     </div>
                 </div>
             </div>
             
-            <div class="speaker-notes" data-duration-30s="Six modules: encode, focus, relativize, count, size, solve iteratively." data-duration-2min="RLAN has six key modules. The Context Encoder builds representations from training examples. DSC learns where to focus attention. MSRE converts to relative coordinates for translation invariance. LCR enables differentiable counting. SPH detects predicates for conditional logic. And the Recursive Solver—the heart—iteratively refines predictions using a ConvGRU, like sketching and correcting." data-duration-5min="Let me walk through the architecture. The Context Encoder processes all training examples into a shared representation. DSC—Dynamic Saliency Controller—learns attention weights to focus on informative regions. MSRE converts absolute positions to relative coordinates anchored at attention hotspots, providing translation invariance. LCR implements differentiable counting for tasks like 'count the objects'. SPH detects symbolic predicates like symmetry for conditional logic. Finally, the Recursive Solver uses a ConvGRU to iteratively refine predictions—starting with a rough guess and correcting over 3-8 iterations. This mimics human problem-solving: sketch, evaluate, refine."></div>
+            <div class="speaker-notes" data-duration-30s="Nine modules: encode, HyperLoRA adapts weights, DSC focuses, MSRE relativizes, count, size, solve, TTA+ACW at inference." data-duration-2min="RLAN has nine key modules. The Context Encoder builds task representations. HyperLoRA predicts task-specific weight adaptations. DSC learns where to focus attention. MSRE converts to relative coordinates. LCR enables counting. SPH detects predicates. The Recursive Solver iteratively refines predictions. During training, LOO loss teaches HyperLoRA to generalize. At inference, TTA with ACW aggregates predictions across augmentations." data-duration-5min="Let me walk through the enhanced architecture. The Context Encoder processes training examples into a task representation. NEW: HyperLoRA takes this and predicts task-specific LoRA weight deltas—adapting the GRU and output head per task without gradient updates. DSC finds attention hotspots. MSRE converts to relative coordinates for translation invariance. LCR counts colors. SPH detects predicates. The Recursive Solver uses task-adapted weights to iteratively refine. During training, LOO loss holds out pairs to teach HyperLoRA true generalization. At inference, we run 32 augmented views (TTA) and use ACW to weight-vote based on prediction consistency."></div>
         </section>
 
         <!-- ========== NEW SECTION: VISUAL WALKTHROUGH ========== -->

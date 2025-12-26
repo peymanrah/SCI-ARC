@@ -69,13 +69,197 @@ class LOOTrainingLoss(nn.Module):
         
     def forward(
         self,
+        model: nn.Module = None,
+        input_grids: torch.Tensor = None,  # (B, N, H, W) - support inputs
+        output_grids: torch.Tensor = None,  # (B, N, H, W) - support targets
+        pair_mask: torch.Tensor = None,  # (B, N) - which pairs are valid
+        temperature: float = 1.0,
+        # Legacy parameters for backward compatibility
+        hyper_lora: nn.Module = None,
+        rlan: nn.Module = None,
+        support_inputs: torch.Tensor = None,
+        support_targets: torch.Tensor = None,
+        support_features: torch.Tensor = None,
+        num_valid_pairs: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compute LOO loss using the RLAN model.
+        
+        Can be called in two ways:
+        1. Model-based (preferred): model=, input_grids=, output_grids=, pair_mask=
+        2. Component-based (legacy): hyper_lora=, rlan=, support_inputs=, etc.
+        
+        Returns:
+            Dict with 'loo_loss' (tensor), 'loo_accuracy', 'loo_num_holdouts', etc.
+        """
+        # Mode 1: Full model interface (used by train_rlan.py)
+        if model is not None and input_grids is not None:
+            return self._forward_with_model(
+                model=model,
+                input_grids=input_grids,
+                output_grids=output_grids,
+                pair_mask=pair_mask,
+                temperature=temperature,
+            )
+        
+        # Mode 2: Component-based interface (legacy)
+        if hyper_lora is not None and rlan is not None and support_features is not None:
+            return self._forward_with_components(
+                hyper_lora=hyper_lora,
+                rlan=rlan,
+                support_inputs=support_inputs,
+                support_targets=support_targets,
+                support_features=support_features,
+                num_valid_pairs=num_valid_pairs,
+            )
+        
+        # Neither mode - return skip
+        return {
+            'loo_loss': torch.tensor(0.0),
+            'loo_accuracy': 0.0,
+            'loo_num_holdouts': 0,
+            'loo_skipped': True,
+            'loo_reason': 'Invalid arguments - need either model= or hyper_lora=+rlan=',
+        }
+    
+    def _forward_with_model(
+        self,
+        model: nn.Module,
+        input_grids: torch.Tensor,  # (B, N, H, W)
+        output_grids: torch.Tensor,  # (B, N, H, W)
+        pair_mask: torch.Tensor = None,
+        temperature: float = 1.0,
+    ) -> Dict[str, Any]:
+        """
+        Compute LOO loss using full RLAN model.
+        
+        This method:
+        1. Encodes support inputs to get support_features
+        2. Extracts hyper_lora from model
+        3. Computes LOO loss by holding out each pair
+        """
+        device = input_grids.device
+        B, N, H, W = input_grids.shape
+        
+        # Check if model has HyperLoRA
+        if not hasattr(model, 'hyper_lora') or model.hyper_lora is None:
+            return {
+                'loo_loss': torch.tensor(0.0, device=device),
+                'loo_accuracy': 0.0,
+                'loo_num_holdouts': 0,
+                'loo_skipped': True,
+                'loo_reason': 'Model does not have HyperLoRA',
+            }
+        
+        # Skip if not enough pairs
+        if N < self.config.min_pairs_for_loo:
+            return {
+                'loo_loss': torch.tensor(0.0, device=device),
+                'loo_accuracy': 0.0,
+                'loo_num_holdouts': 0,
+                'loo_skipped': True,
+                'loo_reason': f'Not enough pairs ({N} < {self.config.min_pairs_for_loo})',
+            }
+        
+        # Determine valid pairs per sample
+        if pair_mask is not None:
+            num_valid_pairs = pair_mask.sum(dim=1)  # (B,)
+        else:
+            num_valid_pairs = torch.full((B,), N, device=device)
+        
+        # Encode support inputs to get features
+        # RLAN encoder expects (B, H, W) input, so we flatten and reshape
+        input_grids_flat = input_grids.view(B * N, H, W)  # (B*N, H, W)
+        
+        # Get encoder features - use model's encoding method
+        with torch.no_grad():
+            # Embed to one-hot and encode
+            x_onehot = F.one_hot(input_grids_flat.long(), num_classes=model.num_colors).float()
+            x_onehot = x_onehot.permute(0, 3, 1, 2)  # (B*N, C, H, W)
+            support_features_flat = model.encoder(x_onehot)  # (B*N, D, Hs, Ws)
+        
+        D = support_features_flat.shape[1]
+        Hs, Ws = support_features_flat.shape[2], support_features_flat.shape[3]
+        support_features = support_features_flat.view(B, N, D, Hs, Ws)
+        
+        # Now compute LOO loss
+        total_loss = torch.tensor(0.0, device=device)
+        total_correct = 0
+        total_pixels = 0
+        num_holdouts = 0
+        
+        for holdout_idx in range(N):
+            # Create mask for valid holdouts
+            valid_holdout_mask = holdout_idx < num_valid_pairs  # (B,)
+            
+            if not valid_holdout_mask.any():
+                continue
+            
+            # Get remaining indices
+            remaining_indices = [i for i in range(N) if i != holdout_idx]
+            
+            # Pool context from remaining pairs only
+            remaining_features = support_features[:, remaining_indices]  # (B, N-1, D, Hs, Ws)
+            
+            # Predict LoRA deltas from remaining-pair context
+            lora_deltas = model.hyper_lora(remaining_features)
+            
+            # Get held-out input and target
+            holdout_input = input_grids[:, holdout_idx]  # (B, H, W)
+            holdout_target = output_grids[:, holdout_idx]  # (B, H, W)
+            
+            # Forward pass with LoRA weights
+            # Use full support features for cross-attention (context is from N-1 only via LoRA)
+            logits = model.forward_with_lora(
+                holdout_input,
+                support_features,
+                lora_deltas,
+            )  # (B, num_classes, H, W)
+            
+            # Compute loss with masking for invalid samples
+            target_for_loss = holdout_target.clone().long()
+            target_for_loss[~valid_holdout_mask] = -100  # Ignore invalid samples
+            
+            ce_loss = F.cross_entropy(logits, target_for_loss, ignore_index=-100, reduction='mean')
+            total_loss = total_loss + ce_loss
+            
+            # Track accuracy
+            with torch.no_grad():
+                preds = logits.argmax(dim=1)
+                sample_mask = valid_holdout_mask.view(B, 1, 1).expand_as(holdout_target)
+                pixel_mask = holdout_target != -100
+                combined_mask = sample_mask & pixel_mask
+                
+                correct = ((preds == holdout_target) & combined_mask).sum().item()
+                total_correct += correct
+                total_pixels += combined_mask.sum().item()
+            
+            num_holdouts += 1
+        
+        # Average loss over holdouts
+        if num_holdouts > 0:
+            avg_loss = total_loss / num_holdouts
+            accuracy = total_correct / (total_pixels + 1e-8)
+        else:
+            avg_loss = torch.tensor(0.0, device=device)
+            accuracy = 0.0
+        
+        return {
+            'loo_loss': avg_loss,
+            'loo_accuracy': accuracy,
+            'loo_num_holdouts': num_holdouts,
+            'loo_skipped': False,
+        }
+    
+    def _forward_with_components(
+        self,
         hyper_lora: nn.Module,
         rlan: nn.Module,
         support_inputs: torch.Tensor,  # (B, N, C, H, W)
         support_targets: torch.Tensor,  # (B, N, H, W)
         support_features: torch.Tensor,  # (B, N, D, Hs, Ws) - encoder features
         num_valid_pairs: Optional[torch.Tensor] = None,  # (B,) - actual pairs per sample
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Compute LOO loss.
         
@@ -126,15 +310,14 @@ class LOOTrainingLoss(nn.Module):
             # support_features: (B, N, D, Hs, Ws)
             remaining_features = support_features[:, remaining_indices]  # (B, N-1, D, Hs, Ws)
             
-            # Pool across remaining pairs: mean over pair dimension and spatial
-            # Shape: (B, N-1, D, Hs, Ws) -> (B, D)
-            context_vector = remaining_features.mean(dim=(1, 3, 4))  # (B, D)
-            
-            # Predict LoRA deltas from remaining-pair context
-            lora_deltas = hyper_lora.compute_delta_w(context_vector)
+            # Predict LoRA deltas from remaining-pair features
+            # HyperLoRA expects (B, N, D, H, W) and internally pools to context
+            lora_deltas = hyper_lora(remaining_features)
             
             # Get the held-out input
             holdout_input = support_inputs[:, holdout_idx]  # (B, C, H, W)
+            # Squeeze channel dim for forward_with_lora which expects (B, H, W)
+            holdout_input = holdout_input.squeeze(1)  # (B, H, W)
             holdout_target = support_targets[:, holdout_idx]  # (B, H, W)
             
             # For remaining features to pass to solver, flatten N-1 pairs
@@ -192,13 +375,13 @@ class LOOTrainingLoss(nn.Module):
             accuracy = 0.0
         
         metrics = {
-            'loo_loss': avg_loss.item(),
+            'loo_loss': avg_loss,  # Keep as tensor for backward compat
             'loo_accuracy': accuracy,
             'loo_num_holdouts': num_holdouts,
             'loo_skipped': False,
         }
         
-        return avg_loss, metrics
+        return metrics
 
 
 class AugmentationEquivarianceLoss(nn.Module):

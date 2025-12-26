@@ -463,9 +463,8 @@ class ARCDataset(Dataset):
         else:
             pad_value = self.PAD_COLOR  # Use 10 for inputs to distinguish from black
         
-        # Need int64 for -100 values (uint8 can't hold negative numbers)
-        dtype = np.int64 if pad_value < 0 else np.int32
-        padded = np.full((self.max_size, self.max_size), pad_value, dtype=dtype)
+        # Use int64 consistently for all grids (needed for -100 values and PyTorch compatibility)
+        padded = np.full((self.max_size, self.max_size), pad_value, dtype=np.int64)
         
         # Calculate offset
         r_off, c_off = offset if offset is not None else (0, 0)
@@ -771,6 +770,10 @@ class SCIARCDataset(Dataset):
         cache_augmentations: int = 8,  # Number of augmented versions to pre-generate per task
         use_augment_family: bool = True,  # DEPRECATED: use scl_family_mode instead
         scl_family_mode: str = "task",  # "task" (augmentation invariance), "augment" (dihedral), "inferred"
+        expand_test_pairs: bool = False,  # NEW: If True, expand dataset to cover all test pairs per task
+        color_permutation: bool = True,  # Enable color permutation augmentation
+        color_permutation_prob: float = 0.5,  # Probability of applying color permutation
+        translational_augment: bool = False,  # Enable translational augmentation
     ):
         """
         Initialize the dataset.
@@ -797,6 +800,9 @@ class SCIARCDataset(Dataset):
                   This teaches "rotation detection" not "task understanding".
                 - "inferred": Use infer_transform_from_grids result
                   Only works if tasks have detectable simple transforms.
+            expand_test_pairs: If True, expand dataset indexing to (task, test_idx) so that
+                evaluation can deterministically cover all official test inputs. Default False
+                for backward compatibility (random test pair selection for training).
         """
         self.data_dir = Path(data_dir)
         self.split = split
@@ -807,6 +813,10 @@ class SCIARCDataset(Dataset):
         self.curriculum_stage = curriculum_stage
         self.cache_samples = cache_samples
         self.cache_augmentations = cache_augmentations
+        self.expand_test_pairs = expand_test_pairs
+        self.color_permutation = color_permutation
+        self.color_permutation_prob = color_permutation_prob
+        self.translational_augment = translational_augment
         
         # Handle scl_family_mode with backward compatibility
         # DEPRECATED: use_augment_family is ignored if scl_family_mode is explicitly set
@@ -832,7 +842,16 @@ class SCIARCDataset(Dataset):
         if curriculum_stage > 0:
             self.tasks = self._filter_by_difficulty(curriculum_stage)
         
-        print(f"Loaded {len(self.tasks)} tasks from {split}")
+        # Build expanded index for deterministic evaluation if requested
+        self._expanded_index: List[Tuple[int, int]] = []  # (task_idx, test_idx)
+        if expand_test_pairs:
+            for task_idx, task in enumerate(self.tasks):
+                num_tests = len(task.test_pairs) if task.test_pairs else 1
+                for test_idx in range(num_tests):
+                    self._expanded_index.append((task_idx, test_idx))
+            print(f"Expanded to {len(self._expanded_index)} (task, test_idx) pairs from {len(self.tasks)} tasks")
+        else:
+            print(f"Loaded {len(self.tasks)} tasks from {split}")
         
         # Pre-populate cache if enabled
         if cache_samples:
@@ -849,7 +868,14 @@ class SCIARCDataset(Dataset):
             split_dir = self.data_dir / f"{self.split}_challenges"
         
         if not split_dir.exists():
-            # Single directory with all tasks
+            # Single directory with all tasks - emit warning to prevent silent data leakage
+            import warnings
+            warnings.warn(
+                f"Split directory '{self.split}' not found in {self.data_dir}. "
+                f"Falling back to loading all tasks from {self.data_dir}. "
+                "This may cause train/eval data leakage if the directory contains both splits!",
+                UserWarning
+            )
             split_dir = self.data_dir
         
         # Load JSON files
@@ -992,6 +1018,8 @@ class SCIARCDataset(Dataset):
     def __len__(self) -> int:
         if self.cache_samples and self.augment and self._augmented_cache:
             return len(self._augmented_cache)
+        if self.expand_test_pairs and self._expanded_index:
+            return len(self._expanded_index)
         return len(self.tasks)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
@@ -1004,27 +1032,43 @@ class SCIARCDataset(Dataset):
                 # Return cached non-augmented sample
                 return self._cache[idx]
         
+        # Handle expanded test pair indexing for deterministic evaluation
+        if self.expand_test_pairs and self._expanded_index:
+            task_idx, test_idx = self._expanded_index[idx]
+            return self._process_task(task_idx, apply_augment=self.augment, fixed_test_idx=test_idx)
+        
         # Process on-the-fly (original behavior)
         return self._process_task(idx, apply_augment=self.augment)
     
-    def _process_task(self, idx: int, apply_augment: bool = False) -> Dict[str, Any]:
+    def _process_task(
+        self,
+        idx: int,
+        apply_augment: bool = False,
+        fixed_test_idx: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Process a single task into a training sample.
         
         Args:
             idx: Task index (always indexes into self.tasks)
             apply_augment: Whether to apply augmentation
+            fixed_test_idx: If provided, use this specific test pair index instead of random.
+                            Used when expand_test_pairs=True for deterministic evaluation.
             
         Returns:
             Dictionary with processed sample tensors
         """
         task = self.tasks[idx]
         
-        # Randomly select a test pair
+        # Select a test pair (deterministic if fixed_test_idx provided, else random)
         if task.test_pairs:
-            test_idx = random.randint(0, len(task.test_pairs) - 1)
+            if fixed_test_idx is not None:
+                test_idx = fixed_test_idx
+            else:
+                test_idx = random.randint(0, len(task.test_pairs) - 1)
             test_input, test_output = task.test_pairs[test_idx]
         else:
             # If no test pairs, use last train pair
+            test_idx = 0
             test_input, test_output = task.train_pairs[-1]
         
         # Collect all grids
@@ -1082,6 +1126,7 @@ class SCIARCDataset(Dataset):
             'test_output': torch.tensor(test_output, dtype=torch.long),
             'transform_family': transform_family,
             'num_train_pairs': len(task.train_pairs),
+            'test_idx': test_idx,  # Track which test pair was used (for deterministic eval)
         }
     
     def _augment(
@@ -1110,7 +1155,8 @@ class SCIARCDataset(Dataset):
         dihedral_id = random.randint(0, 7)
         
         # Color permutation (keep 0 fixed, permute 1-9)
-        do_color_perm = random.random() < 0.5
+        # Only apply if color_permutation is enabled AND probability check passes
+        do_color_perm = self.color_permutation and random.random() < self.color_permutation_prob
         if do_color_perm:
             # TRM style: permute colors 1-9, keep 0 (black/background) fixed
             color_perm = list(range(1, self.num_colors))  # [1, 2, ..., 9]
@@ -1122,8 +1168,8 @@ class SCIARCDataset(Dataset):
         else:
             color_map = None
         
-        # Translational augmentation
-        do_translate = random.random() < 0.3
+        # Translational augmentation (only if enabled via config)
+        do_translate = self.translational_augment and random.random() < 0.3
         if do_translate:
             # Find max grid dimensions to determine safe translation range
             all_grids = input_grids + output_grids + [test_input, test_output]
@@ -1270,7 +1316,7 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
         
         # Pad test grids
         test_inputs[i] = pad_grid(sample['test_input'], max_size)
-        test_outputs[i] = pad_grid(sample['test_output'], max_size)
+        test_outputs[i] = pad_grid(sample['test_output'], max_size, is_target=True)
         
         # Transform family
         transform_families[i] = sample['transform_family']
@@ -1384,6 +1430,15 @@ def create_dataloader(
         g = torch.Generator()
         g.manual_seed(seed)
         worker_init = seed_worker
+        
+        # CRITICAL FIX: When num_workers=0, worker_init_fn is never called.
+        # We need to seed the main process RNG directly for reproducibility.
+        if effective_workers == 0:
+            import random
+            import numpy as np
+            torch.manual_seed(seed)
+            random.seed(seed)
+            np.random.seed(seed)
     
     loader = DataLoader(
         dataset,

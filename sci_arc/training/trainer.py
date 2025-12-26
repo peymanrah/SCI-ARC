@@ -23,12 +23,16 @@ from datetime import datetime
 import torch
 
 from .loss_logger import LossLogger
+from .ema import EMAHelper  # BUG FIX #4: EMA for stable evaluation
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
+
+# LOO Training (BUG FIX #1)
+from sci_arc.models.rlan_modules.loo_training import LOOTrainingLoss, LOOConfig
 
 try:
     import wandb
@@ -94,6 +98,16 @@ class TrainingConfig:
     cicl_color_inv_weight: float = 0.5       # Content invariance weight (λ₂)
     cicl_variance_weight: float = 0.1        # Batch variance weight (λ₃, anti-collapse)
     cicl_target_std: float = 0.5             # Target std (γ) for variance regularization
+    
+    # LOO: Leave-One-Out Training for meta-learning (BUG FIX #1)
+    # Teaches model to generalize from N-1 examples to predict the Nth
+    use_loo: bool = False                    # Enable LOO training (requires HyperLoRA)
+    loo_weight: float = 0.5                  # Weight of LOO loss relative to task loss
+    loo_min_pairs: int = 2                   # Minimum training pairs for LOO (need at least 2)
+    
+    # EMA: Exponential Moving Average for stable evaluation (BUG FIX #4)
+    use_ema: bool = False                    # Enable EMA for evaluation
+    ema_decay: float = 0.999                 # EMA decay rate
     
     # Scheduler
     scheduler_type: str = 'cosine'  # 'cosine', 'onecycle', 'constant'
@@ -194,6 +208,34 @@ class SCIARCTrainer:
             print(f"  - Content invariance weight (L2): {config.cicl_color_inv_weight}")
             print(f"  - Variance weight (L3): {config.cicl_variance_weight}")
             print(f"  - Target std (gamma): {config.cicl_target_std}")
+        
+        # Initialize LOO training if enabled (BUG FIX #1)
+        self.loo_loss = None
+        if config.use_loo:
+            # Check if model has HyperLoRA (required for LOO)
+            if hasattr(self.model, 'hyper_lora') and self.model.hyper_lora is not None:
+                loo_config = LOOConfig(
+                    enabled=True,
+                    loss_weight=config.loo_weight,
+                    min_pairs_for_loo=config.loo_min_pairs,
+                )
+                self.loo_loss = LOOTrainingLoss(
+                    config=loo_config,
+                    hidden_dim=self.model.hidden_dim,
+                ).to(self.device)
+                print(f"[LOO] Enabled Leave-One-Out Training:")
+                print(f"  - LOO weight: {config.loo_weight}")
+                print(f"  - Min pairs for LOO: {config.loo_min_pairs}")
+            else:
+                print("[LOO] WARNING: LOO training requires HyperLoRA to be enabled!")
+                print("       Set use_hyperlora=True in model config to use LOO.")
+        
+        # Initialize EMA if enabled (BUG FIX #4)
+        self.ema = None
+        if config.use_ema:
+            self.ema = EMAHelper(self.model, decay=config.ema_decay)
+            print(f"[EMA] Enabled Exponential Moving Average:")
+            print(f"  - Decay rate: {config.ema_decay}")
         
         # Setup optimizer
         self.optimizer = self._create_optimizer()
@@ -452,6 +494,10 @@ class SCIARCTrainer:
                 else:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
                     self.optimizer.step()
+                
+                # Update EMA after optimizer step (BUG FIX #4)
+                if self.ema is not None:
+                    self.ema.update()
                 
                 self.optimizer.zero_grad()
                 
@@ -776,11 +822,50 @@ class SCIARCTrainer:
                 ortho_loss = self.loss_fn.orthogonality(z_struct, z_content)
         losses['ortho'] = ortho_loss
         
+        # LOO loss - Leave-One-Out training for meta-learning (BUG FIX #1)
+        loo_loss = torch.tensor(0.0, device=self.device)
+        if self.loo_loss is not None and 'support_features' in outputs:
+            # Get support features and inputs from batch
+            support_features = outputs['support_features']  # (B, N, D, Hs, Ws)
+            input_grids = batch['input_grids']  # (B, N, H, W)
+            output_grids = batch['output_grids']  # (B, N, H, W)
+            
+            # Get HyperLoRA from model
+            if hasattr(self.model, 'hyper_lora') and self.model.hyper_lora is not None:
+                # Prepare inputs for LOO loss
+                # LOO expects (B, N, C, H, W) for support_inputs
+                support_inputs = input_grids.unsqueeze(2)  # (B, N, 1, H, W)
+                
+                try:
+                    loo_result, loo_metrics = self.loo_loss(
+                        hyper_lora=self.model.hyper_lora,
+                        rlan=self.model,
+                        support_inputs=support_inputs,
+                        support_targets=output_grids,
+                        support_features=support_features,
+                    )
+                    loo_loss = loo_result
+                    
+                    # Log LOO metrics
+                    if not loo_metrics.get('loo_skipped', False):
+                        losses['loo_accuracy'] = loo_metrics.get('loo_accuracy', 0.0)
+                except Exception as e:
+                    # LOO failed - log warning but don't crash training
+                    if not hasattr(self, '_loo_warn_count'):
+                        self._loo_warn_count = 0
+                    if self._loo_warn_count < 3:
+                        print(f"[LOO WARNING] LOO loss computation failed: {e}")
+                        self._loo_warn_count += 1
+        losses['loo'] = loo_loss
+        
         # Total loss
         total = task_loss
         total = total + self.config.scl_weight * scl_loss
         total = total + self.config.ortho_weight * ortho_loss
         total = total + self.config.deep_supervision_weight * deep_loss
+        # Add LOO loss with its weight
+        if self.config.use_loo:
+            total = total + self.config.loo_weight * loo_loss
         losses['total'] = total
         
         # ===============================================
@@ -1050,6 +1135,12 @@ class SCIARCTrainer:
         """
         if not self.val_loader:
             return {}
+        
+        # Use EMA model for validation if available (BUG FIX #4)
+        if self.ema is not None:
+            # Store original model and swap in EMA model
+            self.ema.store()
+            self.ema.copy_to()
         
         self.model.eval()
         
@@ -1370,6 +1461,10 @@ class SCIARCTrainer:
                 'val/logit_min': metrics['logit_min'],
                 'val/epoch': self.current_epoch,
             })
+        
+        # Restore original model if EMA was used (BUG FIX #4)
+        if self.ema is not None:
+            self.ema.restore()
         
         return metrics
     

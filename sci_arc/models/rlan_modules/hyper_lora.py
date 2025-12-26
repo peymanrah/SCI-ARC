@@ -234,12 +234,15 @@ class HyperLoRA(nn.Module):
         
         # GRU gate modulation (applied as additive bias-like adjustment)
         # Input: hidden_dim, Output: hidden_dim (for each gate output)
+        init_scale = self.config.init_scale
+        
         self.gru_reset_lora = LoRAPredictor(
             context_dim=hidden_dim,
             in_features=hidden_dim,
             out_features=hidden_dim,
             rank=rank,
             scaling=scaling,
+            init_scale=init_scale,
         )
         
         self.gru_update_lora = LoRAPredictor(
@@ -248,6 +251,7 @@ class HyperLoRA(nn.Module):
             out_features=hidden_dim,
             rank=rank,
             scaling=scaling,
+            init_scale=init_scale,
         )
         
         self.gru_candidate_lora = LoRAPredictor(
@@ -256,6 +260,7 @@ class HyperLoRA(nn.Module):
             out_features=hidden_dim,
             rank=rank,
             scaling=scaling,
+            init_scale=init_scale,
         )
         
         # Output head modulation
@@ -267,6 +272,7 @@ class HyperLoRA(nn.Module):
             out_features=hidden_dim,
             rank=rank,
             scaling=scaling,
+            init_scale=init_scale,
         )
         
         self.dropout = nn.Dropout(dropout)
@@ -327,6 +333,31 @@ class HyperLoRA(nn.Module):
             'gru_candidate': self.gru_candidate_lora.compute_delta_w(context),
             'output_head': self.output_head_lora.compute_delta_w(context),
             'context': context,  # Keep for other uses
+        }
+        
+        return deltas
+    
+    def compute_delta_w(self, context: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Compute LoRA weight deltas from a pre-pooled context vector.
+        
+        This is used by AugmentationEquivarianceLoss to compare weight predictions
+        for original and augmented contexts without re-pooling.
+        
+        Args:
+            context: (B, D) pre-pooled context vector
+            
+        Returns:
+            deltas: Dict with weight deltas for each target layer
+        """
+        context = self.dropout(context)
+        
+        # Predict LoRA deltas for each target
+        deltas = {
+            'gru_reset': self.gru_reset_lora.compute_delta_w(context),
+            'gru_update': self.gru_update_lora.compute_delta_w(context),
+            'gru_candidate': self.gru_candidate_lora.compute_delta_w(context),
+            'output_head': self.output_head_lora.compute_delta_w(context),
         }
         
         return deltas
