@@ -282,30 +282,10 @@ class ContextEncoder(nn.Module):
         self.use_spatial_features = use_spatial_features
         self.spatial_downsample = spatial_downsample
         
-        # Pair encoder
-        self.pair_encoder = PairEncoder(hidden_dim, num_colors, max_size)
+        # BUG FIX #3: Only create modules for the path that will be used
+        # This avoids ~45 dead parameters when use_spatial_features=True
         
-        # Learnable query for aggregation (only for compressed mode)
-        self.context_query = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
-        
-        # Cross-attention to aggregate pairs (only for compressed mode)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
-        
-        # Final processing (only for compressed mode)
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim * 4, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-        )
-        
-        # Spatial pair encoder for cross-attention mode
+        # Spatial pair encoder for cross-attention mode (NEW PATH)
         if use_spatial_features:
             self.spatial_pair_encoder = SpatialPairEncoder(
                 hidden_dim=hidden_dim,
@@ -333,6 +313,40 @@ class ContextEncoder(nn.Module):
             else:
                 self.downsampler = nn.Identity()
                 self.downsample_pos_embed = None
+            
+            # Set legacy modules to None for spatial mode
+            self.pair_encoder = None
+            self.context_query = None
+            self.cross_attn = None
+            self.ffn = None
+        else:
+            # LEGACY PATH: Compressed vector mode for FiLM
+            self.spatial_pair_encoder = None
+            self.downsampler = None
+            self.downsample_pos_embed = None
+            
+            # Pair encoder for legacy mode
+            self.pair_encoder = PairEncoder(hidden_dim, num_colors, max_size)
+            
+            # Learnable query for aggregation
+            self.context_query = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
+            
+            # Cross-attention to aggregate pairs
+            self.cross_attn = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            
+            # Final processing
+            self.ffn = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim * 4),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 4, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+            )
     
     def forward(
         self,

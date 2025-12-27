@@ -111,6 +111,15 @@ def small_model(small_model_config):
     return SCIARC(small_model_config)
 
 
+@pytest.fixture
+def data_dir():
+    """Get the path to the ARC-AGI data directory."""
+    data_path = Path(__file__).parent.parent / "data" / "arc-agi" / "data"
+    if not data_path.exists():
+        pytest.skip(f"Data directory not found: {data_path}")
+    return data_path
+
+
 def pytest_configure(config):
     """Configure pytest."""
     config.addinivalue_line(

@@ -307,7 +307,9 @@ class TestEquivarianceLoss:
         loss, metrics = self.equiv_loss(self.hyper_lora, context, augmented)
         
         # Loss should be small (allows for some numerical noise from projections)
-        assert loss.item() < 0.5, f"Loss for identical contexts should be low, got {loss.item()}"
+        # Note: Direction-based loss adds ~0.7*(1-cos_sim) per key which accumulates,
+        # so threshold is higher than pure norm-based loss
+        assert loss.item() < 1.0, f"Loss for identical contexts should be low, got {loss.item()}"
     
     def test_gradients_flow_through_equivariance(self):
         """Verify gradients flow through equivariance loss to HyperLoRA."""

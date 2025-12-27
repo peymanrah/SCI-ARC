@@ -499,6 +499,7 @@ class RecursiveSolver(nn.Module):
         use_feedback: bool = False,  # Use prediction feedback (disabled by default - causes gradient issues)
         use_solver_context: bool = True,  # NEW: Enable solver cross-attention to support set
         num_context_heads: int = 4,  # Heads for solver cross-attention
+        use_dsc: bool = True,  # Kept for API compatibility but not used for module creation
     ):
         """
         Args:
@@ -517,6 +518,7 @@ class RecursiveSolver(nn.Module):
             use_solver_context: Whether to use cross-attention to support set at each step.
                                 Phase 2.5 feature - gives solver direct access to examples.
             num_context_heads: Number of attention heads for solver cross-attention.
+            use_dsc: Kept for API compatibility. Mode is determined at runtime.
         """
         super().__init__()
         
@@ -528,6 +530,7 @@ class RecursiveSolver(nn.Module):
         self.use_sph = use_sph
         self.use_feedback = use_feedback
         self.use_solver_context = use_solver_context
+        self.use_dsc = use_dsc
         
         # Clue feature aggregation
         self.clue_aggregator = nn.Sequential(
@@ -536,7 +539,8 @@ class RecursiveSolver(nn.Module):
             nn.GroupNorm(8, hidden_dim),
         )
         
-        # Count embedding projection (only if LCR enabled)
+        # Count projection for global count embedding (B, num_colors, D) -> (B, D)
+        # Always create for backward compatibility - forward handles both modes
         if use_lcr:
             self.count_proj = nn.Sequential(
                 nn.Linear(hidden_dim * num_colors, hidden_dim),
@@ -711,10 +715,6 @@ class RecursiveSolver(nn.Module):
         Returns:
             enhanced: Same shape as input features
         """
-        # Skip if LCR is disabled (avoids wasted computation)
-        if self.count_proj is None:
-            return features
-        
         # Check if we have per-clue count embedding (B, K, D)
         # vs global count embedding (B, num_colors, D)
         if count_embedding.dim() == 3 and count_embedding.shape[2] == self.hidden_dim:
@@ -738,6 +738,10 @@ class RecursiveSolver(nn.Module):
                 return enhanced
         
         # Global count embedding (B, num_colors, D) - original behavior
+        # Skip if LCR is disabled (count_proj is None)
+        if self.count_proj is None:
+            return features
+            
         B, D, H, W = features.shape
         
         # Flatten count embeddings

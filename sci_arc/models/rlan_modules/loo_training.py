@@ -504,24 +504,37 @@ class AugmentationEquivarianceLoss(nn.Module):
             # Get augmented LoRA predictions
             aug_deltas = hyper_lora.compute_delta_w(aug_context)
             
-            # Compute L2 difference between predictions
-            # The key insight: while the spatial patterns differ,
-            # the learned transformation rule should be similar
-            # so the LoRA weights should have similar magnitudes
+            # BUG FIX #8: Use both magnitude AND direction comparison
+            # The original norm-only comparison was too weak - weights could be
+            # completely different but have the same norm.
             aug_loss = torch.tensor(0.0, device=original_context.device)
             
             for key in original_deltas:
                 orig = original_deltas[key]  # (B, out, in)
                 aug = aug_deltas[key]  # (B, out, in)
                 
-                # Compare magnitudes (Frobenius norm) rather than exact values
-                # since spatial augmentations may legitimately change weight patterns
-                orig_norm = torch.linalg.norm(orig.view(orig.shape[0], -1), dim=1)
-                aug_norm = torch.linalg.norm(aug.view(aug.shape[0], -1), dim=1)
+                # Flatten for comparison
+                orig_flat = orig.view(orig.shape[0], -1)  # (B, out*in)
+                aug_flat = aug.view(aug.shape[0], -1)  # (B, out*in)
                 
-                # Loss: difference in magnitudes (should be similar)
+                # 1. Magnitude constraint (weak): norms should be similar
+                orig_norm = torch.linalg.norm(orig_flat, dim=1)
+                aug_norm = torch.linalg.norm(aug_flat, dim=1)
                 norm_diff = (orig_norm - aug_norm).pow(2).mean()
-                aug_loss = aug_loss + norm_diff
+                
+                # 2. Direction constraint (stronger): cosine similarity should be high
+                # Normalize to unit vectors
+                orig_unit = orig_flat / (orig_norm.unsqueeze(1) + 1e-8)
+                aug_unit = aug_flat / (aug_norm.unsqueeze(1) + 1e-8)
+                
+                # Cosine similarity: 1.0 = identical direction, 0.0 = orthogonal
+                cosine_sim = (orig_unit * aug_unit).sum(dim=1)  # (B,)
+                # Loss: 1 - cosine_similarity (want to maximize similarity)
+                direction_loss = (1.0 - cosine_sim).mean()
+                
+                # Combined: weight direction more heavily since it's more informative
+                # norm_weight=0.3, direction_weight=0.7
+                aug_loss = aug_loss + 0.3 * norm_diff + 0.7 * direction_loss
             
             per_aug_loss[aug_name] = aug_loss.item()
             total_loss = total_loss + aug_loss

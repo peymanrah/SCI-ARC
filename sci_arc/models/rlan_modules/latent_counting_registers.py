@@ -45,6 +45,7 @@ class LatentCountingRegisters(nn.Module):
         num_freq: int = 8,
         num_heads: int = 4,
         dropout: float = 0.1,
+        use_per_clue_mode: bool = True,  # NOTE: kept for API compatibility but not used
     ):
         """
         Args:
@@ -53,6 +54,8 @@ class LatentCountingRegisters(nn.Module):
             num_freq: Frequency bands for count encoding
             num_heads: Attention heads for feature aggregation
             dropout: Dropout probability
+            use_per_clue_mode: Kept for API compatibility. Mode is determined at runtime
+                               by whether attention_maps is passed to forward().
         """
         super().__init__()
         
@@ -60,8 +63,9 @@ class LatentCountingRegisters(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_freq = num_freq
         self.num_heads = num_heads
+        self.use_per_clue_mode = use_per_clue_mode
         
-        # Count embedding: scalar count -> vector
+        # Count embedding: scalar count -> vector (always needed)
         # Input: count + fourier features
         count_input_dim = 1 + 2 * num_freq  # count + sin/cos
         self.count_encoder = nn.Sequential(
@@ -70,6 +74,9 @@ class LatentCountingRegisters(nn.Module):
             nn.LayerNorm(hidden_dim),
         )
         
+        # Always create cross-attention modules for backward compatibility
+        # The forward method dynamically chooses per-clue vs global mode
+        # based on whether attention_maps is passed
         # Learnable color queries (one per color)
         self.color_queries = nn.Parameter(torch.randn(num_colors, hidden_dim))
         nn.init.xavier_uniform_(self.color_queries.unsqueeze(0))

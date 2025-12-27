@@ -169,6 +169,13 @@ class RLAN(nn.Module):
         """
         super().__init__()
         
+        # BUG FIX #1: Detect accidental positional arg usage
+        # RLAN(config) would silently fail because config becomes hidden_dim
+        if isinstance(hidden_dim, RLANConfig):
+            raise TypeError(
+                "RLANConfig passed as positional argument. Use keyword: RLAN(config=config)"
+            )
+        
         # Use config if provided
         if config is not None:
             hidden_dim = config.hidden_dim
@@ -189,6 +196,7 @@ class RLAN(nn.Module):
         self.num_solver_steps = num_solver_steps
         self.use_act = use_act
         self.max_grid_size = max_grid_size
+        self.dropout = dropout  # BUG FIX #7: Store for checkpoint saving
         
         # Module ablation flags (default to True if no config)
         self.use_context_encoder = config.use_context_encoder if config else True
@@ -300,6 +308,7 @@ class RLAN(nn.Module):
                 num_freq=config.lcr_num_freq if config else 8,
                 num_heads=config.lcr_num_heads if config else 4,
                 dropout=dropout,
+                use_per_clue_mode=self.use_dsc,  # BUG FIX #4: Only create cross-attn if DSC disabled
             )
         else:
             self.lcr = None
@@ -333,18 +342,24 @@ class RLAN(nn.Module):
             use_feedback=config.use_solver_feedback if config else False,  # Disabled by default (argmax breaks gradients)
             use_solver_context=self.use_solver_context,  # Phase 2.5: Solver cross-attention to support set
             num_context_heads=config.solver_context_heads if config else 4,
+            use_dsc=self.use_dsc,  # BUG FIX #5: DSC provides per-clue counts, bypassing count_proj
         )
         
         # HyperLoRA for meta-learning weight adaptation (optional)
         self.use_hyperlora = config.use_hyperlora if config else False
         if self.use_hyperlora:
+            # BUG FIX #7: Store HyperLoRA config values for checkpoint saving
+            self._hyperlora_rank = config.hyperlora_rank if config else 8
+            self._hyperlora_scaling = config.hyperlora_scaling if config else 1.0
+            self._hyperlora_dropout = config.hyperlora_dropout if config else 0.0
+            self._hyperlora_init_scale = config.hyperlora_init_scale if config else 0.01
             hyperlora_config = HyperLoRAConfig(
                 hidden_dim=hidden_dim,
                 context_dim=hidden_dim,
-                rank=config.hyperlora_rank if config else 8,
-                scaling=config.hyperlora_scaling if config else 1.0,
-                dropout=config.hyperlora_dropout if config else 0.0,
-                init_scale=config.hyperlora_init_scale if config else 0.01,
+                rank=self._hyperlora_rank,
+                scaling=self._hyperlora_scaling,
+                dropout=self._hyperlora_dropout,
+                init_scale=self._hyperlora_init_scale,
             )
             self.hyper_lora = HyperLoRA(config=hyperlora_config)
         else:
@@ -1186,7 +1201,12 @@ class RLAN(nn.Module):
                     color_input = color_perm[input_grid.clamp(0, 10).long()]
                     if train_inputs is not None:
                         color_train_inputs = color_perm[train_inputs.clamp(0, 10).long()]
-                        color_train_outputs = color_perm[train_outputs.clamp(0, 10).long()]
+                        # BUG FIX #2: Handle ignore_index=-100 in train_outputs
+                        # (same fix as predict_with_acw lines 1061-1066)
+                        ignore_mask = train_outputs < 0
+                        safe_outputs = train_outputs.clamp(0, 10).long()
+                        color_train_outputs = color_perm[safe_outputs]
+                        color_train_outputs[ignore_mask] = train_outputs[ignore_mask]
                     else:
                         color_train_inputs = None
                         color_train_outputs = None
@@ -1314,8 +1334,15 @@ class RLAN(nn.Module):
                 "use_sph": self.use_sph,
                 "use_solver_context": self.use_solver_context,  # Phase 2.5
                 "use_best_step_selection": self.use_best_step_selection,  # Phase 3
-                # HyperLoRA config
+                # HyperLoRA config - BUG FIX #7: Save full HyperLoRA config
                 "use_hyperlora": self.use_hyperlora,
+                "hyperlora_rank": getattr(self, '_hyperlora_rank', 8),
+                "hyperlora_scaling": getattr(self, '_hyperlora_scaling', 1.0),
+                "hyperlora_dropout": getattr(self, '_hyperlora_dropout', 0.0),
+                "hyperlora_init_scale": getattr(self, '_hyperlora_init_scale', 0.01),
+                # Additional flags for conditional module recreation
+                "use_learned_pos": self.use_learned_pos if hasattr(self, 'use_learned_pos') else False,
+                "dropout": self.dropout if hasattr(self, 'dropout') else 0.1,
             },
             **extra_data,
         }

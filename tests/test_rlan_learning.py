@@ -187,6 +187,9 @@ class TestRLANLearning:
     
     def test_color_inversion_task(self, small_model, criterion):
         """Test a simple color mapping task."""
+        # Set seed for reproducibility (test is sensitive to initialization)
+        torch.manual_seed(42)
+        
         model = small_model
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         

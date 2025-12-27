@@ -190,6 +190,7 @@ class WeightedStablemaxLoss(nn.Module):
         min_class_weight: Minimum weight for any class (prevents zero weights)
         reduction: 'mean', 'sum', or 'none'
         ignore_index: Label to ignore (-100 for padding)
+        track_nan_telemetry: If True, track NaN statistics for debugging
     """
     
     def __init__(
@@ -199,6 +200,7 @@ class WeightedStablemaxLoss(nn.Module):
         min_class_weight: float = 0.1,
         reduction: str = "mean",
         ignore_index: int = -100,
+        track_nan_telemetry: bool = False,  # BUG FIX #9: Add telemetry option
     ):
         super().__init__()
         self.bg_weight_cap = bg_weight_cap
@@ -206,6 +208,39 @@ class WeightedStablemaxLoss(nn.Module):
         self.min_class_weight = min_class_weight
         self.reduction = reduction
         self.ignore_index = ignore_index
+        
+        # BUG FIX #9: NaN telemetry tracking
+        self.track_nan_telemetry = track_nan_telemetry
+        self._nan_stats = {
+            'total_batches': 0,
+            'batches_with_nan': 0,
+            'total_nan_count': 0,
+            'max_nan_per_batch': 0,
+            'nan_logit_stats': [],  # Track logit statistics when NaN occurs
+        }
+    
+    def get_nan_telemetry(self) -> dict:
+        """Return NaN telemetry statistics. Call this to diagnose issues."""
+        if self._nan_stats['total_batches'] == 0:
+            return {'nan_rate': 0.0, 'message': 'No batches processed yet'}
+        return {
+            'nan_rate': self._nan_stats['batches_with_nan'] / self._nan_stats['total_batches'],
+            'batches_with_nan': self._nan_stats['batches_with_nan'],
+            'total_batches': self._nan_stats['total_batches'],
+            'total_nan_count': self._nan_stats['total_nan_count'],
+            'max_nan_per_batch': self._nan_stats['max_nan_per_batch'],
+            'last_nan_logit_stats': self._nan_stats['nan_logit_stats'][-5:] if self._nan_stats['nan_logit_stats'] else [],
+        }
+    
+    def reset_nan_telemetry(self):
+        """Reset NaN telemetry counters."""
+        self._nan_stats = {
+            'total_batches': 0,
+            'batches_with_nan': 0,
+            'total_nan_count': 0,
+            'max_nan_per_batch': 0,
+            'nan_logit_stats': [],
+        }
     
     def forward(
         self,
@@ -295,12 +330,37 @@ class WeightedStablemaxLoss(nn.Module):
         ce_loss = -torch.gather(logprobs, 1, targets_valid.unsqueeze(1)).squeeze(1)
         ce_loss = ce_loss.clamp(max=100.0)  # Numerical stability
         
+        # BUG FIX #9: Enhanced NaN handling with telemetry
+        # Track telemetry if enabled
+        if self.track_nan_telemetry:
+            self._nan_stats['total_batches'] += 1
+        
         # NaN safety: replace any NaN losses with 0 (skip those pixels)
         nan_mask = ~torch.isfinite(ce_loss)
         if nan_mask.any():
             import warnings
             num_nan = nan_mask.sum().item()
             warnings.warn(f"WeightedStablemaxLoss: {num_nan} NaN values detected in ce_loss, replacing with 0")
+            
+            # BUG FIX #9: Track NaN telemetry for diagnosis
+            if self.track_nan_telemetry:
+                self._nan_stats['batches_with_nan'] += 1
+                self._nan_stats['total_nan_count'] += num_nan
+                self._nan_stats['max_nan_per_batch'] = max(self._nan_stats['max_nan_per_batch'], num_nan)
+                # Capture logit statistics at NaN locations for diagnosis
+                nan_logits = logits_valid[nan_mask]
+                if nan_logits.numel() > 0:
+                    self._nan_stats['nan_logit_stats'].append({
+                        'min': nan_logits.min().item() if torch.isfinite(nan_logits.min()) else 'inf',
+                        'max': nan_logits.max().item() if torch.isfinite(nan_logits.max()) else 'inf',
+                        'has_inf': torch.isinf(nan_logits).any().item(),
+                        'has_nan_input': torch.isnan(nan_logits).any().item(),
+                        'num_nan': num_nan,
+                    })
+                    # Keep only last 100 entries to avoid memory issues
+                    if len(self._nan_stats['nan_logit_stats']) > 100:
+                        self._nan_stats['nan_logit_stats'] = self._nan_stats['nan_logit_stats'][-100:]
+            
             ce_loss = torch.where(nan_mask, torch.zeros_like(ce_loss), ce_loss)
         
         # Apply class weights
