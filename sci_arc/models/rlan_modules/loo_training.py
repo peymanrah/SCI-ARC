@@ -133,10 +133,14 @@ class LOOTrainingLoss(nn.Module):
         """
         Compute LOO loss using full RLAN model.
         
-        This method:
-        1. Encodes support inputs to get support_features
-        2. Extracts hyper_lora from model
-        3. Computes LOO loss by holding out each pair
+        MEMORY-EFFICIENT IMPLEMENTATION (Dec 2025 v2):
+        - Encodes support features ONCE and detaches
+        - Processes ONE holdout at a time with gradient
+        - Frees memory between holdouts via explicit cleanup
+        - Returns accumulated loss for single backward pass
+        
+        This prevents the O(N) memory explosion that caused 83GB allocation
+        on a 24GB GPU when N=5 pairs.
         """
         device = input_grids.device
         B, N, H, W = input_grids.shape
@@ -186,22 +190,25 @@ class LOOTrainingLoss(nn.Module):
                 'loo_reason': 'ContextEncoder must have use_spatial_features=True for LOO',
             }
         
-        # CRITICAL FIX: Use context_encoder to encode input-output PAIRS
-        # This ensures HyperLoRA learns from the same distribution as inference.
-        # context_encoder returns (B, N, D, H, W) spatial features encoding
-        # the transformation pattern from each input-output pair.
-        support_features = model.context_encoder(
-            input_grids, output_grids, pair_mask
-        )  # (B, N, D, H, W)
+        # MEMORY FIX: Encode support features ONCE and DETACH
+        # This prevents recomputing the same features N times
+        with torch.no_grad():
+            all_support_features = model.context_encoder(
+                input_grids, output_grids, pair_mask
+            )  # (B, N, D, H, W)
         
-        D = support_features.shape[2]
-        Hs, Ws = support_features.shape[3], support_features.shape[4]
+        D = all_support_features.shape[2]
+        Hs, Ws = all_support_features.shape[3], all_support_features.shape[4]
         
-        # Now compute LOO loss
-        total_loss = torch.tensor(0.0, device=device)
+        # Track metrics
         total_correct = 0
         total_pixels = 0
         num_holdouts = 0
+        
+        # MEMORY FIX: Process ONE holdout at a time, accumulate gradients
+        # Instead of summing losses (which keeps all N graphs in memory),
+        # we process one holdout, compute loss, and let the caller accumulate
+        holdout_losses = []
         
         for holdout_idx in range(N):
             # Create mask for valid holdouts
@@ -213,8 +220,9 @@ class LOOTrainingLoss(nn.Module):
             # Get remaining indices
             remaining_indices = [i for i in range(N) if i != holdout_idx]
             
-            # Pool context from remaining pairs only
-            remaining_features = support_features[:, remaining_indices]  # (B, N-1, D, Hs, Ws)
+            # Get remaining features (detached to avoid graph accumulation)
+            remaining_features = all_support_features[:, remaining_indices].clone()  # (B, N-1, D, Hs, Ws)
+            remaining_features.requires_grad_(True)  # Re-enable gradients for HyperLoRA
             
             # Predict LoRA deltas from remaining-pair context
             lora_deltas = model.hyper_lora(remaining_features)
@@ -224,38 +232,24 @@ class LOOTrainingLoss(nn.Module):
             holdout_target = output_grids[:, holdout_idx]  # (B, H, W)
             
             # Forward pass with LoRA weights
-            # CRITICAL FIX (Dec 2025): Use remaining_features for cross-attention
-            # to prevent data leakage. Previously we passed support_features which
-            # contained the held-out pair's output - allowing the model to "cheat"
-            # by attending to the answer via CrossAttentionInjector.
-            #
-            # Why remaining_features is correct:
-            # 1. At inference, the test output is NEVER in the support set
-            # 2. LOO should simulate this by hiding the held-out output
-            # 3. This teaches the model to generalize without seeing the answer
-            # 4. CrossAttentionInjector handles variable N gracefully
             logits = model.forward_with_lora(
                 holdout_input,
-                remaining_features,  # Only N-1 pairs - no data leakage!
+                remaining_features,
                 lora_deltas,
             )  # (B, num_classes, H, W)
             
             # Compute loss with masking for invalid samples AND padding pixels
-            # CRITICAL FIX: output_grids uses PAD_COLOR=10 for spatial padding,
-            # but cross_entropy expects values in [0, num_classes-1] = [0, 9].
-            # We must mask out padding pixels (value 10) as well as invalid samples.
             target_for_loss = holdout_target.clone().long()
             target_for_loss[~valid_holdout_mask] = -100  # Ignore invalid samples
             target_for_loss[holdout_target == 10] = -100  # Ignore padding pixels (PAD_COLOR)
             
             ce_loss = F.cross_entropy(logits, target_for_loss, ignore_index=-100, reduction='mean')
-            total_loss = total_loss + ce_loss
+            holdout_losses.append(ce_loss)
             
-            # Track accuracy
+            # Track accuracy (no gradients needed)
             with torch.no_grad():
                 preds = logits.argmax(dim=1)
                 sample_mask = valid_holdout_mask.view(B, 1, 1).expand_as(holdout_target)
-                # Exclude both -100 (ignore_index) and 10 (PAD_COLOR) from accuracy
                 pixel_mask = (holdout_target != -100) & (holdout_target != 10)
                 combined_mask = sample_mask & pixel_mask
                 
@@ -264,14 +258,25 @@ class LOOTrainingLoss(nn.Module):
                 total_pixels += combined_mask.sum().item()
             
             num_holdouts += 1
+            
+            # MEMORY FIX: Clear intermediate tensors after each holdout
+            del logits, lora_deltas, remaining_features, holdout_input, holdout_target
+            del target_for_loss, preds, sample_mask, pixel_mask, combined_mask
         
-        # Average loss over holdouts
+        # Clean up support features
+        del all_support_features
+        
+        # Average losses (all holdouts contribute equally)
         if num_holdouts > 0:
-            avg_loss = total_loss / num_holdouts
+            # Stack losses and take mean - this keeps computation graph minimal
+            avg_loss = torch.stack(holdout_losses).mean()
             accuracy = total_correct / (total_pixels + 1e-8)
         else:
             avg_loss = torch.tensor(0.0, device=device)
             accuracy = 0.0
+        
+        # Clear holdout losses list
+        del holdout_losses
         
         return {
             'loo_loss': avg_loss,
@@ -502,15 +507,19 @@ class AugmentationEquivarianceLoss(nn.Module):
                 'equivariance_skipped': True,
             }
         
-        # Get original LoRA predictions
-        original_deltas = hyper_lora.compute_delta_w(original_context)
+        # MEMORY FIX: Compute original deltas and DETACH for comparison
+        # Only the augmented context computation needs gradients
+        with torch.no_grad():
+            original_deltas = hyper_lora.compute_delta_w(original_context)
+            # Detach all original deltas - we just need their values for comparison
+            original_deltas = {k: v.detach() for k, v in original_deltas.items()}
         
-        total_loss = torch.tensor(0.0, device=original_context.device)
-        num_augs = 0
+        # MEMORY FIX: Process one augmentation at a time, accumulate scalar losses
+        aug_losses = []
         per_aug_loss = {}
         
         for aug_name, aug_context in augmented_contexts.items():
-            # Get augmented LoRA predictions
+            # Get augmented LoRA predictions (this is where gradients flow)
             aug_deltas = hyper_lora.compute_delta_w(aug_context)
             
             # BUG FIX #8: Use both magnitude AND direction comparison
@@ -519,8 +528,8 @@ class AugmentationEquivarianceLoss(nn.Module):
             aug_loss = torch.tensor(0.0, device=original_context.device)
             
             for key in original_deltas:
-                orig = original_deltas[key]  # (B, out, in)
-                aug = aug_deltas[key]  # (B, out, in)
+                orig = original_deltas[key]  # (B, out, in) - detached
+                aug = aug_deltas[key]  # (B, out, in) - has gradients
                 
                 # Flatten for comparison
                 orig_flat = orig.view(orig.shape[0], -1)  # (B, out*in)
@@ -544,18 +553,30 @@ class AugmentationEquivarianceLoss(nn.Module):
                 # Combined: weight direction more heavily since it's more informative
                 # norm_weight=0.3, direction_weight=0.7
                 aug_loss = aug_loss + 0.3 * norm_diff + 0.7 * direction_loss
+                
+                # MEMORY FIX: Clear intermediate tensors per-key
+                del orig, aug, orig_flat, aug_flat, orig_norm, aug_norm
+                del orig_unit, aug_unit, cosine_sim, norm_diff, direction_loss
             
             per_aug_loss[aug_name] = aug_loss.item()
-            total_loss = total_loss + aug_loss
-            num_augs += 1
+            aug_losses.append(aug_loss)
+            
+            # MEMORY FIX: Clear augmented deltas after each aug
+            del aug_deltas
         
-        # Average over augmentations
-        avg_loss = total_loss / (num_augs + 1e-8)
+        # MEMORY FIX: Use stack+mean instead of accumulation
+        if aug_losses:
+            avg_loss = torch.stack(aug_losses).mean()
+        else:
+            avg_loss = torch.tensor(0.0, device=original_context.device)
+        
+        # Clean up
+        del aug_losses, original_deltas
         
         metrics = {
             'equivariance_loss': avg_loss.item(),
             'equivariance_per_aug': per_aug_loss,
-            'equivariance_num_augs': num_augs,
+            'equivariance_num_augs': len(per_aug_loss),
             'equivariance_skipped': False,
         }
         

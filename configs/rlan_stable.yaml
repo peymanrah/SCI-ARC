@@ -178,11 +178,19 @@ training:
   # - TOTAL: ~4-5 GB additional on top of base model
   #
   # To stay within 24GB with ~2GB headroom:
-  # - Reduce batch from 64 to 32 (saves ~6 GB)
-  # - Use grad_accumulation=10 for effective batch of 320 (TRM-competitive)
+  # - Reduce batch from 64 to 16 (saves ~12 GB)
+  # - Use grad_accumulation=20 for effective batch of 320 (TRM-competitive)
   #
-  batch_size: 32    # Reduced from 64 to account for HyperLoRA+LOO+Equivariance memory
-  grad_accumulation_steps: 10  # effective_batch_size = 32 × 10 = 320
+  # MEMORY FIX (Dec 2025): OOM with batch=32 due to:
+  # - LOO training: N forward passes (N=3-5) with graph accumulation
+  # - Equivariance: 4 augmentation forward passes per sample
+  # - Combined: up to 9x memory multiplier in worst case!
+  # 
+  # SOLUTION: Reduce batch to 16, increase grad_accumulation to 20
+  # This cuts per-batch memory in half while maintaining effective batch size.
+  #
+  batch_size: 16    # Reduced from 32 for HyperLoRA+LOO+Equivariance memory safety
+  grad_accumulation_steps: 20  # effective_batch_size = 16 × 20 = 320
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization

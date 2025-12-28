@@ -1077,8 +1077,8 @@ def train_epoch(
                         original_context = lora_deltas.get('context')  # (B, D)
                         
                         if original_context is not None:
-                            # Generate augmented contexts by applying transforms to support_features
-                            # and re-pooling through HyperLoRA
+                            # MEMORY FIX: Generate augmented contexts with memory cleanup
+                            # Process one augmentation at a time to avoid memory accumulation
                             augmented_contexts = {}
                             aug_types = ['rotate_90', 'rotate_180', 'flip_h', 'flip_v']
                             num_augs = min(equiv_loss_fn.config.num_augmentations, len(aug_types))
@@ -1095,6 +1095,8 @@ def train_epoch(
                                 # Pool augmented features to get context
                                 aug_context = model.hyper_lora.pool_context(aug_features)
                                 augmented_contexts[aug_type] = aug_context
+                                # MEMORY FIX: Delete intermediate aug_features immediately
+                                del aug_features
                             
                             if augmented_contexts:
                                 equiv_loss, equiv_metrics = equiv_loss_fn(
@@ -1106,6 +1108,9 @@ def train_epoch(
                                 losses['total_loss'] = losses['total_loss'] + equiv_loss
                                 epoch_diagnostics['equiv_loss_sum'] = epoch_diagnostics.get('equiv_loss_sum', 0.0) + equiv_loss.item()
                                 epoch_diagnostics['equiv_batch_count'] = epoch_diagnostics.get('equiv_batch_count', 0) + 1
+                            
+                            # MEMORY FIX: Clean up augmented contexts after use
+                            del augmented_contexts
                 
                 # Scale loss for gradient accumulation
                 loss = losses['total_loss'] / grad_accumulation_steps
@@ -1333,6 +1338,18 @@ def train_epoch(
                 total_losses[key] += losses[key].item()
         num_batches += 1
         global_step += 1
+        
+        # MEMORY FIX: Explicitly clear intermediate tensors
+        # This is critical for LOO/Equivariance training which creates large graphs
+        del outputs, losses
+        if 'loo_result' in locals(): del loo_result
+        if 'loo_loss' in locals(): del loo_loss
+        if 'equiv_loss' in locals(): del equiv_loss
+        if 'loss' in locals(): del loss
+        
+        # Periodic cache clearing (every 10 batches)
+        if batch_idx % 10 == 0:
+            torch.cuda.empty_cache()
         
         # Collect diagnostics (first batch of each epoch only to avoid overhead)
         if batch_idx == 0:
