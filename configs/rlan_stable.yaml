@@ -260,9 +260,10 @@ training:
   # Per-module LR boosting
   # NOTE: Set to 1.0 for stable training. Higher values may cause NaN.
   # HyperLoRA benefits from higher LR to learn meta-weight prediction faster.
+  # MIDDLE GROUND (Dec 2025): Reduced from 10.0 to 3.0 for smoother staged training
   dsc_lr_multiplier: 1.0
   msre_lr_multiplier: 1.0
-  hyperlora_lr_multiplier: 10.0  # HyperLoRA needs faster learning for meta-adaptation
+  hyperlora_lr_multiplier: 3.0   # 3x base LR (was 10x, caused instability)
   
   # Temperature for DSC attention
   temperature_start: 1.0
@@ -363,7 +364,7 @@ training:
   # =============================================================
   loo_training:
     enabled: true
-    loss_weight: 0.5       # Weight relative to task loss
+    loss_weight: 0.2       # MIDDLE GROUND: 20% of task loss (was 0.5, caused instability)
     min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
   
   # =============================================================
@@ -378,7 +379,7 @@ training:
   # =============================================================
   equivariance_training:
     enabled: true
-    loss_weight: 0.1       # Light regularization
+    loss_weight: 0.05      # MIDDLE GROUND: Lighter regularization (was 0.1)
     num_augmentations: 4   # Number of random augmentations per task
   
   # =============================================================
