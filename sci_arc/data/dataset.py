@@ -1286,11 +1286,18 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
     # Find max number of train pairs
     max_pairs = max(sample['num_train_pairs'] for sample in batch)
     
-    # Initialize tensors
-    input_grids = torch.zeros(batch_size, max_pairs, max_size, max_size, dtype=torch.long)
-    output_grids = torch.zeros(batch_size, max_pairs, max_size, max_size, dtype=torch.long)
-    test_inputs = torch.zeros(batch_size, max_size, max_size, dtype=torch.long)
-    test_outputs = torch.zeros(batch_size, max_size, max_size, dtype=torch.long)
+    # Padding constants
+    PAD_COLOR = 10  # For input grids (distinguishes from black=0)
+    PADDING_IGNORE_VALUE = -100  # For target grids (loss ignores)
+    
+    # Initialize tensors with proper padding values
+    # - Input/output grids (used by encoder/context encoder): PAD_COLOR=10
+    # - Test inputs: PAD_COLOR=10
+    # - Test outputs (used by loss): PADDING_IGNORE_VALUE=-100
+    input_grids = torch.full((batch_size, max_pairs, max_size, max_size), PAD_COLOR, dtype=torch.long)
+    output_grids = torch.full((batch_size, max_pairs, max_size, max_size), PAD_COLOR, dtype=torch.long)
+    test_inputs = torch.full((batch_size, max_size, max_size), PAD_COLOR, dtype=torch.long)
+    test_outputs = torch.full((batch_size, max_size, max_size), PADDING_IGNORE_VALUE, dtype=torch.long)
     transform_families = torch.zeros(batch_size, dtype=torch.long)
     num_pairs = torch.zeros(batch_size, dtype=torch.long)
     grid_masks = torch.zeros(batch_size, max_pairs, dtype=torch.bool)

@@ -171,12 +171,18 @@ training:
   # - Backward pass: ~2× forward = +1.1 GB from cross-attention
   # - TOTAL additional: ~1.7 GB from cross-attention features
   #
-  # To stay within 24GB with ~2GB headroom:
-  # - Reduce batch from 75 to 64 (saves ~3 GB)
-  # - Use grad_accumulation=5 for effective batch of 320 (TRM-competitive)
+  # ADDITIONAL MEMORY (Dec 2025 with HyperLoRA + LOO + Equivariance):
+  # - HyperLoRA: ~500 MB (5M params + activations)
+  # - LOO training: N forward passes per sample (N=3-5 avg)
+  # - Equivariance: 4 augmentations = 4x forward passes
+  # - TOTAL: ~4-5 GB additional on top of base model
   #
-  batch_size: 64    # Reduced from 75 to account for cross-attention memory
-  grad_accumulation_steps: 5  # effective_batch_size = 64 × 5 = 320
+  # To stay within 24GB with ~2GB headroom:
+  # - Reduce batch from 64 to 32 (saves ~6 GB)
+  # - Use grad_accumulation=10 for effective batch of 320 (TRM-competitive)
+  #
+  batch_size: 32    # Reduced from 64 to account for HyperLoRA+LOO+Equivariance memory
+  grad_accumulation_steps: 10  # effective_batch_size = 32 × 10 = 320
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization

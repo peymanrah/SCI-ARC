@@ -1055,8 +1055,10 @@ class SCIARCTrainer:
                 else:
                     losses['bg_accuracy'] = 0.0
                 
-                # Foreground accuracy (classes 1-10)
-                fg_mask = (targets > 0) & (targets <= 10) & valid_mask
+                # Foreground accuracy (classes 1-9, excluding padding and background)
+                # NOTE: Targets use -100 for padding, but we check <= 9 for clarity
+                # since valid colors are 0-9 only (10 is PAD_COLOR for inputs)
+                fg_mask = (targets > 0) & (targets <= 9) & valid_mask
                 if fg_mask.any():
                     fg_correct = ((preds == targets) & fg_mask).sum().item()
                     losses['fg_accuracy'] = fg_correct / max(fg_mask.sum().item(), 1)
@@ -1536,8 +1538,9 @@ class SCIARCTrainer:
                     val_metrics['bg_correct'] += bg_correct
                     val_metrics['bg_total'] += bg_mask.sum().item()
                 
-                # Foreground accuracy (classes 1-10)
-                fg_mask = (targets > 0) & (targets <= 10) & valid_mask
+                # Foreground accuracy (classes 1-9, excluding padding and background)
+                # NOTE: Valid colors are 0-9 only (10 is PAD_COLOR for inputs, not targets)
+                fg_mask = (targets > 0) & (targets <= 9) & valid_mask
                 if fg_mask.any():
                     fg_correct = ((preds == targets) & fg_mask).sum().item()
                     val_metrics['fg_correct'] += fg_correct

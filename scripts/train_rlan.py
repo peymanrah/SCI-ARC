@@ -1576,8 +1576,11 @@ def train_epoch(
                 
                 # Color confusion matrix for diagnosing color prediction issues
                 # 10-class encoding: class 0=black (BG), classes 1-9=colors 1-9 (FG)
+                # NOTE: valid_mask already excludes -100 padding, but we also
+                # exclude values > 9 for safety (colors 0-9 only, 10=PAD_COLOR)
                 fg_class_start = 1  # Foreground starts at class 1
-                fg_mask = test_outputs >= fg_class_start  # Foreground = colors 1-9
+                fg_class_end = 9    # Foreground ends at class 9
+                fg_mask = (test_outputs >= fg_class_start) & (test_outputs <= fg_class_end)  # Foreground = colors 1-9
                 if fg_mask.sum() > 0:
                     # What colors is the model predicting for FG targets?
                     fg_preds = preds[fg_mask]
@@ -1672,8 +1675,8 @@ def train_epoch(
                     if sample_acc >= 0.9:
                         batch_high_acc_count += 1
                     
-                    # FG accuracy (colors 1-9)
-                    fg_mask = (target_i > 0) & valid_mask
+                    # FG accuracy (colors 1-9 only, excluding background 0 and padding)
+                    fg_mask = (target_i > 0) & (target_i <= 9) & valid_mask
                     fg_pixels = fg_mask.sum().item()
                     if fg_pixels > 0:
                         fg_correct = ((pred_i == target_i) & fg_mask).sum().item()
@@ -1936,8 +1939,9 @@ def evaluate(
                 total_correct += correct_mask.sum().item()
                 total_valid_pixels += batch_valid_pixels
                 
-                # Foreground accuracy (colors 1-9)
-                fg_mask = (test_outputs >= fg_start) & valid_mask
+                # Foreground accuracy (colors 1-9 only, excluding background 0 and padding)
+                # NOTE: Valid colors are 0-9 only (10 is PAD_COLOR for inputs)
+                fg_mask = (test_outputs >= fg_start) & (test_outputs <= 9) & valid_mask
                 if fg_mask.any():
                     fg_correct = (correct_mask & fg_mask).sum().item()
                     total_fg_correct += fg_correct

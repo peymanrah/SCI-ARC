@@ -240,9 +240,13 @@ class LOOTrainingLoss(nn.Module):
                 lora_deltas,
             )  # (B, num_classes, H, W)
             
-            # Compute loss with masking for invalid samples
+            # Compute loss with masking for invalid samples AND padding pixels
+            # CRITICAL FIX: output_grids uses PAD_COLOR=10 for spatial padding,
+            # but cross_entropy expects values in [0, num_classes-1] = [0, 9].
+            # We must mask out padding pixels (value 10) as well as invalid samples.
             target_for_loss = holdout_target.clone().long()
             target_for_loss[~valid_holdout_mask] = -100  # Ignore invalid samples
+            target_for_loss[holdout_target == 10] = -100  # Ignore padding pixels (PAD_COLOR)
             
             ce_loss = F.cross_entropy(logits, target_for_loss, ignore_index=-100, reduction='mean')
             total_loss = total_loss + ce_loss
@@ -251,7 +255,8 @@ class LOOTrainingLoss(nn.Module):
             with torch.no_grad():
                 preds = logits.argmax(dim=1)
                 sample_mask = valid_holdout_mask.view(B, 1, 1).expand_as(holdout_target)
-                pixel_mask = holdout_target != -100
+                # Exclude both -100 (ignore_index) and 10 (PAD_COLOR) from accuracy
+                pixel_mask = (holdout_target != -100) & (holdout_target != 10)
                 combined_mask = sample_mask & pixel_mask
                 
                 correct = ((preds == holdout_target) & combined_mask).sum().item()
@@ -365,6 +370,10 @@ class LOOTrainingLoss(nn.Module):
             target_for_loss = holdout_target.clone()
             # Mark invalid samples' targets as -100 so they're ignored
             target_for_loss[~valid_holdout_mask] = -100
+            # CRITICAL FIX: Also mask out PAD_COLOR=10 pixels (spatial padding)
+            # support_targets uses 10 for padding, not -100, because they're also
+            # used for ContextEncoder which needs to distinguish from black (0)
+            target_for_loss[holdout_target == 10] = -100
             
             ce_loss = F.cross_entropy(logits, target_for_loss, ignore_index=-100, reduction='mean')
             total_loss = total_loss + ce_loss
@@ -372,9 +381,9 @@ class LOOTrainingLoss(nn.Module):
             # Track accuracy for metrics (only on valid pixels)
             with torch.no_grad():
                 preds = logits.argmax(dim=1)  # (B, H, W)
-                # Create pixel-level valid mask: both valid holdout sample AND valid pixel (not -100)
+                # Create pixel-level valid mask: both valid holdout sample AND valid pixel (not -100 or 10)
                 sample_mask = valid_holdout_mask.view(B, 1, 1).expand_as(holdout_target)
-                pixel_mask = (holdout_target != -100)
+                pixel_mask = (holdout_target != -100) & (holdout_target != 10)
                 combined_mask = sample_mask & pixel_mask
                 
                 correct = ((preds == holdout_target) & combined_mask).sum().item()

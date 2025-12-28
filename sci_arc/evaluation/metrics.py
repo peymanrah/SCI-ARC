@@ -130,7 +130,8 @@ def color_accuracy(pred: np.ndarray, target: np.ndarray) -> float:
 def non_background_accuracy(
     pred: np.ndarray,
     target: np.ndarray,
-    background_color: int = 0
+    background_color: int = 0,
+    ignore_index: int = -100,
 ) -> float:
     """
     Compute accuracy only for non-background pixels.
@@ -141,6 +142,7 @@ def non_background_accuracy(
         pred: Predicted grid
         target: Target grid
         background_color: Color to exclude (default: 0)
+        ignore_index: Padding value to exclude (default: -100, matching trainer)
         
     Returns:
         Accuracy for non-background pixels, or 1.0 if no non-background pixels
@@ -151,10 +153,11 @@ def non_background_accuracy(
         pred = pred[:min_h, :min_w]
         target = target[:min_h, :min_w]
     
-    mask = target != background_color
+    # Exclude both background (0) and padding (-100)
+    mask = (target != background_color) & (target != ignore_index)
     
     if mask.sum() == 0:
-        # No non-background pixels in target
+        # No non-background, non-padding pixels in target
         # Check if prediction also has no non-background pixels
         pred_mask = pred != background_color
         return 1.0 if pred_mask.sum() == 0 else 0.0
@@ -165,7 +168,8 @@ def non_background_accuracy(
 def iou_per_color(
     pred: np.ndarray,
     target: np.ndarray,
-    num_colors: int = 10
+    num_colors: int = 10,
+    ignore_index: int = -100,
 ) -> Dict[int, float]:
     """
     Compute Intersection over Union for each color.
@@ -173,7 +177,8 @@ def iou_per_color(
     Args:
         pred: Predicted grid
         target: Target grid
-        num_colors: Maximum number of colors
+        num_colors: Maximum number of colors (0-9)
+        ignore_index: Padding value to exclude (default: -100)
         
     Returns:
         Dict mapping color -> IoU score
@@ -186,21 +191,27 @@ def iou_per_color(
     
     iou_scores = {}
     
-    # Get all colors present in either grid
-    all_colors = set(pred.flatten()) | set(target.flatten())
+    # Get all valid colors present in either grid (excluding padding)
+    pred_valid = pred[pred != ignore_index] if ignore_index is not None else pred.flatten()
+    target_valid = target[target != ignore_index] if ignore_index is not None else target.flatten()
+    all_colors = set(pred_valid.flatten()) | set(target_valid.flatten())
+    
+    # Create valid pixel mask (exclude padding)
+    valid_mask = (target != ignore_index) if ignore_index is not None else np.ones_like(target, dtype=bool)
     
     for color in range(num_colors):
         if color not in all_colors:
             continue
             
-        pred_mask = (pred == color)
-        target_mask = (target == color)
+        # Only count valid pixels
+        pred_mask = (pred == color) & valid_mask
+        target_mask = (target == color) & valid_mask
         
         intersection = (pred_mask & target_mask).sum()
         union = (pred_mask | target_mask).sum()
         
         if union == 0:
-            continue  # Color not present in either
+            continue  # Color not present in either (for valid pixels)
             
         iou_scores[color] = intersection / union
     
