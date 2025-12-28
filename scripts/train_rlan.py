@@ -2424,7 +2424,7 @@ def save_checkpoint(
     config: dict,
     path: str,
 ):
-    """Save training checkpoint."""
+    """Save training checkpoint including HPM dynamic buffers."""
     checkpoint = {
         'epoch': epoch,
         'global_step': global_step,
@@ -2435,6 +2435,31 @@ def save_checkpoint(
         'best_accuracy': best_accuracy,
         'config': config,
     }
+    
+    # Save HPM dynamic buffers (not part of state_dict since they're not nn.Module)
+    # These are critical for continual learning - they store solved task memories!
+    if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
+        if len(model.hpm_instance_buffer) > 0:
+            checkpoint['hpm_instance_buffer'] = {
+                'd_model': model.hpm_instance_buffer.d_model,
+                'max_size': model.hpm_instance_buffer.max_size,
+                'keys': list(model.hpm_instance_buffer._keys),
+                'values': list(model.hpm_instance_buffer._values),
+                'task_ids': list(model.hpm_instance_buffer._task_ids),
+            }
+            print(f"  HPM Instance Buffer: {len(model.hpm_instance_buffer)} entries saved")
+    
+    if hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None:
+        if len(model.hpm_procedural_buffer) > 0:
+            checkpoint['hpm_procedural_buffer'] = {
+                'd_model': model.hpm_procedural_buffer.d_model,
+                'max_size': model.hpm_procedural_buffer.max_size,
+                'keys': list(model.hpm_procedural_buffer._keys),
+                'values': list(model.hpm_procedural_buffer._values),
+                'task_ids': list(model.hpm_procedural_buffer._task_ids),
+            }
+            print(f"  HPM Procedural Buffer: {len(model.hpm_procedural_buffer)} entries saved")
+    
     torch.save(checkpoint, path)
     print(f"  Saved checkpoint to {path}")
 
@@ -2468,6 +2493,33 @@ def load_checkpoint(
     
     # Always load model weights
     model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Restore HPM dynamic buffers (critical for continual learning)
+    if 'hpm_instance_buffer' in checkpoint:
+        if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
+            buf_data = checkpoint['hpm_instance_buffer']
+            model.hpm_instance_buffer.clear()
+            for key, value, task_id in zip(buf_data['keys'], buf_data['values'], buf_data['task_ids']):
+                model.hpm_instance_buffer._keys.append(key)
+                model.hpm_instance_buffer._values.append(value)
+                model.hpm_instance_buffer._task_ids.append(task_id)
+            # Rebuild FAISS index if applicable
+            if model.hpm_instance_buffer.use_faiss and model.hpm_instance_buffer._faiss_index is not None:
+                model.hpm_instance_buffer._rebuild_faiss_index()
+            print(f"  HPM Instance Buffer: {len(model.hpm_instance_buffer)} entries restored")
+    
+    if 'hpm_procedural_buffer' in checkpoint:
+        if hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None:
+            buf_data = checkpoint['hpm_procedural_buffer']
+            model.hpm_procedural_buffer.clear()
+            for key, value, task_id in zip(buf_data['keys'], buf_data['values'], buf_data['task_ids']):
+                model.hpm_procedural_buffer._keys.append(key)
+                model.hpm_procedural_buffer._values.append(value)
+                model.hpm_procedural_buffer._task_ids.append(task_id)
+            # Rebuild FAISS index if applicable
+            if model.hpm_procedural_buffer.use_faiss and model.hpm_procedural_buffer._faiss_index is not None:
+                model.hpm_procedural_buffer._rebuild_faiss_index()
+            print(f"  HPM Procedural Buffer: {len(model.hpm_procedural_buffer)} entries restored")
     
     epoch = checkpoint['epoch']
     global_step = checkpoint.get('global_step', 0)

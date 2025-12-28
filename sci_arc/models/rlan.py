@@ -1587,7 +1587,7 @@ class RLAN(nn.Module):
     
     @classmethod
     def load_from_checkpoint(cls, path: str, device: str = "cpu") -> "RLAN":
-        """Load model from checkpoint."""
+        """Load model from checkpoint including HPM dynamic buffers."""
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         
         # Extract saved config and filter to only RLANConfig fields
@@ -1604,5 +1604,28 @@ class RLAN(nn.Module):
         config = RLANConfig(**config_kwargs)
         model = cls(config=config)
         model.load_state_dict(checkpoint["model_state_dict"])
+        
+        # Restore HPM dynamic buffers (critical for inference with continual learning)
+        if 'hpm_instance_buffer' in checkpoint:
+            if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
+                buf_data = checkpoint['hpm_instance_buffer']
+                model.hpm_instance_buffer.clear()
+                for key, value, task_id in zip(buf_data['keys'], buf_data['values'], buf_data['task_ids']):
+                    model.hpm_instance_buffer._keys.append(key)
+                    model.hpm_instance_buffer._values.append(value)
+                    model.hpm_instance_buffer._task_ids.append(task_id)
+                if model.hpm_instance_buffer.use_faiss and model.hpm_instance_buffer._faiss_index is not None:
+                    model.hpm_instance_buffer._rebuild_faiss_index()
+        
+        if 'hpm_procedural_buffer' in checkpoint:
+            if hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None:
+                buf_data = checkpoint['hpm_procedural_buffer']
+                model.hpm_procedural_buffer.clear()
+                for key, value, task_id in zip(buf_data['keys'], buf_data['values'], buf_data['task_ids']):
+                    model.hpm_procedural_buffer._keys.append(key)
+                    model.hpm_procedural_buffer._values.append(value)
+                    model.hpm_procedural_buffer._task_ids.append(task_id)
+                if model.hpm_procedural_buffer.use_faiss and model.hpm_procedural_buffer._faiss_index is not None:
+                    model.hpm_procedural_buffer._rebuild_faiss_index()
         
         return model
