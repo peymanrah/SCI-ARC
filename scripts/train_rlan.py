@@ -3093,8 +3093,9 @@ Config Overrides:
     # This prevents gradient noise from untrained modules destabilizing the base model
     use_hyperlora = config.get('model', {}).get('use_hyperlora', False)
     use_solver_context = config.get('model', {}).get('use_solver_context', False)
+    use_cross_attention_context = config.get('model', {}).get('use_cross_attention_context', False)
     
-    if use_hyperlora or use_solver_context:
+    if use_hyperlora or use_solver_context or use_cross_attention_context:
         print(f"\n{'='*60}")
         print(f"STAGED NEW MODULE CONTRIBUTIONS")
         print(f"{'='*60}")
@@ -3115,6 +3116,19 @@ Config Overrides:
                 model.solver_context_active = False
                 print(f"  [SolverCrossAttention] Disabled until epoch {meta_learning_start_epoch + 1}")
                 print(f"    - Solver runs without cross-attention initially")
+        
+        # CRITICAL: CrossAttentionInjector uses Q/K/V projections that are randomly
+        # initialized. During early training, this injects NOISE into features.
+        # FiLM (ContextInjector) uses simple γ*features+β which is much more stable.
+        # Stage cross-attention to activate with meta-learning.
+        if use_cross_attention_context:
+            if start_epoch >= meta_learning_start_epoch:
+                model.cross_attention_active = True
+                print(f"  [CrossAttentionInjector] Already past start epoch - ACTIVE")
+            else:
+                model.cross_attention_active = False
+                print(f"  [CrossAttentionInjector] Disabled until epoch {meta_learning_start_epoch + 1}")
+                print(f"    - Using FiLM fallback (pool+scale/shift) for stable early training")
         print(f"{'='*60}\n")
     
     # Training loop
@@ -3193,6 +3207,11 @@ Config Overrides:
             if use_solver_context:
                 model.solver_context_active = True
                 print(f"  SolverCrossAttention: NOW ACTIVE in solver loop")
+            
+            # Activate CrossAttentionInjector (switch from FiLM fallback)
+            if use_cross_attention_context:
+                model.cross_attention_active = True
+                print(f"  CrossAttentionInjector: NOW ACTIVE (was using FiLM fallback)")
             
             print(f"{'='*60}\n")
         

@@ -2,15 +2,45 @@
 
 ## Executive Summary
 
-**ROOT CAUSE IDENTIFIED AND FIXED**: The BG collapse was caused by HyperLoRA and 
-SolverCrossAttention being ACTIVE from epoch 0, even though LOO/Equivariance losses
-were delayed until epoch 3.
+**ROOT CAUSE IDENTIFIED AND FIXED**: The BG collapse was caused by **THREE** new modules
+being ACTIVE from epoch 0, even though LOO/Equivariance losses were delayed until epoch 3:
 
-The modules were contributing noisy outputs to the forward pass during early training,
-destabilizing the base model before it could learn FG/BG distinction.
+1. **HyperLoRA** - LoRA delta weights applied from epoch 0
+2. **SolverCrossAttention** - Cross-attention in solver from epoch 0  
+3. **CrossAttentionInjector** - Context injection via attention instead of FiLM from epoch 0
 
-**FIX IMPLEMENTED**: Added `hyperlora_active` and `solver_context_active` runtime flags
-that disable these modules' CONTRIBUTIONS (not training) during epochs 0-2.
+All three modules use Q/K/V projections or delta weights that are **randomly initialized**.
+During early training, these inject **noise** into features, destabilizing the base model
+before it can learn FG/BG distinction.
+
+**FIX IMPLEMENTED**: Added three runtime staging flags:
+- `hyperlora_active` - Disables LoRA deltas during epochs 0-2
+- `solver_context_active` - Disables solver cross-attention during epochs 0-2
+- `cross_attention_active` - Falls back to **FiLM** (γ*features+β) during epochs 0-2
+
+---
+
+## Why CrossAttention is Unstable vs FiLM
+
+**FiLM (Feature-wise Linear Modulation)**:
+```python
+# Simple scale/shift - linear, predictable
+output = γ * features + β
+# With random γ≈1, β≈0, this barely changes features
+```
+
+**CrossAttentionInjector**:
+```python
+# Complex attention mechanism - nonlinear, volatile
+Q = Wq @ features      # Random projection
+K = Wk @ context       # Random projection  
+V = Wv @ context       # Random projection
+attn = softmax(Q @ K.T / sqrt(d))  # Random attention weights
+output = features + attn @ V       # Adds random noise!
+```
+
+With random Q/K/V projections, softmax produces ~uniform attention over random values,
+injecting pure noise into every feature. This destroys any learning signal for FG/BG.
 
 ---
 
@@ -26,7 +56,7 @@ num_solver_steps: 6
 use_hyperlora: NO (didn't exist)
 use_hpm: NO (didn't exist)  
 use_solver_context: NO (didn't exist)
-use_cross_attention_context: NO (didn't exist)
+use_cross_attention_context: NO (default=false → FiLM)
 
 # Training
 batch_size: 75

@@ -291,9 +291,14 @@ class RLAN(nn.Module):
                     num_heads=config.dsc_num_heads if config else 4,
                     dropout=dropout,
                 )
+                # FiLM fallback for staged training (used in early epochs)
+                # Cross-attention uses Q/K/V projections that are randomly initialized
+                # and inject noise. FiLM (scale/shift) is more stable for early training.
+                self.film_fallback_injector = ContextInjector(hidden_dim=hidden_dim)
             else:
                 # FiLM: stable, compresses context to vector (default)
                 self.context_injector = ContextInjector(hidden_dim=hidden_dim)
+                self.film_fallback_injector = None  # Not needed, already using FiLM
         else:
             self.context_encoder = None
             self.context_injector = None
@@ -537,15 +542,24 @@ class RLAN(nn.Module):
                     # Spatial features mode: (B, N, D, H, W)
                     support_features = context_output  # Keep for solver cross-attention
                     
+                    # STAGED CROSS-ATTENTION: Check if cross-attention is active
+                    # During early epochs, cross-attention injects random noise from untrained
+                    # Q/K/V projections. FiLM pooling is more stable.
+                    cross_attention_active = getattr(self, 'cross_attention_active', True)
+                    
                     # Check what kind of injector we have
-                    if isinstance(self.context_injector, CrossAttentionInjector):
+                    if isinstance(self.context_injector, CrossAttentionInjector) and cross_attention_active:
                         # CrossAttentionInjector: pass spatial features directly
                         features = self.context_injector(features, context_output)
                     else:
-                        # FiLM injector: pool spatial features to context vector
-                        # This happens when use_solver_context=True but use_cross_attention_context=False
+                        # FiLM fallback: pool spatial features to context vector
+                        # Used when: 1) use_solver_context=True but use_cross_attention_context=False
+                        #            2) Early epochs when cross_attention_active=False
                         context = self.pool_context_from_support(context_output)  # (B, D)
-                        features = self.context_injector(features, context)
+                        # Use dedicated fallback injector if available, else main injector
+                        fallback_injector = getattr(self, 'film_fallback_injector', None) or self.context_injector
+                        if fallback_injector is not None:
+                            features = fallback_injector(features, context)
                 else:
                     # FiLM mode: compressed context vector
                     context = context_output  # (B, D)
