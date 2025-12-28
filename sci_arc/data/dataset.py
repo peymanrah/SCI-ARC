@@ -352,35 +352,53 @@ class ARCDataset(Dataset):
         print(f"Loaded {len(self._cached_samples):,} samples from chunked cache in {elapsed:.1f}s")
     
     def _save_chunked_cache(self, samples: list, cache_dir: Path, chunk_size: int = 10000) -> None:
-        """Save samples as chunked cache for fast partial loading."""
+        """
+        Save samples as chunked cache for fast partial loading.
+        
+        CRITICAL: Samples are SHUFFLED before chunking to ensure each chunk
+        contains a representative mix of all tasks/difficulties. This allows
+        partial loading (e.g., 4%) to still cover all task types.
+        """
         import pickle
+        import random
         
         cache_dir.mkdir(parents=True, exist_ok=True)
         
         num_samples = len(samples)
         num_chunks = (num_samples + chunk_size - 1) // chunk_size
         
-        # Save chunks
+        # CRITICAL: Shuffle samples so each chunk has representative task mix
+        # Without this, chunk_0 would only have tasks 0-9 (sequential order)
+        # With shuffling, chunk_0 has random samples from ALL 400 tasks
+        print(f"Shuffling {num_samples:,} samples for representative chunk distribution...")
+        indices = list(range(num_samples))
+        random.seed(42)  # Fixed seed for reproducibility across runs
+        random.shuffle(indices)
+        
+        # Save chunks with shuffled order
         for chunk_idx in range(num_chunks):
             start_idx = chunk_idx * chunk_size
             end_idx = min(start_idx + chunk_size, num_samples)
-            chunk_samples = samples[start_idx:end_idx]
+            chunk_indices = indices[start_idx:end_idx]
+            chunk_samples = [samples[i] for i in chunk_indices]
             
             chunk_path = cache_dir / f'chunk_{chunk_idx:04d}.pkl'
             with open(chunk_path, 'wb') as f:
                 pickle.dump(chunk_samples, f)
         
-        # Save metadata
+        # Save metadata (includes shuffle info)
         meta = {
             'total_samples': num_samples,
             'chunk_size': chunk_size,
             'num_chunks': num_chunks,
+            'shuffled': True,  # Flag indicating representative distribution
+            'shuffle_seed': 42,
         }
         meta_path = cache_dir / 'meta.pkl'
         with open(meta_path, 'wb') as f:
             pickle.dump(meta, f)
         
-        print(f"Chunked cache saved: {num_chunks} chunks of {chunk_size} samples each")
+        print(f"Chunked cache saved: {num_chunks} chunks of {chunk_size} samples each (SHUFFLED for representative sampling)")
 
     def _generate_sample(self, task_idx: int) -> Dict[str, Any]:
         """Generate a single sample with current augmentation settings."""
@@ -1718,18 +1736,23 @@ def convert_to_chunked_cache(pickle_path: str, chunk_size: int = 10000) -> None:
     """
     Convert a monolithic pickle cache to chunked format for fast partial loading.
     
+    CRITICAL: Samples are SHUFFLED before chunking to ensure each chunk
+    contains a representative mix of all tasks/difficulties. This allows
+    partial loading (e.g., 4%) to still cover all task types.
+    
     Usage:
         python -c "from sci_arc.data.dataset import convert_to_chunked_cache; convert_to_chunked_cache('./cache/rlan_stable_400k_v3.pkl')"
     
     This creates a .chunks directory next to the pickle file with:
-        - meta.pkl: metadata (total_samples, chunk_size, num_chunks)
-        - chunk_0000.pkl, chunk_0001.pkl, ...: individual chunks
+        - meta.pkl: metadata (total_samples, chunk_size, num_chunks, shuffled=True)
+        - chunk_0000.pkl, chunk_0001.pkl, ...: individual chunks (shuffled samples)
     
     After conversion, set cache_load_percent in config to load only needed chunks.
-    E.g., cache_load_percent=10 loads only first 10% of chunks (~5GB instead of 50GB).
+    E.g., cache_load_percent=4 loads ~4% of samples with REPRESENTATIVE task mix.
     """
     import pickle
     import time
+    import random
     from pathlib import Path
     
     pickle_path = Path(pickle_path)
@@ -1758,12 +1781,19 @@ def convert_to_chunked_cache(pickle_path: str, chunk_size: int = 10000) -> None:
     num_samples = len(samples)
     num_chunks = (num_samples + chunk_size - 1) // chunk_size
     
-    print(f"Saving {num_chunks} chunks of {chunk_size} samples each...")
+    # CRITICAL: Shuffle samples so each chunk has representative task mix
+    print(f"Shuffling samples for representative distribution across chunks...")
+    indices = list(range(num_samples))
+    random.seed(42)  # Fixed seed for reproducibility
+    random.shuffle(indices)
+    
+    print(f"Saving {num_chunks} chunks of {chunk_size} samples each (SHUFFLED)...")
     
     for chunk_idx in range(num_chunks):
         start_idx = chunk_idx * chunk_size
         end_idx = min(start_idx + chunk_size, num_samples)
-        chunk_samples = samples[start_idx:end_idx]
+        chunk_indices = indices[start_idx:end_idx]
+        chunk_samples = [samples[i] for i in chunk_indices]
         
         chunk_path = chunks_dir / f'chunk_{chunk_idx:04d}.pkl'
         with open(chunk_path, 'wb') as f:
@@ -1777,6 +1807,8 @@ def convert_to_chunked_cache(pickle_path: str, chunk_size: int = 10000) -> None:
         'total_samples': num_samples,
         'chunk_size': chunk_size,
         'num_chunks': num_chunks,
+        'shuffled': True,
+        'shuffle_seed': 42,
     }
     meta_path = chunks_dir / 'meta.pkl'
     with open(meta_path, 'wb') as f:
@@ -1785,7 +1817,8 @@ def convert_to_chunked_cache(pickle_path: str, chunk_size: int = 10000) -> None:
     total_time = time.time() - start_time
     print(f"\nDone! Chunked cache saved to {chunks_dir}")
     print(f"Total time: {total_time:.1f}s")
-    print(f"\nNow you can use cache_load_percent to load only what you need:")
-    print(f"  cache_load_percent: 10   # Load ~{num_samples * 10 // 100:,} samples")
-    print(f"  cache_load_percent: 25   # Load ~{num_samples * 25 // 100:,} samples")
+    print(f"\nSamples are SHUFFLED - each chunk contains representative task mix!")
+    print(f"Now you can use cache_load_percent to load only what you need:")
+    print(f"  cache_load_percent: 4    # Load ~{num_samples * 4 // 100:,} samples (all task types)")
+    print(f"  cache_load_percent: 10   # Load ~{num_samples * 10 // 100:,} samples (all task types)")
     print(f"  cache_load_percent: 100  # Load all {num_samples:,} samples")
