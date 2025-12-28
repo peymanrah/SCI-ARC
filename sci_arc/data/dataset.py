@@ -211,42 +211,68 @@ class ARCDataset(Dataset):
         
         The cache can optionally be saved to disk for persistence.
         
-        PARTIAL LOADING (cache_load_percent < 100):
-        - Only loads first N% of cached samples from disk
-        - Useful for quick testing without waiting for full 50GB cache load
-        - E.g., cache_load_percent=10 loads ~5GB in 20s instead of 50GB in 3min
+        AUTOMATIC CHUNKING & PARTIAL LOADING:
+        1. If chunked cache exists (same name as pkl + .chunks/), load from chunks
+        2. If only monolithic pkl exists, auto-convert to chunks, then load
+        3. cache_load_percent controls how many chunks to load
+        4. Chunk filenames derive from source pkl name for tracking
         """
         import time
         
-        # Try to load from disk first
-        if self.cache_path and self.cache_path.exists():
-            load_percent = self.cache_load_percent
-            if load_percent < 100:
-                print(f"Loading {load_percent:.0f}% of cached samples from {self.cache_path}...")
-            else:
-                print(f"Loading cached samples from {self.cache_path}...")
+        if not self.cache_path:
+            # No cache path specified, generate in-memory
+            self._generate_cache_in_memory()
+            return
+        
+        # Derive chunked cache directory name from pkl filename
+        # e.g., rlan_stable_400k_v3.pkl -> rlan_stable_400k_v3.pkl.chunks/
+        chunked_cache_dir = Path(str(self.cache_path) + '.chunks')
+        load_percent = self.cache_load_percent
+        
+        # CASE 1: Chunked cache exists - load directly (fast partial loading)
+        if chunked_cache_dir.exists() and (chunked_cache_dir / 'meta.pkl').exists():
+            return self._load_chunked_cache(chunked_cache_dir, load_percent)
+        
+        # CASE 2: Monolithic pkl exists but no chunks - auto-convert then load
+        if self.cache_path.exists():
+            print(f"\n{'='*60}")
+            print(f"AUTO-CHUNKING CACHE FOR FAST PARTIAL LOADING")
+            print(f"{'='*60}")
+            print(f"  Source: {self.cache_path}")
+            print(f"  Target: {chunked_cache_dir}")
+            print(f"  This is a one-time operation...")
+            print(f"{'='*60}\n")
             
-            try:
-                import pickle
-                start_time = time.time()
-                with open(self.cache_path, 'rb') as f:
-                    all_samples = pickle.load(f)
-                
-                # Apply percentage limit
-                if load_percent < 100:
-                    num_to_load = max(1, int(len(all_samples) * load_percent / 100))
-                    self._cached_samples = all_samples[:num_to_load]
-                    # Free memory from unused samples
-                    del all_samples
-                    elapsed = time.time() - start_time
-                    print(f"Loaded {len(self._cached_samples):,} samples ({load_percent:.0f}% of cache) in {elapsed:.1f}s")
-                else:
-                    self._cached_samples = all_samples
-                    elapsed = time.time() - start_time
-                    print(f"Loaded {len(self._cached_samples):,} cached samples in {elapsed:.1f}s")
-                return
-            except Exception as e:
-                print(f"Warning: Failed to load cache: {e}")
+            # Load full pickle
+            import pickle
+            start_time = time.time()
+            print(f"Loading full cache from {self.cache_path}...")
+            with open(self.cache_path, 'rb') as f:
+                all_samples = pickle.load(f)
+            load_time = time.time() - start_time
+            print(f"Loaded {len(all_samples):,} samples in {load_time:.1f}s")
+            
+            # Save as chunks
+            self._save_chunked_cache(all_samples, chunked_cache_dir)
+            
+            # Now load the requested percentage from chunks
+            # (this avoids keeping all_samples in memory if we only need partial)
+            del all_samples
+            import gc
+            gc.collect()
+            
+            return self._load_chunked_cache(chunked_cache_dir, load_percent)
+        
+        # CASE 3: No cache exists - generate from scratch
+        self._generate_cache_in_memory()
+        
+        # Save both monolithic and chunked versions for future runs
+        if self.cache_path:
+            self._save_cache_to_disk()
+    
+    def _generate_cache_in_memory(self):
+        """Generate cache samples in memory."""
+        import time
         
         print(f"Building cache with {self.num_cached_samples} samples...")
         start_time = time.time()
@@ -264,19 +290,98 @@ class ARCDataset(Dataset):
         elapsed = time.time() - start_time
         print(f"Cached {len(self._cached_samples)} samples in {elapsed:.1f}s "
               f"({samples_per_task} per task)")
-        
-        # Save to disk if path specified
-        if self.cache_path:
-            print(f"Saving cache to {self.cache_path}...")
-            try:
-                import pickle
-                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.cache_path, 'wb') as f:
-                    pickle.dump(self._cached_samples, f)
-                print(f"Cache saved successfully")
-            except Exception as e:
-                print(f"Warning: Failed to save cache: {e}")
     
+    def _save_cache_to_disk(self):
+        """Save current cache to disk (both monolithic pkl and chunked format)."""
+        import pickle
+        
+        if not self.cache_path or not self._cached_samples:
+            return
+            
+        print(f"Saving cache to {self.cache_path}...")
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.cache_path, 'wb') as f:
+                pickle.dump(self._cached_samples, f)
+            print(f"Monolithic cache saved successfully")
+            
+            # Also save as chunked cache for fast partial loading
+            chunked_dir = Path(str(self.cache_path) + '.chunks')
+            print(f"Creating chunked cache at {chunked_dir}...")
+            self._save_chunked_cache(self._cached_samples, chunked_dir)
+        except Exception as e:
+            print(f"Warning: Failed to save cache: {e}")
+    
+    def _load_chunked_cache(self, cache_dir: Path, load_percent: float) -> None:
+        """Load samples from chunked cache format (supports true partial loading)."""
+        import pickle
+        import time
+        
+        start_time = time.time()
+        
+        # Read metadata
+        meta_path = cache_dir / 'meta.pkl'
+        with open(meta_path, 'rb') as f:
+            meta = pickle.load(f)
+        
+        total_samples = meta['total_samples']
+        chunk_size = meta['chunk_size']
+        num_chunks = meta['num_chunks']
+        
+        # Calculate how many samples to load
+        num_to_load = max(1, int(total_samples * load_percent / 100))
+        chunks_to_load = (num_to_load + chunk_size - 1) // chunk_size  # Ceiling division
+        
+        if load_percent < 100:
+            print(f"Loading {load_percent:.0f}% of chunked cache ({chunks_to_load}/{num_chunks} chunks)...")
+        else:
+            print(f"Loading chunked cache ({num_chunks} chunks)...")
+        
+        self._cached_samples = []
+        for chunk_idx in range(min(chunks_to_load, num_chunks)):
+            chunk_path = cache_dir / f'chunk_{chunk_idx:04d}.pkl'
+            with open(chunk_path, 'rb') as f:
+                chunk_samples = pickle.load(f)
+            self._cached_samples.extend(chunk_samples)
+        
+        # Trim to exact count
+        if len(self._cached_samples) > num_to_load:
+            self._cached_samples = self._cached_samples[:num_to_load]
+        
+        elapsed = time.time() - start_time
+        print(f"Loaded {len(self._cached_samples):,} samples from chunked cache in {elapsed:.1f}s")
+    
+    def _save_chunked_cache(self, samples: list, cache_dir: Path, chunk_size: int = 10000) -> None:
+        """Save samples as chunked cache for fast partial loading."""
+        import pickle
+        
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        num_samples = len(samples)
+        num_chunks = (num_samples + chunk_size - 1) // chunk_size
+        
+        # Save chunks
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * chunk_size
+            end_idx = min(start_idx + chunk_size, num_samples)
+            chunk_samples = samples[start_idx:end_idx]
+            
+            chunk_path = cache_dir / f'chunk_{chunk_idx:04d}.pkl'
+            with open(chunk_path, 'wb') as f:
+                pickle.dump(chunk_samples, f)
+        
+        # Save metadata
+        meta = {
+            'total_samples': num_samples,
+            'chunk_size': chunk_size,
+            'num_chunks': num_chunks,
+        }
+        meta_path = cache_dir / 'meta.pkl'
+        with open(meta_path, 'wb') as f:
+            pickle.dump(meta, f)
+        
+        print(f"Chunked cache saved: {num_chunks} chunks of {chunk_size} samples each")
+
     def _generate_sample(self, task_idx: int) -> Dict[str, Any]:
         """Generate a single sample with current augmentation settings."""
         task = self.tasks[task_idx]
@@ -1603,3 +1708,84 @@ class TRMCompatibleDataset(SCIARCDataset):
             'vocab_size': self.VOCAB_SIZE,
             'seq_len': self.SEQ_LEN,
         }
+
+
+# =============================================================================
+# UTILITY: Convert monolithic pickle cache to chunked format for fast partial loading
+# =============================================================================
+
+def convert_to_chunked_cache(pickle_path: str, chunk_size: int = 10000) -> None:
+    """
+    Convert a monolithic pickle cache to chunked format for fast partial loading.
+    
+    Usage:
+        python -c "from sci_arc.data.dataset import convert_to_chunked_cache; convert_to_chunked_cache('./cache/rlan_stable_400k_v3.pkl')"
+    
+    This creates a .chunks directory next to the pickle file with:
+        - meta.pkl: metadata (total_samples, chunk_size, num_chunks)
+        - chunk_0000.pkl, chunk_0001.pkl, ...: individual chunks
+    
+    After conversion, set cache_load_percent in config to load only needed chunks.
+    E.g., cache_load_percent=10 loads only first 10% of chunks (~5GB instead of 50GB).
+    """
+    import pickle
+    import time
+    from pathlib import Path
+    
+    pickle_path = Path(pickle_path)
+    if not pickle_path.exists():
+        print(f"Error: {pickle_path} does not exist")
+        return
+    
+    chunks_dir = Path(str(pickle_path) + '.chunks')
+    if chunks_dir.exists():
+        print(f"Chunked cache already exists at {chunks_dir}")
+        print(f"Delete it first if you want to regenerate: rm -r {chunks_dir}")
+        return
+    
+    print(f"Loading {pickle_path}...")
+    start_time = time.time()
+    
+    with open(pickle_path, 'rb') as f:
+        samples = pickle.load(f)
+    
+    load_time = time.time() - start_time
+    print(f"Loaded {len(samples):,} samples in {load_time:.1f}s")
+    
+    # Create chunks directory
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    
+    num_samples = len(samples)
+    num_chunks = (num_samples + chunk_size - 1) // chunk_size
+    
+    print(f"Saving {num_chunks} chunks of {chunk_size} samples each...")
+    
+    for chunk_idx in range(num_chunks):
+        start_idx = chunk_idx * chunk_size
+        end_idx = min(start_idx + chunk_size, num_samples)
+        chunk_samples = samples[start_idx:end_idx]
+        
+        chunk_path = chunks_dir / f'chunk_{chunk_idx:04d}.pkl'
+        with open(chunk_path, 'wb') as f:
+            pickle.dump(chunk_samples, f)
+        
+        if (chunk_idx + 1) % 10 == 0:
+            print(f"  Saved chunk {chunk_idx + 1}/{num_chunks}")
+    
+    # Save metadata
+    meta = {
+        'total_samples': num_samples,
+        'chunk_size': chunk_size,
+        'num_chunks': num_chunks,
+    }
+    meta_path = chunks_dir / 'meta.pkl'
+    with open(meta_path, 'wb') as f:
+        pickle.dump(meta, f)
+    
+    total_time = time.time() - start_time
+    print(f"\nDone! Chunked cache saved to {chunks_dir}")
+    print(f"Total time: {total_time:.1f}s")
+    print(f"\nNow you can use cache_load_percent to load only what you need:")
+    print(f"  cache_load_percent: 10   # Load ~{num_samples * 10 // 100:,} samples")
+    print(f"  cache_load_percent: 25   # Load ~{num_samples * 25 // 100:,} samples")
+    print(f"  cache_load_percent: 100  # Load all {num_samples:,} samples")
