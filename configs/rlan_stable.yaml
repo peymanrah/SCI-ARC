@@ -159,6 +159,67 @@ model:
   hyperlora_dropout: 0.0     # Dropout on LoRA activations
   hyperlora_init_scale: 0.1  # INCREASED: Was 0.01, now 0.1 for stronger meta-learning signal
 
+  # =============================================================
+  # HIERARCHICAL PRIMITIVE MEMORY (HPM v2) - Dec 2025
+  # =============================================================
+  # HPM is a multi-bank memory system for universal continual learning.
+  # It stores ALL types of useful primitives (not just compositional).
+  #
+  # v2 IMPROVEMENTS:
+  # - Sparse MoE Top-K routing (prevents mode collapse)
+  # - Gated residual initialized to 0 (training stability)
+  # - Static vs Dynamic bank split (unbounded memory)
+  # - Load Balancing Loss (ensures all banks utilized)
+  #
+  # BANK TYPES:
+  # - STATIC BANKS (nn.Parameter, learned during training):
+  #   - Compositional: Transformations that compose (rotate, translate)
+  #   - Pattern: Holistic patterns/templates (textures, shapes)
+  #   - Relational: Spatial/logical relationships (above, inside)
+  #   - Concept: Domain knowledge (semantics, categories)
+  #
+  # - DYNAMIC BANKS (KV-cache, grows with solved tasks):
+  #   - Procedural: HyperLoRA latent codes for task procedures
+  #   - Instance: ContextEncoder outputs for retrieval-based reasoning
+  #
+  # MEMORY EFFICIENCY:
+  # - Gate starts at 0, so HPM contributes nothing initially
+  # - Top-K routing means only k banks queried per sample
+  # - Dynamic banks use CPU storage with FAISS for fast retrieval
+  #
+  # THREE-PHASE TRAINING WORKFLOW:
+  # Phase 1: Train baseline RLAN (HPM gate stays ~0)
+  # Phase 2: Populate dynamic buffers with solved tasks
+  # Phase 3: Fine-tune with HPM retrieval enabled
+  #
+  # PRODUCTION DEFAULT: DISABLED (enable for continual learning)
+  # =============================================================
+  use_hpm: false                      # DISABLED - enable for continual learning
+  
+  # Sparse MoE Routing Configuration
+  hpm_top_k: 2                        # Number of banks to route to per sample
+  hpm_balance_weight: 0.01            # Load balancing loss weight (prevents mode collapse)
+  
+  # Static Bank Configuration
+  hpm_primitives_per_bank: 16         # Number of primitives per static bank
+  hpm_levels_per_bank: 2              # Hierarchical levels within each bank
+  hpm_use_cross_attention: true       # Use cross-attention aggregation
+  
+  # Dynamic Bank Configuration
+  hpm_memory_size: 10000              # Max entries in dynamic banks
+  hpm_retrieval_k: 5                  # Number of neighbors to retrieve
+  
+  # Bank Selection (which banks to enable)
+  # Static banks (learned primitives):
+  hpm_use_compositional_bank: true    # Transformations that compose
+  hpm_use_pattern_bank: true          # Holistic patterns/templates
+  hpm_use_relational_bank: true       # Spatial/logical relationships
+  hpm_use_concept_bank: false         # Domain knowledge (optional)
+  
+  # Dynamic banks (KV-cache, grows over time):
+  hpm_use_procedural_bank: false      # HyperLoRA codes (enable with HyperLoRA)
+  hpm_use_instance_bank: false        # ContextEncoder cache (enable for retrieval)
+
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
   

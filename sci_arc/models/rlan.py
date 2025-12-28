@@ -51,6 +51,9 @@ from sci_arc.models.rlan_modules import (
     CrossAttentionInjector,
     HyperLoRA,
     HyperLoRAConfig,
+    HierarchicalPrimitiveMemory,
+    HPMConfig,
+    DynamicMemoryBuffer,
 )
 from sci_arc.models.rlan_modules.acw import AugmentedConfidenceWeighting, apply_augmentation
 
@@ -108,6 +111,22 @@ class RLANConfig:
     hyperlora_scaling: float = 1.0
     hyperlora_dropout: float = 0.0
     hyperlora_init_scale: float = 0.1  # FIXED: Was 0.01, increased for stronger meta-learning signal
+    
+    # HPM (Hierarchical Primitive Memory v2) settings
+    use_hpm: bool = False                    # Enable HPM for continual learning
+    hpm_top_k: int = 2                       # Number of banks to route to per sample
+    hpm_balance_weight: float = 0.01         # Load balancing loss weight
+    hpm_primitives_per_bank: int = 16        # Number of primitives per static bank
+    hpm_levels_per_bank: int = 2             # Hierarchical levels per bank
+    hpm_use_cross_attention: bool = True     # Use cross-attention aggregation
+    hpm_memory_size: int = 10000             # Max entries in dynamic banks
+    hpm_retrieval_k: int = 5                 # Number of neighbors to retrieve
+    hpm_use_compositional_bank: bool = True  # Static: Compositional transforms
+    hpm_use_pattern_bank: bool = True        # Static: Holistic patterns
+    hpm_use_relational_bank: bool = True     # Static: Spatial relationships
+    hpm_use_concept_bank: bool = False       # Static: Domain knowledge
+    hpm_use_procedural_bank: bool = False    # Dynamic: HyperLoRA codes
+    hpm_use_instance_bank: bool = False      # Dynamic: ContextEncoder cache
     
     # Training parameters
     dropout: float = 0.1
@@ -365,6 +384,52 @@ class RLAN(nn.Module):
         else:
             self.hyper_lora = None
         
+        # HPM (Hierarchical Primitive Memory v2) for continual learning (optional)
+        self.use_hpm = config.use_hpm if config else False
+        if self.use_hpm:
+            # Create HPM config from model config
+            hpm_config = HPMConfig(
+                d_model=hidden_dim,
+                top_k=config.hpm_top_k if config else 2,
+                balance_loss_weight=config.hpm_balance_weight if config else 0.01,
+                primitives_per_bank=config.hpm_primitives_per_bank if config else 16,
+                n_levels_per_bank=config.hpm_levels_per_bank if config else 2,
+                use_cross_attention=config.hpm_use_cross_attention if config else True,
+                max_dynamic_buffer_size=config.hpm_memory_size if config else 10000,
+                dynamic_retrieval_k=config.hpm_retrieval_k if config else 5,
+                use_compositional_bank=config.hpm_use_compositional_bank if config else True,
+                use_pattern_bank=config.hpm_use_pattern_bank if config else True,
+                use_relational_bank=config.hpm_use_relational_bank if config else True,
+                use_concept_bank=config.hpm_use_concept_bank if config else False,
+                use_procedural_bank=config.hpm_use_procedural_bank if config else False,
+                use_instance_bank=config.hpm_use_instance_bank if config else False,
+            )
+            self.hpm = HierarchicalPrimitiveMemory(hpm_config)
+            self._hpm_config = hpm_config  # Store for checkpoint saving
+            
+            # Dynamic buffers for Instance and Procedural banks
+            if hpm_config.use_instance_bank:
+                self.hpm_instance_buffer = DynamicMemoryBuffer(
+                    d_model=hidden_dim,
+                    max_size=hpm_config.max_dynamic_buffer_size,
+                    use_faiss=True,
+                )
+            else:
+                self.hpm_instance_buffer = None
+            
+            if hpm_config.use_procedural_bank:
+                self.hpm_procedural_buffer = DynamicMemoryBuffer(
+                    d_model=hidden_dim,
+                    max_size=hpm_config.max_dynamic_buffer_size,
+                    use_faiss=True,
+                )
+            else:
+                self.hpm_procedural_buffer = None
+        else:
+            self.hpm = None
+            self.hpm_instance_buffer = None
+            self.hpm_procedural_buffer = None
+        
         # Print module configuration
         enabled = []
         disabled = []
@@ -377,6 +442,7 @@ class RLAN(nn.Module):
             ('ACT', self.use_act),
             ('SolverContext', self.use_solver_context),  # Phase 2.5
             ('HyperLoRA', self.use_hyperlora),  # Meta-learning
+            ('HPM', self.use_hpm),  # Hierarchical Primitive Memory
         ]:
             (enabled if flag else disabled).append(name)
         
@@ -481,6 +547,50 @@ class RLAN(nn.Module):
                     # FiLM mode: compressed context vector
                     context = context_output  # (B, D)
                     features = self.context_injector(features, context)
+        
+        # 2.5. Hierarchical Primitive Memory (HPM v2) - enhance context with memory (if enabled)
+        # MEMORY EFFICIENT: Gated residual starts at 0, Top-K routing only queries k banks
+        hpm_routing_weights = None
+        if self.use_hpm and self.hpm is not None:
+            # Get context vector for HPM query (pool if spatial features)
+            if support_features is not None:
+                # Pool spatial features: (B, N, D, H, W) -> (B, D)
+                z_context_flat = support_features.mean(dim=(1, 3, 4))
+            elif context is not None:
+                z_context_flat = context
+            else:
+                # No context available - skip HPM
+                z_context_flat = None
+            
+            if z_context_flat is not None:
+                # Prepare dynamic buffers if available
+                dynamic_buffers = {}
+                if self.hpm_instance_buffer is not None and len(self.hpm_instance_buffer) > 0:
+                    keys, values = self.hpm_instance_buffer.retrieve(
+                        z_context_flat, k=self._hpm_config.dynamic_retrieval_k
+                    )
+                    if keys is not None:
+                        dynamic_buffers['INSTANCE'] = (keys, values)
+                
+                if self.hpm_procedural_buffer is not None and len(self.hpm_procedural_buffer) > 0:
+                    keys, values = self.hpm_procedural_buffer.retrieve(
+                        z_context_flat, k=self._hpm_config.dynamic_retrieval_k
+                    )
+                    if keys is not None:
+                        dynamic_buffers['PROCEDURAL'] = (keys, values)
+                
+                # Enhance context with HPM
+                z_context_enhanced, hpm_routing_weights = self.hpm(
+                    z_context_flat,
+                    dynamic_buffers=dynamic_buffers if dynamic_buffers else None,
+                    return_routing=True,
+                )
+                
+                # Inject enhanced context back into features
+                # Use additive injection to preserve original features
+                # z_context_enhanced is (B, D), features is (B, D, H, W)
+                hpm_contribution = z_context_enhanced.unsqueeze(-1).unsqueeze(-1)  # (B, D, 1, 1)
+                features = features + hpm_contribution  # Broadcast addition
         
         # 3. Dynamic Saliency Controller - find clue anchors (if enabled)
         if self.use_dsc and self.dsc is not None:
@@ -634,6 +744,9 @@ class RLAN(nn.Module):
                 result["lora_deltas"] = lora_deltas
             if act_outputs is not None:
                 result["act_outputs"] = act_outputs
+            # Add HPM routing weights if available
+            if hpm_routing_weights is not None:
+                result["hpm_routing_weights"] = hpm_routing_weights
             # Add DSC diagnostics if available
             if self.use_dsc and self.dsc is not None:
                 entropy_inputs = self.dsc.get_last_entropy_inputs()
@@ -1304,9 +1417,131 @@ class RLAN(nn.Module):
             "sph": sum(p.numel() for p in self.sph.parameters()) if self.sph else 0,
             "solver": sum(p.numel() for p in self.solver.parameters()),
             "hyper_lora": sum(p.numel() for p in self.hyper_lora.parameters()) if self.hyper_lora else 0,
+            "hpm": sum(p.numel() for p in self.hpm.parameters()) if self.hpm else 0,
         }
         counts["total"] = sum(counts.values())
         return counts
+    
+    # =========================================================================
+    # HPM (Hierarchical Primitive Memory) Helper Methods
+    # =========================================================================
+    
+    def hpm_on_epoch_start(self):
+        """Call at epoch start to reset HPM statistics.
+        
+        This resets routing statistics for load balancing loss computation.
+        Should be called in training loop at the start of each epoch.
+        """
+        if self.use_hpm and self.hpm is not None:
+            self.hpm.reset_epoch_stats()
+    
+    def hpm_get_load_balance_loss(self) -> torch.Tensor:
+        """Get HPM load balancing loss for training.
+        
+        This loss encourages uniform bank usage, preventing mode collapse.
+        Should be added to the total loss with appropriate weighting.
+        
+        Returns:
+            Load balancing loss (scalar tensor, 0.0 if HPM disabled)
+        """
+        if self.use_hpm and self.hpm is not None:
+            return self.hpm.get_load_balance_loss()
+        return torch.tensor(0.0)
+    
+    def hpm_on_backward(self):
+        """Call after loss.backward() to apply gradient routing.
+        
+        This zeros gradients for frozen primitives in static banks,
+        implementing selective protection for continual learning.
+        """
+        if self.use_hpm and self.hpm is not None:
+            self.hpm.apply_gradient_routing()
+    
+    def hpm_on_task_complete(
+        self,
+        z_context: torch.Tensor,
+        z_task: Optional[torch.Tensor] = None,
+        task_id: Optional[str] = None,
+    ):
+        """Call after successfully completing a task for continual learning.
+        
+        This:
+        1. Freezes stable primitives in static banks
+        2. Stores embeddings in dynamic buffers for future retrieval
+        
+        Args:
+            z_context: Context embedding from ContextEncoder [B, D] or [D]
+            z_task: Optional task embedding from HyperLoRA [B, D] or [D]
+            task_id: Optional task identifier for debugging
+        """
+        if not self.use_hpm or self.hpm is None:
+            return
+        
+        # Freeze stable primitives
+        self.hpm.freeze_stable_primitives()
+        
+        # Store in Instance buffer
+        if self.hpm_instance_buffer is not None:
+            self.hpm_instance_buffer.add(z_context, z_context, task_id)
+        
+        # Store in Procedural buffer (if HyperLoRA available)
+        if self.hpm_procedural_buffer is not None and z_task is not None:
+            self.hpm_procedural_buffer.add(z_context, z_task, task_id)
+    
+    def hpm_get_stats(self) -> dict:
+        """Get HPM statistics for logging.
+        
+        Returns:
+            Dict with gate_value, routing_distribution, load_balance_loss, buffer sizes
+        """
+        if not self.use_hpm or self.hpm is None:
+            return {}
+        
+        stats = self.hpm.get_stats()
+        
+        # Add buffer sizes
+        if self.hpm_instance_buffer is not None:
+            stats['instance_buffer_size'] = len(self.hpm_instance_buffer)
+        if self.hpm_procedural_buffer is not None:
+            stats['procedural_buffer_size'] = len(self.hpm_procedural_buffer)
+        
+        return stats
+    
+    def hpm_save_buffers(self, directory: str):
+        """Save HPM dynamic buffers to disk.
+        
+        Args:
+            directory: Directory to save buffers
+        """
+        import os
+        if not self.use_hpm:
+            return
+        
+        os.makedirs(directory, exist_ok=True)
+        
+        if self.hpm_instance_buffer is not None and len(self.hpm_instance_buffer) > 0:
+            self.hpm_instance_buffer.save(os.path.join(directory, 'instance_buffer.pt'))
+        
+        if self.hpm_procedural_buffer is not None and len(self.hpm_procedural_buffer) > 0:
+            self.hpm_procedural_buffer.save(os.path.join(directory, 'procedural_buffer.pt'))
+    
+    def hpm_load_buffers(self, directory: str):
+        """Load HPM dynamic buffers from disk.
+        
+        Args:
+            directory: Directory containing saved buffers
+        """
+        import os
+        if not self.use_hpm:
+            return
+        
+        instance_path = os.path.join(directory, 'instance_buffer.pt')
+        if os.path.exists(instance_path) and self.hpm_instance_buffer is not None:
+            self.hpm_instance_buffer = DynamicMemoryBuffer.load(instance_path)
+        
+        procedural_path = os.path.join(directory, 'procedural_buffer.pt')
+        if os.path.exists(procedural_path) and self.hpm_procedural_buffer is not None:
+            self.hpm_procedural_buffer = DynamicMemoryBuffer.load(procedural_path)
     
     @classmethod
     def from_config(cls, config: RLANConfig) -> "RLAN":
@@ -1340,6 +1575,8 @@ class RLAN(nn.Module):
                 "hyperlora_scaling": getattr(self, '_hyperlora_scaling', 1.0),
                 "hyperlora_dropout": getattr(self, '_hyperlora_dropout', 0.0),
                 "hyperlora_init_scale": getattr(self, '_hyperlora_init_scale', 0.01),
+                # HPM config
+                "use_hpm": self.use_hpm,
                 # Additional flags for conditional module recreation
                 "use_learned_pos": self.use_learned_pos if hasattr(self, 'use_learned_pos') else False,
                 "dropout": self.dropout if hasattr(self, 'dropout') else 0.1,

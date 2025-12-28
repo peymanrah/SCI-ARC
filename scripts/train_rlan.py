@@ -862,6 +862,7 @@ def train_epoch(
         'predicate_loss': 0.0,
         'loo_loss': 0.0,  # LOO meta-learning loss
         'equiv_loss': 0.0,  # Augmentation equivariance loss
+        'hpm_balance_loss': 0.0,  # HPM load balancing loss
         'curriculum_loss': 0.0,
         'deep_supervision_loss': 0.0,  # FIX: Was missing, caused zero reporting
         'act_loss': 0.0,  # ACT halting loss
@@ -1139,6 +1140,15 @@ def train_epoch(
                             # MEMORY FIX: Clean up augmented contexts after use
                             del augmented_contexts, support_features_detached
                 
+                # Compute HPM load balancing loss if enabled
+                # This loss ensures all memory banks are utilized (prevents mode collapse)
+                if hasattr(model, 'use_hpm') and model.use_hpm:
+                    hpm_balance_loss = model.hpm_get_load_balance_loss()
+                    hpm_balance_weight = config['model'].get('hpm_balance_weight', 0.01)
+                    weighted_hpm_loss = hpm_balance_weight * hpm_balance_loss
+                    losses['hpm_balance_loss'] = weighted_hpm_loss.item() if torch.is_tensor(weighted_hpm_loss) else weighted_hpm_loss
+                    losses['total_loss'] = losses['total_loss'] + weighted_hpm_loss
+                
                 # Scale loss for gradient accumulation
                 # Note: LOO and Equiv losses already have their backward done inside
                 loss = losses['total_loss'] / grad_accumulation_steps
@@ -1236,6 +1246,10 @@ def train_epoch(
                 # Reset consecutive NaN counter on successful step
                 consecutive_nan = 0
                 
+                # HPM gradient routing: zero gradients for frozen primitives
+                if hasattr(model, 'hpm_on_backward'):
+                    model.hpm_on_backward()
+                
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -1290,6 +1304,14 @@ def train_epoch(
                     epoch_diagnostics['loo_batch_count'] += 1
                 else:
                     epoch_diagnostics['loo_skipped_count'] += 1
+            
+            # Compute HPM load balancing loss if enabled (non-AMP path)
+            if hasattr(model, 'use_hpm') and model.use_hpm:
+                hpm_balance_loss = model.hpm_get_load_balance_loss()
+                hpm_balance_weight = config['model'].get('hpm_balance_weight', 0.01)
+                weighted_hpm_loss = hpm_balance_weight * hpm_balance_loss
+                losses['hpm_balance_loss'] = weighted_hpm_loss.item() if torch.is_tensor(weighted_hpm_loss) else weighted_hpm_loss
+                losses['total_loss'] = losses['total_loss'] + weighted_hpm_loss
             
             loss = losses['total_loss'] / grad_accumulation_steps
             
@@ -1353,6 +1375,10 @@ def train_epoch(
                 # Reset consecutive NaN counter on successful step
                 consecutive_nan = 0
                 
+                # HPM gradient routing: zero gradients for frozen primitives
+                if hasattr(model, 'hpm_on_backward'):
+                    model.hpm_on_backward()
+                
                 optimizer.step()
                 optimizer.zero_grad()
                 
@@ -1363,7 +1389,8 @@ def train_epoch(
         # Accumulate losses
         for key in total_losses:
             if key in losses:
-                total_losses[key] += losses[key].item()
+                val = losses[key]
+                total_losses[key] += val.item() if torch.is_tensor(val) else val
         num_batches += 1
         global_step += 1
         
@@ -2981,6 +3008,10 @@ Config Overrides:
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
         
+        # HPM epoch start callback: reset routing statistics for load balancing
+        if hasattr(model, 'hpm_on_epoch_start'):
+            model.hpm_on_epoch_start()
+        
         print(f"\nEpoch {epoch + 1}/{max_epochs}")
         print("-" * 40)
         
@@ -3045,6 +3076,20 @@ Config Overrides:
         if train_cfg.get('lambda_act', 0) > 0 and config['model'].get('use_act', False):
             act_loss_val = train_losses.get('act_loss', 0)
             print(f"  ACT Loss: {act_loss_val:.4f} (weight={train_cfg['lambda_act']})")
+        
+        # HPM (Hierarchical Primitive Memory) stats
+        if config['model'].get('use_hpm', False) and hasattr(model, 'hpm_get_stats'):
+            hpm_stats = model.hpm_get_stats()
+            if hpm_stats:
+                hpm_balance_loss = train_losses.get('hpm_balance_loss', 0)
+                gate_value = hpm_stats.get('gate_value', 0)
+                print(f"  HPM Balance Loss: {hpm_balance_loss:.4f} (weight={config['model'].get('hpm_balance_weight', 0.01)})")
+                print(f"  HPM Gate Value: {gate_value:.4f} (0=no contribution, 1=full)")
+                # Show buffer sizes if dynamic banks enabled
+                if 'instance_buffer_size' in hpm_stats:
+                    print(f"  HPM Instance Buffer: {hpm_stats['instance_buffer_size']} entries")
+                if 'procedural_buffer_size' in hpm_stats:
+                    print(f"  HPM Procedural Buffer: {hpm_stats['procedural_buffer_size']} entries")
         
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
         

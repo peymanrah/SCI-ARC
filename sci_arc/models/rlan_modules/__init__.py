@@ -48,6 +48,17 @@ from .loo_training import (
     create_augmented_contexts,
     AugmentedConfidenceWeighting,
 )
+from .hpm import (
+    MemoryBankType,
+    MemoryBank,
+    MemoryRouter,
+    CrossBankAggregator,
+    HierarchicalPrimitiveMemory,
+    HPMConfig,
+    STATIC_BANK_TYPES,
+    DYNAMIC_BANK_TYPES,
+)
+from .dynamic_buffer import DynamicMemoryBuffer
 
 __all__ = [
     # Core modules
@@ -89,5 +100,15 @@ __all__ = [
     "CombinedMetaLoss",
     "create_augmented_contexts",
     "AugmentedConfidenceWeighting",
+    # HPM (Hierarchical Primitive Memory v2)
+    "MemoryBankType",
+    "MemoryBank",
+    "MemoryRouter",
+    "CrossBankAggregator",
+    "HierarchicalPrimitiveMemory",
+    "HPMConfig",
+    "STATIC_BANK_TYPES",
+    "DYNAMIC_BANK_TYPES",
+    "DynamicMemoryBuffer",
 ]
 
