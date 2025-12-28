@@ -74,6 +74,10 @@ class LOOTrainingLoss(nn.Module):
         output_grids: torch.Tensor = None,  # (B, N, H, W) - support targets
         pair_mask: torch.Tensor = None,  # (B, N) - which pairs are valid
         temperature: float = 1.0,
+        # Iterative backward parameters (v3 memory fix)
+        scaler: Any = None,  # GradScaler for AMP - if provided, backward happens inside
+        loss_weight: float = 1.0,  # Weight to apply before backward
+        grad_accumulation_steps: int = 1,  # Divide loss by this for accumulation
         # Legacy parameters for backward compatibility
         hyper_lora: nn.Module = None,
         rlan: nn.Module = None,
@@ -89,8 +93,14 @@ class LOOTrainingLoss(nn.Module):
         1. Model-based (preferred): model=, input_grids=, output_grids=, pair_mask=
         2. Component-based (legacy): hyper_lora=, rlan=, support_inputs=, etc.
         
+        MEMORY OPTIMIZATION (v3 - Iterative Backward):
+        If scaler= is provided, backward() is called INSIDE the loop after each
+        holdout, and the computation graph is freed immediately. This prevents
+        O(N) memory accumulation.
+        
         Returns:
-            Dict with 'loo_loss' (tensor), 'loo_accuracy', 'loo_num_holdouts', etc.
+            Dict with 'loo_loss' (tensor or float), 'loo_accuracy', 'loo_num_holdouts', etc.
+            If scaler is provided, 'loo_loss' is a float (backward already done).
         """
         # Mode 1: Full model interface (used by train_rlan.py)
         if model is not None and input_grids is not None:
@@ -100,6 +110,9 @@ class LOOTrainingLoss(nn.Module):
                 output_grids=output_grids,
                 pair_mask=pair_mask,
                 temperature=temperature,
+                scaler=scaler,
+                loss_weight=loss_weight,
+                grad_accumulation_steps=grad_accumulation_steps,
             )
         
         # Mode 2: Component-based interface (legacy)
@@ -129,21 +142,28 @@ class LOOTrainingLoss(nn.Module):
         output_grids: torch.Tensor,  # (B, N, H, W)
         pair_mask: torch.Tensor = None,
         temperature: float = 1.0,
+        scaler: Any = None,  # GradScaler for iterative backward
+        loss_weight: float = 1.0,
+        grad_accumulation_steps: int = 1,
     ) -> Dict[str, Any]:
         """
         Compute LOO loss using full RLAN model.
         
-        MEMORY-EFFICIENT IMPLEMENTATION (Dec 2025 v2):
+        MEMORY-EFFICIENT IMPLEMENTATION (Dec 2025 v3 - Iterative Backward):
         - Encodes support features ONCE and detaches
         - Processes ONE holdout at a time with gradient
-        - Frees memory between holdouts via explicit cleanup
-        - Returns accumulated loss for single backward pass
+        - If scaler provided: backward() immediately, free graph, O(1) memory
+        - If no scaler: accumulate losses, return tensor (legacy mode, O(N) memory)
         
-        This prevents the O(N) memory explosion that caused 83GB allocation
-        on a 24GB GPU when N=5 pairs.
+        The iterative backward approach is CRITICAL for fitting LOO training
+        on a 24GB GPU. Without it, memory usage is O(N) where N is number of
+        training pairs, causing 50+GB allocation.
         """
         device = input_grids.device
         B, N, H, W = input_grids.shape
+        
+        # Use iterative backward if scaler is provided
+        use_iterative_backward = scaler is not None
         
         # Check if model has HyperLoRA
         if not hasattr(model, 'hyper_lora') or model.hyper_lora is None:
@@ -204,11 +224,12 @@ class LOOTrainingLoss(nn.Module):
         total_correct = 0
         total_pixels = 0
         num_holdouts = 0
+        total_loss_value = 0.0  # Track loss value for logging
         
-        # MEMORY FIX: Process ONE holdout at a time, accumulate gradients
-        # Instead of summing losses (which keeps all N graphs in memory),
-        # we process one holdout, compute loss, and let the caller accumulate
-        holdout_losses = []
+        # MEMORY FIX v3: Iterative backward OR legacy accumulation
+        # If scaler provided: backward immediately, free graph (O(1) memory)
+        # If no scaler: accumulate losses in list (O(N) memory, legacy mode)
+        holdout_losses = [] if not use_iterative_backward else None
         
         for holdout_idx in range(N):
             # Create mask for valid holdouts
@@ -244,7 +265,6 @@ class LOOTrainingLoss(nn.Module):
             target_for_loss[holdout_target == 10] = -100  # Ignore padding pixels (PAD_COLOR)
             
             ce_loss = F.cross_entropy(logits, target_for_loss, ignore_index=-100, reduction='mean')
-            holdout_losses.append(ce_loss)
             
             # Track accuracy (no gradients needed)
             with torch.no_grad():
@@ -259,6 +279,23 @@ class LOOTrainingLoss(nn.Module):
             
             num_holdouts += 1
             
+            # MEMORY FIX v3: Iterative backward - call backward IMMEDIATELY
+            if use_iterative_backward:
+                # Scale loss: weight * (loss / N) / grad_accumulation
+                # We divide by N here because we're averaging over holdouts
+                scaled_loss = (loss_weight * ce_loss / N) / grad_accumulation_steps
+                total_loss_value += ce_loss.item()
+                
+                # Backward immediately - this frees the computation graph!
+                scaler.scale(scaled_loss).backward()
+                
+                # Now we can safely delete everything - graph is freed
+                del scaled_loss, ce_loss
+            else:
+                # Legacy mode: accumulate for later backward
+                holdout_losses.append(ce_loss)
+                total_loss_value += ce_loss.item()
+            
             # MEMORY FIX: Clear intermediate tensors after each holdout
             del logits, lora_deltas, remaining_features, holdout_input, holdout_target
             del target_for_loss, preds, sample_mask, pixel_mask, combined_mask
@@ -266,24 +303,37 @@ class LOOTrainingLoss(nn.Module):
         # Clean up support features
         del all_support_features
         
-        # Average losses (all holdouts contribute equally)
-        if num_holdouts > 0:
-            # Stack losses and take mean - this keeps computation graph minimal
-            avg_loss = torch.stack(holdout_losses).mean()
-            accuracy = total_correct / (total_pixels + 1e-8)
+        # Compute final loss and accuracy
+        accuracy = total_correct / (total_pixels + 1e-8) if total_pixels > 0 else 0.0
+        
+        if use_iterative_backward:
+            # Iterative backward mode: backward already done, return float
+            avg_loss_value = total_loss_value / num_holdouts if num_holdouts > 0 else 0.0
+            
+            return {
+                'loo_loss': avg_loss_value,  # Float, not tensor (backward already done)
+                'loo_accuracy': accuracy,
+                'loo_num_holdouts': num_holdouts,
+                'loo_skipped': False,
+                'loo_iterative_backward': True,  # Signal that backward was done inside
+            }
         else:
-            avg_loss = torch.tensor(0.0, device=device)
-            accuracy = 0.0
-        
-        # Clear holdout losses list
-        del holdout_losses
-        
-        return {
-            'loo_loss': avg_loss,
-            'loo_accuracy': accuracy,
-            'loo_num_holdouts': num_holdouts,
-            'loo_skipped': False,
-        }
+            # Legacy mode: return tensor for external backward
+            if num_holdouts > 0:
+                avg_loss = torch.stack(holdout_losses).mean()
+            else:
+                avg_loss = torch.tensor(0.0, device=device)
+            
+            # Clear holdout losses list
+            del holdout_losses
+            
+            return {
+                'loo_loss': avg_loss,  # Tensor for external backward
+                'loo_accuracy': accuracy,
+                'loo_num_holdouts': num_holdouts,
+                'loo_skipped': False,
+                'loo_iterative_backward': False,
+            }
     
     def _forward_with_components(
         self,
@@ -489,23 +539,37 @@ class AugmentationEquivarianceLoss(nn.Module):
         hyper_lora: nn.Module,
         original_context: torch.Tensor,  # (B, D)
         augmented_contexts: Dict[str, torch.Tensor],  # aug_name -> (B, D)
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        scaler: Any = None,  # GradScaler for iterative backward
+        loss_weight: float = 1.0,
+        grad_accumulation_steps: int = 1,
+    ) -> Tuple[Any, Dict[str, Any]]:
         """
         Compute augmentation equivariance loss.
+        
+        MEMORY OPTIMIZATION (v3 - Iterative Backward):
+        If scaler= is provided, backward() is called INSIDE the loop after each
+        augmentation, and the computation graph is freed immediately.
         
         Args:
             hyper_lora: HyperLoRA module for weight prediction
             original_context: Context vector from original task
             augmented_contexts: Context vectors from augmented tasks
+            scaler: GradScaler for AMP - if provided, backward happens inside
+            loss_weight: Weight to apply before backward
+            grad_accumulation_steps: Divide loss by this for accumulation
             
         Returns:
             Tuple of (loss, metrics_dict)
+            If scaler is provided, loss is a float (backward already done).
         """
         if not self.config.enabled or len(augmented_contexts) == 0:
             return torch.tensor(0.0, device=original_context.device), {
                 'equivariance_loss': 0.0,
                 'equivariance_skipped': True,
             }
+        
+        use_iterative_backward = scaler is not None
+        num_augs = len(augmented_contexts)
         
         # MEMORY FIX: Compute original deltas and DETACH for comparison
         # Only the augmented context computation needs gradients
@@ -514,9 +578,10 @@ class AugmentationEquivarianceLoss(nn.Module):
             # Detach all original deltas - we just need their values for comparison
             original_deltas = {k: v.detach() for k, v in original_deltas.items()}
         
-        # MEMORY FIX: Process one augmentation at a time, accumulate scalar losses
-        aug_losses = []
+        # MEMORY FIX v3: Iterative backward OR legacy accumulation
+        aug_losses = [] if not use_iterative_backward else None
         per_aug_loss = {}
+        total_loss_value = 0.0
         
         for aug_name, aug_context in augmented_contexts.items():
             # Get augmented LoRA predictions (this is where gradients flow)
@@ -559,28 +624,59 @@ class AugmentationEquivarianceLoss(nn.Module):
                 del orig_unit, aug_unit, cosine_sim, norm_diff, direction_loss
             
             per_aug_loss[aug_name] = aug_loss.item()
-            aug_losses.append(aug_loss)
+            total_loss_value += aug_loss.item()
+            
+            # MEMORY FIX v3: Iterative backward - call backward IMMEDIATELY
+            if use_iterative_backward:
+                # Scale loss: weight * (loss / num_augs) / grad_accumulation
+                scaled_loss = (loss_weight * aug_loss / num_augs) / grad_accumulation_steps
+                
+                # Backward immediately - this frees the computation graph!
+                scaler.scale(scaled_loss).backward()
+                
+                # Now we can safely delete - graph is freed
+                del scaled_loss, aug_loss
+            else:
+                # Legacy mode: accumulate for later backward
+                aug_losses.append(aug_loss)
             
             # MEMORY FIX: Clear augmented deltas after each aug
             del aug_deltas
         
-        # MEMORY FIX: Use stack+mean instead of accumulation
-        if aug_losses:
-            avg_loss = torch.stack(aug_losses).mean()
-        else:
-            avg_loss = torch.tensor(0.0, device=original_context.device)
-        
         # Clean up
-        del aug_losses, original_deltas
+        del original_deltas
         
-        metrics = {
-            'equivariance_loss': avg_loss.item(),
-            'equivariance_per_aug': per_aug_loss,
-            'equivariance_num_augs': len(per_aug_loss),
-            'equivariance_skipped': False,
-        }
-        
-        return avg_loss, metrics
+        if use_iterative_backward:
+            # Iterative backward mode: return float
+            avg_loss_value = total_loss_value / num_augs if num_augs > 0 else 0.0
+            
+            metrics = {
+                'equivariance_loss': avg_loss_value,
+                'equivariance_per_aug': per_aug_loss,
+                'equivariance_num_augs': len(per_aug_loss),
+                'equivariance_skipped': False,
+                'equivariance_iterative_backward': True,
+            }
+            
+            return avg_loss_value, metrics  # Float, not tensor
+        else:
+            # Legacy mode: return tensor
+            if aug_losses:
+                avg_loss = torch.stack(aug_losses).mean()
+            else:
+                avg_loss = torch.tensor(0.0, device=original_context.device)
+            
+            del aug_losses
+            
+            metrics = {
+                'equivariance_loss': avg_loss.item(),
+                'equivariance_per_aug': per_aug_loss,
+                'equivariance_num_augs': len(per_aug_loss),
+                'equivariance_skipped': False,
+                'equivariance_iterative_backward': False,
+            }
+            
+            return avg_loss, metrics  # Tensor for external backward
 
 
 class CombinedMetaLoss(nn.Module):

@@ -1040,7 +1040,9 @@ def train_epoch(
                 )
                 
                 # Compute LOO loss if enabled (meta-learning via HyperLoRA)
-                loo_loss = torch.tensor(0.0, device=device)
+                # MEMORY FIX v3: Use iterative backward - backward happens INSIDE the function
+                # This prevents O(N) memory accumulation from holding all N computation graphs
+                loo_loss_value = 0.0  # Float for logging (backward done inside)
                 loo_metrics = None
                 if loo_loss_fn is not None and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
                     # LOO requires at least min_pairs training pairs
@@ -1052,13 +1054,20 @@ def train_epoch(
                             output_grids=train_outputs,
                             pair_mask=pair_mask,
                             temperature=temperature,
+                            # v3: Iterative backward - pass scaler so backward happens inside
+                            scaler=scaler,
+                            loss_weight=loo_loss_fn.config.loss_weight,
+                            grad_accumulation_steps=grad_accumulation_steps,
                         )
-                        loo_loss = loo_result['loo_loss'] * loo_loss_fn.config.loss_weight
-                        loo_metrics = loo_result  # Store full metrics for logging
-                        losses['loo_loss'] = loo_loss
-                        losses['total_loss'] = losses['total_loss'] + loo_loss
+                        # loo_loss is now a float (backward already done inside)
+                        loo_loss_value = loo_result['loo_loss']
+                        if isinstance(loo_loss_value, torch.Tensor):
+                            loo_loss_value = loo_loss_value.item()
+                        loo_metrics = loo_result
+                        losses['loo_loss'] = loo_loss_value  # Store for logging
+                        # Note: Don't add to total_loss - backward already done inside
                         # Track meta-learning health metrics
-                        epoch_diagnostics['loo_loss_sum'] += loo_loss.item()
+                        epoch_diagnostics['loo_loss_sum'] += loo_loss_value
                         epoch_diagnostics['loo_accuracy_sum'] += loo_result.get('loo_accuracy', 0.0)
                         epoch_diagnostics['loo_num_holdouts_sum'] += loo_result.get('loo_num_holdouts', 0)
                         epoch_diagnostics['loo_batch_count'] += 1
@@ -1066,8 +1075,8 @@ def train_epoch(
                         epoch_diagnostics['loo_skipped_count'] += 1
                 
                 # Compute Augmentation Equivariance loss if enabled (meta-learning)
-                # This encourages HyperLoRA to predict consistent weights for rotated/flipped tasks
-                equiv_loss = torch.tensor(0.0, device=device)
+                # MEMORY FIX v3: Use iterative backward - backward happens INSIDE the function
+                equiv_loss_value = 0.0  # Float for logging
                 if equiv_loss_fn is not None and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
                     support_features = outputs.get('support_features')  # (B, N, D, H, W)
                     lora_deltas = outputs.get('lora_deltas')  # Dict with original deltas
@@ -1099,20 +1108,29 @@ def train_epoch(
                                 del aug_features
                             
                             if augmented_contexts:
-                                equiv_loss, equiv_metrics = equiv_loss_fn(
+                                equiv_result, equiv_metrics = equiv_loss_fn(
                                     hyper_lora=model.hyper_lora,
                                     original_context=original_context,
                                     augmented_contexts=augmented_contexts,
+                                    # v3: Iterative backward
+                                    scaler=scaler,
+                                    loss_weight=equiv_loss_fn.config.loss_weight,
+                                    grad_accumulation_steps=grad_accumulation_steps,
                                 )
-                                losses['equiv_loss'] = equiv_loss
-                                losses['total_loss'] = losses['total_loss'] + equiv_loss
-                                epoch_diagnostics['equiv_loss_sum'] = epoch_diagnostics.get('equiv_loss_sum', 0.0) + equiv_loss.item()
+                                # equiv_result is now a float (backward already done inside)
+                                equiv_loss_value = equiv_result
+                                if isinstance(equiv_loss_value, torch.Tensor):
+                                    equiv_loss_value = equiv_loss_value.item()
+                                losses['equiv_loss'] = equiv_loss_value  # Store for logging
+                                # Note: Don't add to total_loss - backward already done inside
+                                epoch_diagnostics['equiv_loss_sum'] = epoch_diagnostics.get('equiv_loss_sum', 0.0) + equiv_loss_value
                                 epoch_diagnostics['equiv_batch_count'] = epoch_diagnostics.get('equiv_batch_count', 0) + 1
                             
                             # MEMORY FIX: Clean up augmented contexts after use
                             del augmented_contexts
                 
                 # Scale loss for gradient accumulation
+                # Note: LOO and Equiv losses already have their backward done inside
                 loss = losses['total_loss'] / grad_accumulation_steps
             
             # NaN detection: skip batch if loss is NaN
