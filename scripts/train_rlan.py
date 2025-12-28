@@ -2877,7 +2877,6 @@ Config Overrides:
             config=LOOConfig(
                 loss_weight=loo_weight,
                 min_pairs_for_loo=loo_min_pairs,
-                use_gradient_checkpointing=False,
             )
         )
         print(f"LOO training enabled: weight={loo_weight}, min_pairs={loo_min_pairs}")
