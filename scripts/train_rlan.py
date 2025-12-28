@@ -431,7 +431,11 @@ def override_config(config: dict, overrides: list) -> dict:
 
 
 def get_temperature(epoch: int, config: dict) -> float:
-    """Get temperature for Gumbel-softmax based on epoch."""
+    """Get temperature for DSC attention softmax based on epoch.
+    
+    Note: Gumbel noise was removed in Dec 2025. Temperature now controls
+    sharpness of standard softmax attention in the DSC module.
+    """
     tau_start = config['training']['temperature_start']
     tau_end = config['training']['temperature_end']
     max_epochs = config['training']['max_epochs']
@@ -1086,6 +1090,12 @@ def train_epoch(
                         original_context = lora_deltas.get('context')  # (B, D)
                         
                         if original_context is not None:
+                            # CRITICAL: Detach to create independent computation graph
+                            # This prevents "backward through graph second time" error
+                            # The equivariance loss should NOT backprop through the main forward pass
+                            original_context = original_context.detach()
+                            support_features_detached = support_features.detach()
+                            
                             # MEMORY FIX: Generate augmented contexts with memory cleanup
                             # Process one augmentation at a time to avoid memory accumulation
                             augmented_contexts = {}
@@ -1097,7 +1107,7 @@ def train_epoch(
                                 # Apply augmentation to support_features spatial dimensions
                                 # support_features shape: (B, N, D, H, W)
                                 aug_features = equiv_loss_fn.apply_augmentation(
-                                    support_features.permute(0, 1, 3, 4, 2),  # (B, N, H, W, D) for spatial aug
+                                    support_features_detached.permute(0, 1, 3, 4, 2),  # (B, N, H, W, D) for spatial aug
                                     aug_type
                                 ).permute(0, 1, 4, 2, 3)  # Back to (B, N, D, H, W)
                                 
@@ -1127,7 +1137,7 @@ def train_epoch(
                                 epoch_diagnostics['equiv_batch_count'] = epoch_diagnostics.get('equiv_batch_count', 0) + 1
                             
                             # MEMORY FIX: Clean up augmented contexts after use
-                            del augmented_contexts
+                            del augmented_contexts, support_features_detached
                 
                 # Scale loss for gradient accumulation
                 # Note: LOO and Equiv losses already have their backward done inside
@@ -2704,8 +2714,10 @@ Config Overrides:
     if not active_aux:
         print(f"  (none - pure task loss only)")
     
-    print(f"\nTemperature Schedule (Gumbel-Softmax):")
+    # Note: Gumbel noise was REMOVED in Dec 2025 fix - now pure softmax with temperature
+    print(f"\nTemperature Schedule (DSC Attention):")
     print(f"  Start: {train_cfg['temperature_start']}, End: {train_cfg['temperature_end']}")
+    print(f"  Note: Pure softmax (no Gumbel noise) - identical train/eval behavior")
     print(f"{'='*60}")
     
     # Create loss function
