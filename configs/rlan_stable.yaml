@@ -267,12 +267,28 @@ training:
   # 2. No SolverCrossAttention forward pass noise in early epochs
   # 3. Simpler architecture = cleaner gradients
   #
-  # Now that we've fixed staged activation of these modules, we can use
-  # the same batch size as the old stable config.
+  # =====================================================================
+  # MEMORY PLANNING FOR STAGED ACTIVATION
+  # =====================================================================
+  # At epoch 3 (meta_learning_start_epoch), additional modules activate:
+  #
+  # EPOCHS 0-2 (Staged - minimal memory):
+  #   - FiLM context injection: ~1MB (just γ*features+β)
+  #   - Solver without cross-attention: baseline
+  #   - HyperLoRA deltas = 0 (module exists but doesn't contribute)
+  #
+  # EPOCH 3+ (Active - additional memory per batch):
+  #   - CrossAttentionInjector: +17MB (Q/K/V attention over spatial context)
+  #   - SolverCrossAttention: +100MB (6 steps × 17MB per step)
+  #   - HyperLoRA deltas: +5MB (small delta matrices)
+  #   - TOTAL INCREASE: ~120MB per forward pass
+  #
+  # With batch_size=70, we stay safely under 24GB GPU memory.
+  # DO NOT increase batch_size above 70 without testing memory at epoch 3+.
   #
   gradient_checkpointing: false  # DISABLED: Has bugs with Dict/None args
-  batch_size: 75    # Match old stable config (2a50f2d) 
-  grad_accumulation_steps: 4  # effective_batch_size = 75 × 4 = 300
+  batch_size: 70    # Safe for both staged (epochs 0-2) and active (epochs 3+) phases
+  grad_accumulation_steps: 4  # effective_batch_size = 70 × 4 = 280
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -480,6 +496,9 @@ data:
   cache_samples: true
   num_cached_samples: 400000  # 500 per task (TRM uses 1000x)
   cache_path: "./cache/rlan_stable_400k_v3.pkl"  # v3: TRM-style aug order (color→dihedral)
+  cache_load_percent: 4    # ~2GB (4% of 50GB) for quick testing
+                           # Use 10-20 for quick testing (~20s load instead of 3min)
+                           # Set to 100 for full training runs
   
   augmentation:
     enabled: true

@@ -292,6 +292,7 @@ def create_train_loader(
     cache_samples = data_cfg.get('cache_samples', False)
     num_cached_samples = data_cfg.get('num_cached_samples', 32000)
     cache_path = data_cfg.get('cache_path', None)
+    cache_load_percent = data_cfg.get('cache_load_percent', 100.0)  # Percentage of cache to load
     
     if cache_samples:
         print(f"\n{'='*60}")
@@ -301,6 +302,8 @@ def create_train_loader(
         print(f"  This allows model to learn from repeated exposure")
         print(f"  (Required for hard tasks needing >100 epochs)")
         print(f"  num_cached_samples: {num_cached_samples}")
+        if cache_load_percent < 100:
+            print(f"  cache_load_percent: {cache_load_percent}% (PARTIAL LOAD for quick testing)")
         if cache_path:
             print(f"  cache_path: {cache_path}")
         print(f"{'='*60}\n")
@@ -321,6 +324,7 @@ def create_train_loader(
         cache_samples=cache_samples,  # Enable caching for memorization
         num_cached_samples=num_cached_samples,  # Number of cached samples
         cache_path=cache_path,  # Optional path to save/load cache
+        cache_load_percent=cache_load_percent,  # Percentage of cache to load (for quick testing)
         max_tasks=max_tasks,  # Limit tasks for testing
     )
     
@@ -1396,6 +1400,24 @@ def train_epoch(
                 total_losses[key] += val.item() if torch.is_tensor(val) else val
         num_batches += 1
         global_step += 1
+        
+        # MEMORY MONITOR: Log memory for first 3 batches when new modules become active
+        # This detects if staged module activation causes memory overflow to shared memory
+        if batch_idx < 3 and device.type == 'cuda':
+            modules_active = getattr(model, 'hyperlora_active', False) or \
+                            getattr(model, 'solver_context_active', False) or \
+                            getattr(model, 'cross_attention_active', False)
+            if modules_active:
+                torch.cuda.synchronize()
+                allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+                reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
+                max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+                headroom_mb = max_mb - reserved_mb
+                if batch_idx == 0:
+                    print(f"\n  [MEMORY] First forward pass with staged modules active:")
+                print(f"  [MEMORY] Batch {batch_idx}: alloc={allocated_mb:.0f}MB, reserved={reserved_mb:.0f}MB, headroom={headroom_mb:.0f}MB")
+                if reserved_mb > max_mb * 0.95:
+                    print(f"  [WARNING] >95% GPU memory used! Training may slow due to shared memory.")
         
         # Periodic cache clearing (every 10 batches)
         if batch_idx % 10 == 0:
@@ -3212,6 +3234,21 @@ Config Overrides:
             if use_cross_attention_context:
                 model.cross_attention_active = True
                 print(f"  CrossAttentionInjector: NOW ACTIVE (was using FiLM fallback)")
+            
+            # Log GPU memory at transition (detect if we'll spill to shared memory)
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+                reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
+                max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+                print(f"\n  GPU MEMORY AT TRANSITION:")
+                print(f"    Allocated: {allocated_mb:.0f} MB")
+                print(f"    Reserved:  {reserved_mb:.0f} MB") 
+                print(f"    Total:     {max_mb:.0f} MB")
+                print(f"    Headroom:  {max_mb - reserved_mb:.0f} MB")
+                if reserved_mb > max_mb * 0.9:
+                    print(f"    WARNING: >90% memory used! Risk of shared memory slowdown.")
+                    print(f"    Consider reducing batch_size if training slows after this epoch.")
             
             print(f"{'='*60}\n")
         

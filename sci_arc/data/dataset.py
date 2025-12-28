@@ -95,6 +95,7 @@ class ARCDataset(Dataset):
         cache_samples: bool = False,  # NEW: Cache pre-generated samples for memorization
         num_cached_samples: int = 32000,  # NEW: Number of cached samples to generate
         cache_path: str = None,  # NEW: Path to load/save cached samples
+        cache_load_percent: float = 100.0,  # NEW: Percentage of cache to load (1-100)
         max_tasks: int = None,  # NEW: Limit number of tasks loaded (for testing)
     ):
         """
@@ -119,6 +120,9 @@ class ARCDataset(Dataset):
             num_cached_samples: Number of samples to pre-generate (default: 32000)
                                With 400 tasks, this is 80 augmented versions per task
             cache_path: Path to save/load cached samples (for persistence across runs)
+            cache_load_percent: Percentage of cache to load (1-100, default: 100)
+                               Use 10-20% for quick testing without loading full cache
+                               E.g., 10% of 50GB = 5GB, loads in ~20s instead of 3min
         """
         self.data_path = Path(data_path)
         self.max_size = max_size
@@ -132,6 +136,7 @@ class ARCDataset(Dataset):
         self.cache_samples = cache_samples
         self.num_cached_samples = num_cached_samples
         self.cache_path = Path(cache_path) if cache_path else None
+        self.cache_load_percent = min(100.0, max(1.0, cache_load_percent))  # Clamp to 1-100%
         self.max_tasks = max_tasks
         
         # Cached sample storage
@@ -205,17 +210,40 @@ class ARCDataset(Dataset):
         epoch, which is CRITICAL for learning hard tasks that need >100 epochs.
         
         The cache can optionally be saved to disk for persistence.
+        
+        PARTIAL LOADING (cache_load_percent < 100):
+        - Only loads first N% of cached samples from disk
+        - Useful for quick testing without waiting for full 50GB cache load
+        - E.g., cache_load_percent=10 loads ~5GB in 20s instead of 50GB in 3min
         """
         import time
         
         # Try to load from disk first
         if self.cache_path and self.cache_path.exists():
-            print(f"Loading cached samples from {self.cache_path}...")
+            load_percent = self.cache_load_percent
+            if load_percent < 100:
+                print(f"Loading {load_percent:.0f}% of cached samples from {self.cache_path}...")
+            else:
+                print(f"Loading cached samples from {self.cache_path}...")
+            
             try:
                 import pickle
+                start_time = time.time()
                 with open(self.cache_path, 'rb') as f:
-                    self._cached_samples = pickle.load(f)
-                print(f"Loaded {len(self._cached_samples)} cached samples from disk")
+                    all_samples = pickle.load(f)
+                
+                # Apply percentage limit
+                if load_percent < 100:
+                    num_to_load = max(1, int(len(all_samples) * load_percent / 100))
+                    self._cached_samples = all_samples[:num_to_load]
+                    # Free memory from unused samples
+                    del all_samples
+                    elapsed = time.time() - start_time
+                    print(f"Loaded {len(self._cached_samples):,} samples ({load_percent:.0f}% of cache) in {elapsed:.1f}s")
+                else:
+                    self._cached_samples = all_samples
+                    elapsed = time.time() - start_time
+                    print(f"Loaded {len(self._cached_samples):,} cached samples in {elapsed:.1f}s")
                 return
             except Exception as e:
                 print(f"Warning: Failed to load cache: {e}")
