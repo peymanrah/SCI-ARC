@@ -1394,14 +1394,6 @@ def train_epoch(
         num_batches += 1
         global_step += 1
         
-        # MEMORY FIX: Explicitly clear intermediate tensors
-        # This is critical for LOO/Equivariance training which creates large graphs
-        del outputs, losses
-        if 'loo_result' in locals(): del loo_result
-        if 'loo_loss' in locals(): del loo_loss
-        if 'equiv_loss' in locals(): del equiv_loss
-        if 'loss' in locals(): del loss
-        
         # Periodic cache clearing (every 10 batches)
         if batch_idx % 10 == 0:
             torch.cuda.empty_cache()
@@ -1892,6 +1884,15 @@ def train_epoch(
                     else:
                         status = f"⚠ best={best_step_idx}"
                     print(f"    Solver: [{loss_str}] {status}")
+        
+        # MEMORY FIX: Explicitly clear intermediate tensors at END of loop iteration
+        # This is critical for LOO/Equivariance training which creates large graphs
+        # Must be after all diagnostics and logging that use outputs/losses
+        del outputs, losses
+        if 'loo_result' in locals(): del loo_result
+        if 'loo_loss' in locals(): del loo_loss
+        if 'equiv_loss' in locals(): del equiv_loss
+        if 'loss' in locals(): del loss
     
     # Average losses
     for key in total_losses:
