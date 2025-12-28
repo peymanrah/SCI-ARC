@@ -127,6 +127,23 @@ class LossLogger:
         'cisl_consist', 'cisl_content_inv', 'cisl_variance',
         # HyperLoRA-specific losses
         'loo', 'equivariance', 'hyperlora_total',
+        # META-LEARNING HEALTH METRICS (Dec 2025)
+        'loo_accuracy',              # LOO prediction accuracy (should be >0.5)
+        'loo_skipped_ratio',         # Ratio of batches with LOO skipped (want low)
+        'lora_magnitude_gru_reset',  # LoRA weight magnitude (want non-zero)
+        'lora_magnitude_gru_update', # LoRA weight magnitude
+        'lora_magnitude_gru_candidate',  # LoRA weight magnitude
+        'lora_magnitude_output_head',    # LoRA weight magnitude
+        'lora_diversity',            # Weight diversity across batch (want high)
+        'equiv_delta_norm',          # Equivariance delta norm (want low)
+        # LCR (Latent Counting Registers) health metrics
+        'lcr_magnitude',             # Count embedding magnitude (want non-zero)
+        'lcr_std',                   # Count embedding std (want variation)
+        'lcr_color_diversity',       # Diversity across colors (want differentiation)
+        # SPH (Symbolic Predicate Heads) health metrics
+        'sph_mean',                  # Predicate mean (want ~0.5 for balanced)
+        'sph_std',                   # Predicate std (want variation)
+        'sph_activation_ratio',      # Ratio of active predicates (want 0.2-0.8)
         # Gradient health metrics
         'grad_norm', 'grad_max', 'grad_min', 'grad_has_nan', 'grad_has_inf',
         # Logit health metrics  
@@ -372,6 +389,118 @@ class LossLogger:
         
         if not warnings:
             print("[OK] No collapse or stability issues detected")
+        
+        # === META-LEARNING HEALTH CHECK ===
+        print(f"\n--- Meta-Learning Health ---")
+        meta_warnings = []
+        
+        # LOO Training Health
+        loo_acc_vals = self.epoch_losses.get('loo_accuracy', [])
+        loo_skip_vals = self.epoch_losses.get('loo_skipped_ratio', [])
+        if loo_acc_vals:
+            mean_loo_acc = sum(loo_acc_vals) / len(loo_acc_vals)
+            summary['loo_accuracy_mean'] = mean_loo_acc
+            if mean_loo_acc < 0.3:
+                meta_warnings.append(f"  [!] LOO accuracy very low ({mean_loo_acc:.1%}) - HyperLoRA not learning")
+                print(f"  [!] LOO accuracy: {mean_loo_acc:.1%} (CRITICAL: < 30%)")
+            elif mean_loo_acc < 0.5:
+                meta_warnings.append(f"  [!] LOO accuracy below random ({mean_loo_acc:.1%})")
+                print(f"  [!] LOO accuracy: {mean_loo_acc:.1%} (WARNING: < 50%)")
+            else:
+                print(f"  [OK] LOO accuracy: {mean_loo_acc:.1%}")
+        
+        if loo_skip_vals:
+            mean_skip = sum(loo_skip_vals) / len(loo_skip_vals)
+            summary['loo_skipped_ratio_mean'] = mean_skip
+            if mean_skip > 0.5:
+                meta_warnings.append(f"  [!] LOO skipped too often ({mean_skip:.1%})")
+                print(f"  [!] LOO skipped ratio: {mean_skip:.1%} (WARNING: > 50%)")
+            else:
+                print(f"  [OK] LOO skipped ratio: {mean_skip:.1%}")
+        
+        # LoRA Magnitude Health (want non-zero, not too large)
+        lora_keys = ['lora_magnitude_gru_reset', 'lora_magnitude_gru_update', 
+                     'lora_magnitude_gru_candidate', 'lora_magnitude_output_head']
+        for lora_key in lora_keys:
+            lora_vals = self.epoch_losses.get(lora_key, [])
+            if lora_vals:
+                mean_mag = sum(lora_vals) / len(lora_vals)
+                summary[f'{lora_key}_mean'] = mean_mag
+                if mean_mag < 1e-6:
+                    meta_warnings.append(f"  [!] {lora_key} collapsed to ~0")
+                    print(f"  [!] {lora_key}: {mean_mag:.6f} (COLLAPSED)")
+                elif mean_mag > 100:
+                    meta_warnings.append(f"  [!] {lora_key} exploding ({mean_mag:.1f})")
+                    print(f"  [!] {lora_key}: {mean_mag:.2f} (EXPLODING)")
+                else:
+                    print(f"  [OK] {lora_key}: {mean_mag:.4f}")
+        
+        # LoRA Diversity (want > 0 for meta-learning)
+        diversity_vals = self.epoch_losses.get('lora_diversity', [])
+        if diversity_vals:
+            mean_div = sum(diversity_vals) / len(diversity_vals)
+            summary['lora_diversity_mean'] = mean_div
+            if mean_div < 1e-6:
+                meta_warnings.append("  [!] LoRA diversity collapsed - all tasks getting same weights")
+                print(f"  [!] LoRA diversity: {mean_div:.6f} (NO META-LEARNING)")
+            else:
+                print(f"  [OK] LoRA diversity: {mean_div:.4f}")
+        
+        # Equivariance Health (want low delta norm)
+        equiv_vals = self.epoch_losses.get('equiv_delta_norm', [])
+        if equiv_vals:
+            mean_equiv = sum(equiv_vals) / len(equiv_vals)
+            summary['equiv_delta_norm_mean'] = mean_equiv
+            if mean_equiv > 10.0:
+                meta_warnings.append(f"  [!] Equivariance delta high ({mean_equiv:.2f}) - LoRA not transform-invariant")
+                print(f"  [!] Equiv delta norm: {mean_equiv:.4f} (HIGH)")
+            else:
+                print(f"  [OK] Equiv delta norm: {mean_equiv:.4f}")
+        
+        if not meta_warnings and (loo_acc_vals or diversity_vals):
+            print("[OK] Meta-learning appears healthy")
+        elif not loo_acc_vals and not diversity_vals:
+            print("[--] Meta-learning not enabled or no data")
+        
+        summary['meta_warnings'] = meta_warnings
+        
+        # === LCR/SPH HEALTH CHECK ===
+        lcr_vals = self.epoch_losses.get('lcr_magnitude', [])
+        sph_vals = self.epoch_losses.get('sph_activation_ratio', [])
+        if lcr_vals or sph_vals:
+            print(f"\n--- LCR/SPH Health ---")
+            
+            # LCR Health
+            if lcr_vals:
+                mean_lcr_mag = sum(lcr_vals) / len(lcr_vals)
+                summary['lcr_magnitude_mean'] = mean_lcr_mag
+                lcr_div_vals = self.epoch_losses.get('lcr_color_diversity', [])
+                mean_lcr_div = sum(lcr_div_vals) / len(lcr_div_vals) if lcr_div_vals else 0.0
+                
+                if mean_lcr_mag < 1e-6:
+                    print(f"  [!] LCR magnitude collapsed: {mean_lcr_mag:.6f}")
+                    meta_warnings.append("LCR magnitude collapsed")
+                elif mean_lcr_div < 1e-4:
+                    print(f"  [!] LCR no color differentiation: {mean_lcr_div:.6f}")
+                    meta_warnings.append("LCR not differentiating colors")
+                else:
+                    print(f"  [OK] LCR magnitude: {mean_lcr_mag:.4f}, color diversity: {mean_lcr_div:.4f}")
+            
+            # SPH Health
+            if sph_vals:
+                mean_sph_act = sum(sph_vals) / len(sph_vals)
+                summary['sph_activation_ratio_mean'] = mean_sph_act
+                sph_std_vals = self.epoch_losses.get('sph_std', [])
+                mean_sph_std = sum(sph_std_vals) / len(sph_std_vals) if sph_std_vals else 0.0
+                
+                if mean_sph_act < 0.05 or mean_sph_act > 0.95:
+                    print(f"  [!] SPH activation ratio extreme: {mean_sph_act:.1%}")
+                    meta_warnings.append(f"SPH activation ratio extreme ({mean_sph_act:.1%})")
+                elif mean_sph_std < 1e-4:
+                    print(f"  [!] SPH no predicate variation: std={mean_sph_std:.6f}")
+                    meta_warnings.append("SPH predicates not varying")
+                else:
+                    print(f"  [OK] SPH activation: {mean_sph_act:.1%}, variation: {mean_sph_std:.4f}")
         
         # Compute total loss trend for this epoch
         total_values = self.epoch_losses['total']

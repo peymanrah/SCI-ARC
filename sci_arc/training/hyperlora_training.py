@@ -1,8 +1,20 @@
 """
-HyperLoRA Training Integration Module.
+HyperLoRA Training Integration Module - UTILITY/HELPER MODULE.
 
 This module provides training utilities for integrating HyperLoRA
 (meta-learning weight adaptation) into the RLAN training loop.
+
+⚠️  NOTE ON USAGE:
+==================
+This module provides utility classes (HyperLoRATrainer, HyperLoRATrainingConfig)
+that are used BY scripts/train_rlan.py for production training.
+
+For production training, use:
+    python scripts/train_rlan.py --config configs/rlan_stable.yaml
+
+This module is NOT a standalone trainer - it provides helper functions
+for LOO loss and equivariance loss computation that train_rlan.py uses.
+==================
 
 The integration is designed to be backward-compatible:
 - When HyperLoRA is disabled, training proceeds as normal

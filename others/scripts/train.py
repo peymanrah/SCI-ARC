@@ -1,8 +1,28 @@
 #!/usr/bin/env python
 """
-SCI-ARC Training Script.
+SCI-ARC Training Script - DEPRECATED/LEGACY
 
-Usage:
+⚠️  DO NOT USE FOR PRODUCTION TRAINING ⚠️
+==========================================
+This script is DEPRECATED. It uses the legacy SCIARC model and SCIARCTrainer
+which do NOT support the full RLAN architecture with HyperLoRA meta-learning.
+
+For production training, use:
+    python scripts/train_rlan.py --config configs/rlan_stable.yaml
+
+WHY train_rlan.py is the correct choice:
+1. Reads ALL config from YAML (LOO, equivariance, loss_mode, etc.)
+2. Implements full HyperLoRA meta-learning with LOO and equivariance losses
+3. Has proper LR multipliers for meta-learning modules
+4. Includes TRM-style evaluation with inverse augmentation
+5. Supports caching, curriculum learning, and all production features
+
+THIS SCRIPT IS KEPT FOR:
+- Historical reference only
+- Legacy SCIARC model experiments (not RLAN)
+==========================================
+
+Legacy Usage (DO NOT USE):
     python scripts/train.py --config configs/default.yaml
     python scripts/train.py --config configs/small.yaml --data.arc_dir /path/to/arc
     python scripts/train.py --resume checkpoints/checkpoint_epoch_50.pt
@@ -355,4 +375,17 @@ def main():
 
 
 if __name__ == '__main__':
+    # ⚠️  DEPRECATION WARNING - Print at startup
+    print("=" * 70)
+    print("⚠️  WARNING: This script (others/scripts/train.py) is DEPRECATED!")
+    print("=" * 70)
+    print("For production training, use:")
+    print("    python scripts/train_rlan.py --config configs/rlan_stable.yaml")
+    print("")
+    print("This script uses the legacy SCIARC model, NOT RLAN with HyperLoRA.")
+    print("Continuing in 5 seconds... (Ctrl+C to abort)")
+    print("=" * 70)
+    import time
+    time.sleep(5)
+    
     main()

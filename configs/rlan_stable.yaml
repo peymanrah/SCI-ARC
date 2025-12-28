@@ -157,7 +157,7 @@ model:
   hyperlora_rank: 8          # LoRA rank (lower = fewer params, less expressive)
   hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
   hyperlora_dropout: 0.0     # Dropout on LoRA activations
-  hyperlora_init_scale: 0.01 # Near-zero init for safe adoption
+  hyperlora_init_scale: 0.1  # INCREASED: Was 0.01, now 0.1 for stronger meta-learning signal
 
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)

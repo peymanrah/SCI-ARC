@@ -2858,7 +2858,8 @@ Config Overrides:
             print(f"Optimizer/scheduler reset for fine-tuning (starting fresh from checkpoint weights)")
     
     # Initialize EMA for stable evaluation
-    use_ema = config.get('training', {}).get('use_ema', True)
+    # NOTE: Default is False to match rlan_stable.yaml (EMA disabled for short training)
+    use_ema = config.get('training', {}).get('use_ema', False)
     ema_decay = config.get('training', {}).get('ema_decay', 0.999)
     ema = None
     if use_ema:

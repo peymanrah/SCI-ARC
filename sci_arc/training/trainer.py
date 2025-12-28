@@ -1,7 +1,31 @@
 """
-SCI-ARC Training Loop.
+SCI-ARC Training Loop - LEGACY/DEPRECATED
 
-Implements:
+⚠️  DEPRECATION WARNING ⚠️
+================================
+This module (SCIARCTrainer) is LEGACY code kept for backward compatibility
+with unit tests only. DO NOT USE for production training.
+
+For production training, use:
+    python scripts/train_rlan.py --config configs/rlan_stable.yaml
+
+WHY THIS IS DEPRECATED:
+1. SCIARCTrainer uses hardcoded TrainingConfig defaults, NOT YAML config
+2. LOO training defaults to FALSE (even if YAML says enabled: true)
+3. Equivariance training defaults to FALSE (even if YAML says enabled: true)
+4. loss_mode is NOT configurable (must pass RLANLoss separately)
+5. train_rlan.py reads ALL config from YAML and implements full meta-learning
+
+KEPT FOR:
+- Unit tests that need a simple trainer interface
+- Backward compatibility with existing test code
+- Reference implementation for programmatic training API
+
+IMPORTANT: Any bug fixes should be applied to scripts/train_rlan.py FIRST,
+then optionally backported here if needed for tests.
+================================
+
+Original implements:
 1. Full training loop with mixed precision
 2. Curriculum learning schedule
 3. Deep supervision (from TRM)
@@ -73,7 +97,21 @@ class TeeLogger:
 
 @dataclass
 class TrainingConfig:
-    """Training configuration."""
+    """
+    Training configuration - LEGACY DATACLASS.
+    
+    ⚠️  WARNING: This uses Python defaults, NOT YAML config values!
+    For production training that reads YAML config, use:
+        python scripts/train_rlan.py --config configs/rlan_stable.yaml
+    
+    If you must use SCIARCTrainer programmatically, construct TrainingConfig
+    explicitly with your desired values:
+        config = TrainingConfig(
+            use_loo=True,  # Override default False
+            use_equivariance=True,  # Override default False
+            ...
+        )
+    """
     # Optimization
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
@@ -104,6 +142,14 @@ class TrainingConfig:
     use_loo: bool = False                    # Enable LOO training (requires HyperLoRA)
     loo_weight: float = 0.5                  # Weight of LOO loss relative to task loss
     loo_min_pairs: int = 2                   # Minimum training pairs for LOO (need at least 2)
+    
+    # Equivariance: Consistency of LoRA across augmentations
+    use_equivariance: bool = False           # Enable equivariance loss
+    equivariance_weight: float = 0.1         # Weight of equivariance loss
+    equivariance_num_augs: int = 4           # Number of augmentations for equivariance
+    
+    # HyperLoRA LR multiplier (meta-learning params need faster learning)
+    hyperlora_lr_multiplier: float = 10.0    # Multiplier for HyperLoRA learning rate
     
     # EMA: Exponential Moving Average for stable evaluation (BUG FIX #4)
     use_ema: bool = False                    # Enable EMA for evaluation
@@ -152,7 +198,19 @@ class TrainingConfig:
 
 class SCIARCTrainer:
     """
-    Trainer for SCI-ARC model.
+    Trainer for SCI-ARC model - LEGACY/DEPRECATED.
+    
+    ⚠️  WARNING: Use scripts/train_rlan.py for production training!
+    This class uses hardcoded TrainingConfig defaults, NOT YAML config.
+    
+    For production training:
+        python scripts/train_rlan.py --config configs/rlan_stable.yaml
+    
+    KNOWN LIMITATIONS (vs train_rlan.py):
+    - LOO training defaults to False (ignores YAML)
+    - Equivariance training defaults to False (ignores YAML)
+    - loss_mode not configurable (must pass RLANLoss separately)
+    - No TRM-style evaluation with inverse augmentation
     
     Implements full training loop with:
     - Curriculum learning
@@ -170,6 +228,17 @@ class SCIARCTrainer:
         loss_fn: nn.Module,
         config: TrainingConfig,
     ):
+        # Emit deprecation warning
+        import warnings
+        warnings.warn(
+            "SCIARCTrainer is deprecated for production use. "
+            "Use 'python scripts/train_rlan.py --config configs/rlan_stable.yaml' instead. "
+            "SCIARCTrainer uses hardcoded defaults and does NOT read YAML config for "
+            "LOO training, equivariance, or loss_mode.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -289,7 +358,7 @@ class SCIARCTrainer:
     def _create_optimizer(self) -> AdamW:
         """Create AdamW optimizer with weight decay filtering.
         
-        SCIENTIFIC FIX: HyperLoRA parameters get 10x higher learning rate
+        SCIENTIFIC FIX: HyperLoRA parameters get higher learning rate (configurable)
         to compensate for gradient scale disparity (avg 0.006 vs 0.058 main).
         This prevents meta-learner starvation during early training.
         """
@@ -305,15 +374,15 @@ class SCIARCTrainer:
             if not param.requires_grad:
                 continue
             if 'hyper_lora' in name:
-                # HyperLoRA gets 10x learning rate to fix gradient disparity
+                # HyperLoRA gets higher learning rate to fix gradient disparity
                 hyperlora_params.append(param)
             elif 'bias' in name or 'norm' in name or 'embedding' in name:
                 no_decay_params.append(param)
             else:
                 decay_params.append(param)
         
-        # Meta-learning LR multiplier (10x to compensate for ~10x smaller gradients)
-        hyperlora_lr_multiplier = 10.0
+        # Meta-learning LR multiplier (from config, defaults to 10x)
+        hyperlora_lr_multiplier = self.config.hyperlora_lr_multiplier
         
         param_groups = [
             {'params': decay_params, 'weight_decay': self.config.weight_decay},
@@ -824,6 +893,7 @@ class SCIARCTrainer:
         
         # LOO loss - Leave-One-Out training for meta-learning (BUG FIX #1)
         loo_loss = torch.tensor(0.0, device=self.device)
+        loo_skipped = True  # Track if LOO was skipped
         if self.loo_loss is not None and 'support_features' in outputs:
             # Get support features and inputs from batch
             support_features = outputs['support_features']  # (B, N, D, Hs, Ws)
@@ -845,18 +915,95 @@ class SCIARCTrainer:
                         support_features=support_features,
                     )
                     loo_loss = loo_result
+                    loo_skipped = loo_metrics.get('loo_skipped', False)
                     
                     # Log LOO metrics
-                    if not loo_metrics.get('loo_skipped', False):
+                    if not loo_skipped:
                         losses['loo_accuracy'] = loo_metrics.get('loo_accuracy', 0.0)
+                        losses['loo_skipped_ratio'] = 0.0
+                    else:
+                        losses['loo_skipped_ratio'] = 1.0
+                        
+                    # === META-LEARNING HEALTH: LoRA Magnitude Metrics ===
+                    # These help detect if HyperLoRA is collapsing (magnitude → 0)
+                    # or exploding (magnitude → inf)
+                    if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
+                        deltas = outputs['lora_deltas']
+                        for key in ['gru_reset', 'gru_update', 'gru_candidate', 'output_head']:
+                            if key in deltas:
+                                mag = deltas[key].norm(dim=(1, 2)).mean().item()
+                                losses[f'lora_magnitude_{key}'] = mag
+                        
+                        # Compute weight diversity (std across batch)
+                        diversities = []
+                        for key, delta in deltas.items():
+                            if key != 'context' and isinstance(delta, torch.Tensor):
+                                batch_std = delta.std(dim=0).mean().item()
+                                diversities.append(batch_std)
+                        if diversities:
+                            losses['lora_diversity'] = sum(diversities) / len(diversities)
+                        
                 except Exception as e:
                     # LOO failed - log warning but don't crash training
+                    losses['loo_skipped_ratio'] = 1.0
                     if not hasattr(self, '_loo_warn_count'):
                         self._loo_warn_count = 0
                     if self._loo_warn_count < 3:
                         print(f"[LOO WARNING] LOO loss computation failed: {e}")
                         self._loo_warn_count += 1
         losses['loo'] = loo_loss
+        
+        # === EQUIVARIANCE LOSS: Consistency of LoRA across augmentations ===
+        # Encourages similar LoRA weights for rotated/flipped versions of same task
+        equiv_loss = torch.tensor(0.0, device=self.device)
+        if (self.config.use_equivariance and 
+            hasattr(self.model, 'hyper_lora') and 
+            self.model.hyper_lora is not None and
+            'lora_deltas' in outputs and outputs['lora_deltas'] is not None):
+            try:
+                original_deltas = outputs['lora_deltas']
+                support_features = outputs.get('support_features')
+                
+                if support_features is not None:
+                    # Apply augmentations and measure LoRA consistency
+                    augmentations = ['rotate_90', 'rotate_180', 'rotate_270', 'flip_h'][:self.config.equivariance_num_augs]
+                    total_delta = 0.0
+                    num_augs = 0
+                    
+                    for aug_type in augmentations:
+                        # Apply spatial augmentation to features
+                        if aug_type == 'rotate_90':
+                            aug_features = torch.rot90(support_features, k=1, dims=[-2, -1])
+                        elif aug_type == 'rotate_180':
+                            aug_features = torch.rot90(support_features, k=2, dims=[-2, -1])
+                        elif aug_type == 'rotate_270':
+                            aug_features = torch.rot90(support_features, k=3, dims=[-2, -1])
+                        elif aug_type == 'flip_h':
+                            aug_features = torch.flip(support_features, dims=[-1])
+                        else:
+                            continue
+                        
+                        # Predict LoRA from augmented features
+                        aug_deltas = self.model.hyper_lora(aug_features)
+                        
+                        # Compare LoRA weights (MSE on actual weight matrices)
+                        for key in ['gru_reset', 'gru_update', 'gru_candidate', 'output_head']:
+                            if key in original_deltas and key in aug_deltas:
+                                delta_diff = F.mse_loss(original_deltas[key], aug_deltas[key])
+                                total_delta = total_delta + delta_diff
+                        num_augs += 1
+                    
+                    if num_augs > 0:
+                        equiv_loss = total_delta / (num_augs * 4)  # 4 layer types
+                        losses['equiv_delta_norm'] = equiv_loss.item()
+                        losses['equivariance'] = equiv_loss.item()
+                        
+            except Exception as e:
+                if not hasattr(self, '_equiv_warn_count'):
+                    self._equiv_warn_count = 0
+                if self._equiv_warn_count < 3:
+                    print(f"[EQUIV WARNING] Equivariance loss computation failed: {e}")
+                    self._equiv_warn_count += 1
         
         # Total loss
         total = task_loss
@@ -866,6 +1013,9 @@ class SCIARCTrainer:
         # Add LOO loss with its weight
         if self.config.use_loo:
             total = total + self.config.loo_weight * loo_loss
+        # Add equivariance loss with its weight
+        if self.config.use_equivariance:
+            total = total + self.config.equivariance_weight * equiv_loss
         losses['total'] = total
         
         # ===============================================
@@ -935,6 +1085,23 @@ class SCIARCTrainer:
                 losses['pred_entropy'] = entropy.item()
             else:
                 losses['pred_entropy'] = 0.0
+            
+            # === LCR/SPH HEALTH METRICS (if enabled) ===
+            # Monitor counting registers and predicates for learning signal
+            if 'count_embedding' in outputs and outputs['count_embedding'] is not None:
+                count_emb = outputs['count_embedding']
+                losses['lcr_magnitude'] = count_emb.abs().mean().item()
+                losses['lcr_std'] = count_emb.std().item()
+                # Check if counts are differentiated across colors
+                if count_emb.dim() >= 2:
+                    losses['lcr_color_diversity'] = count_emb.std(dim=1).mean().item()
+            
+            if 'predicates' in outputs and outputs['predicates'] is not None:
+                preds_out = outputs['predicates']
+                losses['sph_mean'] = preds_out.mean().item()
+                losses['sph_std'] = preds_out.std().item()
+                # Check predicate activation diversity (want some activated, some not)
+                losses['sph_activation_ratio'] = (preds_out > 0.5).float().mean().item()
         
         return losses
     
@@ -1055,7 +1222,15 @@ class SCIARCTrainer:
         for metric_key in ['logit_mean', 'logit_std', 'logit_max', 'logit_min',
                            'accuracy', 'bg_accuracy', 'fg_accuracy', 
                            'confidence_mean', 'pred_entropy',
-                           'grad_norm', 'grad_max', 'grad_min', 'grad_has_nan', 'grad_has_inf']:
+                           'grad_norm', 'grad_max', 'grad_min', 'grad_has_nan', 'grad_has_inf',
+                           # META-LEARNING HEALTH METRICS
+                           'loo', 'loo_accuracy', 'loo_skipped_ratio',
+                           'lora_magnitude_gru_reset', 'lora_magnitude_gru_update',
+                           'lora_magnitude_gru_candidate', 'lora_magnitude_output_head',
+                           'lora_diversity', 'equivariance', 'equiv_delta_norm',
+                           # LCR/SPH HEALTH METRICS
+                           'lcr_magnitude', 'lcr_std', 'lcr_color_diversity',
+                           'sph_mean', 'sph_std', 'sph_activation_ratio']:
             if metric_key in losses:
                 val = losses[metric_key]
                 structured_losses[metric_key] = val.item() if isinstance(val, torch.Tensor) else val
@@ -1108,6 +1283,22 @@ class SCIARCTrainer:
             log_dict['train/grad_min'] = structured_losses.get('grad_min', 0.0)
             log_dict['train/grad_has_nan'] = structured_losses.get('grad_has_nan', 0.0)
             log_dict['train/grad_has_inf'] = structured_losses.get('grad_has_inf', 0.0)
+            
+            # Add meta-learning health metrics (HyperLoRA + LOO)
+            if self.config.use_loo:
+                log_dict['train/loo_loss'] = structured_losses.get('loo', 0.0)
+                log_dict['train/loo_accuracy'] = structured_losses.get('loo_accuracy', 0.0)
+                log_dict['train/loo_skipped_ratio'] = structured_losses.get('loo_skipped_ratio', 0.0)
+                log_dict['train/lora_magnitude_gru_reset'] = structured_losses.get('lora_magnitude_gru_reset', 0.0)
+                log_dict['train/lora_magnitude_gru_update'] = structured_losses.get('lora_magnitude_gru_update', 0.0)
+                log_dict['train/lora_magnitude_gru_candidate'] = structured_losses.get('lora_magnitude_gru_candidate', 0.0)
+                log_dict['train/lora_magnitude_output_head'] = structured_losses.get('lora_magnitude_output_head', 0.0)
+                log_dict['train/lora_diversity'] = structured_losses.get('lora_diversity', 0.0)
+            
+            # Add equivariance loss metrics
+            if self.config.use_equivariance:
+                log_dict['train/equivariance_loss'] = structured_losses.get('equivariance', 0.0)
+                log_dict['train/equiv_delta_norm'] = structured_losses.get('equiv_delta_norm', 0.0)
             
             wandb.log(log_dict)
     
@@ -1821,7 +2012,13 @@ def train_sci_arc(
     resume_from: Optional[str] = None,
 ):
     """
-    Main training function.
+    Main training function - LEGACY/DEPRECATED.
+    
+    ⚠️  WARNING: Use scripts/train_rlan.py for production training!
+    This function uses SCIARCTrainer which does NOT read YAML config.
+    
+    For production training:
+        python scripts/train_rlan.py --config configs/rlan_stable.yaml
     
     Args:
         model: SCI-ARC model
@@ -1831,6 +2028,13 @@ def train_sci_arc(
         config: Training configuration
         resume_from: Path to checkpoint to resume from
     """
+    import warnings
+    warnings.warn(
+        "train_sci_arc() is deprecated. Use 'python scripts/train_rlan.py' instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
     if config is None:
         config = TrainingConfig()
     

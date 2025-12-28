@@ -107,7 +107,7 @@ class RLANConfig:
     hyperlora_rank: int = 8
     hyperlora_scaling: float = 1.0
     hyperlora_dropout: float = 0.0
-    hyperlora_init_scale: float = 0.01
+    hyperlora_init_scale: float = 0.1  # FIXED: Was 0.01, increased for stronger meta-learning signal
     
     # Training parameters
     dropout: float = 0.1
