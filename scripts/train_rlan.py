@@ -1734,6 +1734,25 @@ def train_epoch(
                     # Exact match (100% correct)
                     if correct == valid_pixels:
                         batch_exact_match_count += 1
+                        
+                        # HPM DYNAMIC BUFFER POPULATION:
+                        # When a sample is solved exactly, store its context in dynamic banks
+                        # for future retrieval-augmented reasoning on similar tasks.
+                        if hasattr(model, 'hpm_add_solved_task') and hasattr(model, 'use_hpm') and model.use_hpm:
+                            # Get context embedding for this sample
+                            if 'support_features' in outputs:
+                                # support_features: (B, N, D, H, W) -> pool to (D,)
+                                z_context = outputs['support_features'][i].mean(dim=(0, 2, 3))  # (D,)
+                                # Get task embedding if HyperLoRA available
+                                z_task = None
+                                if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
+                                    # lora_deltas contains the HyperLoRA output
+                                    # We use support_features mean as task embedding
+                                    z_task = z_context  # Same context serves as task signature
+                                # Add to dynamic buffers
+                                task_id = f"epoch{epoch}_batch{batch_idx}_sample{i}"
+                                model.hpm_add_solved_task(z_context.unsqueeze(0), z_task.unsqueeze(0) if z_task is not None else None, task_id)
+                                epoch_diagnostics['hpm_tasks_added'] = epoch_diagnostics.get('hpm_tasks_added', 0) + 1
                     
                     # High accuracy (>=90% correct)
                     if sample_acc >= 0.9:
@@ -3207,6 +3226,11 @@ Config Overrides:
                     print(f"  HPM Instance Buffer: {hpm_stats['instance_buffer_size']} entries")
                 if 'procedural_buffer_size' in hpm_stats:
                     print(f"  HPM Procedural Buffer: {hpm_stats['procedural_buffer_size']} entries")
+                # Show tasks added this epoch (from exact matches)
+                diagnostics = train_losses.get('diagnostics', {})
+                tasks_added = diagnostics.get('hpm_tasks_added', 0)
+                if tasks_added > 0:
+                    print(f"  HPM Tasks Added (exact matches): {tasks_added}")
         
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
         

@@ -203,13 +203,14 @@ model:
   hpm_top_k: 2                        # Number of banks to route to per sample
   hpm_balance_weight: 0.01            # Load balancing loss weight (prevents mode collapse)
   
-  # Static Bank Configuration
-  hpm_primitives_per_bank: 16         # Number of primitives per static bank
-  hpm_levels_per_bank: 2              # Hierarchical levels within each bank
+  # Static Bank Configuration (AGGRESSIVE for ARC expressiveness)
+  # Total primitives = 3 banks × 32 primitives × 3 levels = 288 primitives
+  hpm_primitives_per_bank: 32         # Number of primitives per static bank (was 16)
+  hpm_levels_per_bank: 3              # Hierarchical levels within each bank (was 2)
   hpm_use_cross_attention: true       # Use cross-attention aggregation
   
   # Dynamic Bank Configuration
-  hpm_memory_size: 10000              # Max entries in dynamic banks
+  hpm_memory_size: 10000              # Max entries in dynamic banks (enough for 10x ARC)
   hpm_retrieval_k: 5                  # Number of neighbors to retrieve
   
   # Bank Selection (which banks to enable)
@@ -219,9 +220,10 @@ model:
   hpm_use_relational_bank: true       # Spatial/logical relationships
   hpm_use_concept_bank: false         # Domain knowledge (optional)
   
-  # Dynamic banks (KV-cache, grows over time):
-  hpm_use_procedural_bank: false      # HyperLoRA codes (enable with HyperLoRA)
-  hpm_use_instance_bank: false        # ContextEncoder cache (enable for retrieval)
+  # Dynamic banks (KV-cache, populated on solved tasks):
+  # ENABLED: These grow during training as tasks are solved correctly
+  hpm_use_procedural_bank: true       # HyperLoRA codes (requires HyperLoRA enabled)
+  hpm_use_instance_bank: true         # ContextEncoder cache (retrieval-augmented reasoning)
 
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
