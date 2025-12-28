@@ -164,6 +164,14 @@ class DynamicMemoryBuffer:
         
         MEMORY EFFICIENT: Only retrieved entries are moved to GPU.
         
+        NOTE (Dec 2025): For batch queries [B, D], this returns neighbors based on
+        the MEAN query across the batch. This is correct when:
+        - All samples in the batch are from the same task (typical in ARC training)
+        - You want shared context augmentation across the batch
+        
+        If you need per-sample retrieval (e.g., mixed-task batches), call this
+        function B times with individual queries, or use retrieve_batch().
+        
         Args:
             query: Query vector [B, D] or [D]
             k: Number of neighbors to retrieve
@@ -181,9 +189,9 @@ class DynamicMemoryBuffer:
         if query.dim() == 1:
             query = query.unsqueeze(0)
         
-        # Use first query for batch retrieval (simplification)
-        # In practice, you'd want per-sample retrieval
-        query_np = query[0].detach().cpu().numpy().astype(np.float32)
+        # Use MEAN query for batch retrieval (robust to batch variations)
+        # This is appropriate when batch contains samples from same task
+        query_np = query.mean(dim=0).detach().cpu().numpy().astype(np.float32)
         
         # Limit k to buffer size
         k = min(k, len(self._keys))
@@ -208,8 +216,10 @@ class DynamicMemoryBuffer:
         else:
             # Brute-force retrieval: O(N)
             all_keys = torch.stack(list(self._keys), dim=0)  # [N, D]
+            # Use mean query for consistency with FAISS path
+            mean_query = query.mean(dim=0, keepdim=True).cpu()  # [1, D]
             scores = torch.matmul(
-                query[0:1].cpu(), all_keys.T
+                mean_query, all_keys.T
             ).squeeze(0)  # [N]
             
             _, indices = torch.topk(scores, k)
