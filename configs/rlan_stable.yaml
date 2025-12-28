@@ -247,11 +247,12 @@ training:
   # - Equivariance: 4 augmentation forward passes per sample
   # - Combined: up to 9x memory multiplier in worst case!
   # 
-  # SOLUTION: Reduce batch to 16, increase grad_accumulation to 20
-  # This cuts per-batch memory in half while maintaining effective batch size.
+  # UPDATE (Dec 2025): With staged meta-learning, LOO/Equiv are OFF for
+  # epochs 1-3, so we can use larger batches. Increased from 16 to 28.
+  # At 16GB usage with batch=16, we have 8GB headroom on 24GB GPU.
   #
-  batch_size: 16    # Reduced from 32 for HyperLoRA+LOO+Equivariance memory safety
-  grad_accumulation_steps: 20  # effective_batch_size = 16 × 20 = 320
+  batch_size: 28    # Increased from 16 (8GB headroom available)
+  grad_accumulation_steps: 12  # effective_batch_size = 28 × 12 = 336
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
