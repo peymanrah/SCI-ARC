@@ -58,7 +58,7 @@ model:
   
   max_clues: 7
   num_predicates: 32  # More predicates for diversity
-  num_solver_steps: 6   # Reverted from 10 - 6 is stable and fast
+  num_solver_steps: 5   # Reduced from 6 to save ~150MB (logs showed best step was 4 anyway)
   
   use_act: false       # DISABLED
   dropout: 0.1
@@ -564,6 +564,7 @@ logging:
   checkpoint_dir: "checkpoints/rlan_stable"
   log_to_file: true
   track_augmentation: true  # Enable to verify augmentation diversity
+  memory_debug_batches: 5   # Log detailed memory checkpoints for first N batches per epoch
   
   use_wandb: false
   wandb_project: "rlan-arc"

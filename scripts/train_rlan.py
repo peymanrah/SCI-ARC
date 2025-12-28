@@ -221,6 +221,267 @@ def set_seed(seed: int, deterministic: bool = False):
         torch.backends.cudnn.benchmark = True
 
 
+# ============================================================================
+# MEMORY DEBUGGING UTILITIES
+# ============================================================================
+
+def get_tensor_memory_breakdown(model, outputs: dict = None, batch: dict = None) -> Dict[str, float]:
+    """
+    Get detailed memory breakdown by category.
+    
+    Returns dict with memory in MB for:
+    - model_params: Model parameter memory
+    - model_grads: Gradient memory (if computed)
+    - optimizer_states: Optimizer state estimate (AdamW = 2x params)
+    - batch_data: Input batch tensor memory
+    - activations: Forward pass activations (outputs dict)
+    - per_module: Dict of memory per model module
+    - active_modules: Dict of which optional modules are active (for debugging)
+    """
+    breakdown = {}
+    
+    # Model parameters
+    param_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    breakdown['model_params_mb'] = param_bytes / 1024 / 1024
+    
+    # Gradients (if they exist)
+    grad_bytes = sum(
+        p.grad.numel() * p.grad.element_size() 
+        for p in model.parameters() if p.grad is not None
+    )
+    breakdown['model_grads_mb'] = grad_bytes / 1024 / 1024
+    
+    # Optimizer states estimate (AdamW stores m and v = 2x param size in fp32)
+    # This is an estimate since we don't have optimizer reference here
+    try:
+        first_param = next(model.parameters())
+        breakdown['optimizer_states_estimate_mb'] = (param_bytes * 2 * 4 / first_param.element_size()) / 1024 / 1024
+    except StopIteration:
+        breakdown['optimizer_states_estimate_mb'] = 0
+    
+    # Batch data memory
+    if batch is not None:
+        batch_bytes = 0
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor) and v.is_cuda:
+                batch_bytes += v.numel() * v.element_size()
+        breakdown['batch_data_mb'] = batch_bytes / 1024 / 1024
+    
+    # Activation memory from outputs
+    if outputs is not None:
+        act_bytes = 0
+        for k, v in outputs.items():
+            if isinstance(v, torch.Tensor) and v.is_cuda:
+                act_bytes += v.numel() * v.element_size()
+                breakdown[f'output_{k}_mb'] = (v.numel() * v.element_size()) / 1024 / 1024
+            elif isinstance(v, list):
+                # Handle list of tensors (e.g., all_logits)
+                list_bytes = sum(
+                    t.numel() * t.element_size() 
+                    for t in v if isinstance(t, torch.Tensor) and t.is_cuda
+                )
+                if list_bytes > 0:
+                    act_bytes += list_bytes
+                    breakdown[f'output_{k}_mb'] = list_bytes / 1024 / 1024
+            elif isinstance(v, dict):
+                # Handle nested dicts (e.g., lora_deltas)
+                dict_bytes = sum(
+                    t.numel() * t.element_size()
+                    for t in v.values() if isinstance(t, torch.Tensor) and t.is_cuda
+                )
+                if dict_bytes > 0:
+                    act_bytes += dict_bytes
+                    breakdown[f'output_{k}_mb'] = dict_bytes / 1024 / 1024
+        breakdown['activations_total_mb'] = act_bytes / 1024 / 1024
+    
+    # Per-module parameter memory
+    module_memory = {}
+    for name, module in model.named_children():
+        mod_bytes = sum(p.numel() * p.element_size() for p in module.parameters())
+        if mod_bytes > 0:
+            module_memory[name] = mod_bytes / 1024 / 1024
+    breakdown['per_module_mb'] = module_memory
+    
+    # Track which optional modules are ACTIVE (critical for debugging staged activation)
+    active_modules = {}
+    active_modules['hyperlora_active'] = getattr(model, 'hyperlora_active', False)
+    active_modules['solver_context_active'] = getattr(model, 'solver_context_active', False)
+    active_modules['cross_attention_active'] = getattr(model, 'cross_attention_active', False)
+    active_modules['use_hpm'] = getattr(model, 'use_hpm', False)
+    active_modules['use_loo'] = getattr(model, 'loo_enabled', False)
+    active_modules['use_equivariance'] = getattr(model, 'equivariance_enabled', False)
+    breakdown['active_modules'] = active_modules
+    
+    return breakdown
+
+
+def format_memory_breakdown(breakdown: Dict[str, Any], prefix: str = "      ") -> str:
+    """Format memory breakdown dict as readable string."""
+    lines = []
+    
+    # Core metrics
+    lines.append(f"{prefix}Model params: {breakdown.get('model_params_mb', 0):.1f}MB")
+    lines.append(f"{prefix}Model grads:  {breakdown.get('model_grads_mb', 0):.1f}MB")
+    lines.append(f"{prefix}Batch data:   {breakdown.get('batch_data_mb', 0):.1f}MB")
+    lines.append(f"{prefix}Activations:  {breakdown.get('activations_total_mb', 0):.1f}MB")
+    
+    # Per-output breakdown (sorted by size)
+    output_items = [(k, v) for k, v in breakdown.items() if k.startswith('output_') and not k.endswith('total_mb')]
+    if output_items:
+        output_items.sort(key=lambda x: x[1], reverse=True)
+        lines.append(f"{prefix}Output tensors (top 5):")
+        for k, v in output_items[:5]:
+            name = k.replace('output_', '').replace('_mb', '')
+            lines.append(f"{prefix}  {name}: {v:.1f}MB")
+    
+    # Per-module breakdown (sorted by size)
+    if 'per_module_mb' in breakdown:
+        module_items = sorted(breakdown['per_module_mb'].items(), key=lambda x: x[1], reverse=True)
+        lines.append(f"{prefix}Module params (top 5):")
+        for name, mb in module_items[:5]:
+            lines.append(f"{prefix}  {name}: {mb:.1f}MB")
+    
+    # Active modules status (CRITICAL for debugging staged activation)
+    if 'active_modules' in breakdown:
+        active = breakdown['active_modules']
+        active_list = [k for k, v in active.items() if v]
+        inactive_list = [k for k, v in active.items() if not v]
+        if active_list:
+            lines.append(f"{prefix}Active modules: {', '.join(active_list)}")
+        if inactive_list:
+            lines.append(f"{prefix}Inactive modules: {', '.join(inactive_list)}")
+    
+    return '\n'.join(lines)
+
+
+class MemoryTracker:
+    """
+    Track GPU memory at various checkpoints to identify memory leaks/spikes.
+    
+    ENHANCED: Now captures tensor-level breakdown at each checkpoint for debugging.
+    
+    Usage:
+        tracker = MemoryTracker(enabled=True, log_first_n_batches=5)
+        
+        # In training loop:
+        tracker.checkpoint("after_data_load", batch=batch)
+        ... forward pass ...
+        tracker.checkpoint("after_forward", model=model, outputs=outputs, batch=batch)
+        ... backward pass ...
+        tracker.checkpoint("after_backward", model=model)
+        
+        tracker.end_batch(batch_idx)  # Prints summary with breakdown
+    """
+    
+    def __init__(self, enabled: bool = True, log_first_n_batches: int = 5, device: str = 'cuda'):
+        self.enabled = enabled and torch.cuda.is_available()
+        self.log_first_n_batches = log_first_n_batches
+        self.device = device
+        self.checkpoints = {}
+        self.batch_idx = 0
+        self.baseline_allocated = 0
+        self.baseline_reserved = 0
+        
+    def reset_baseline(self):
+        """Set current memory as baseline (call after model creation, before training)."""
+        if not self.enabled:
+            return
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()  # Reset peak for accurate per-batch tracking
+        self.baseline_allocated = torch.cuda.memory_allocated() / 1024 / 1024
+        self.baseline_reserved = torch.cuda.memory_reserved() / 1024 / 1024
+        
+    def checkpoint(self, name: str, model=None, outputs: dict = None, batch: dict = None):
+        """Record memory at a named checkpoint with optional tensor breakdown."""
+        if not self.enabled:
+            return
+        torch.cuda.synchronize()
+        allocated = torch.cuda.memory_allocated() / 1024 / 1024
+        reserved = torch.cuda.memory_reserved() / 1024 / 1024
+        
+        checkpoint_data = {
+            'allocated': allocated,
+            'reserved': reserved,
+            'delta_alloc': allocated - self.baseline_allocated,
+            'delta_reserved': reserved - self.baseline_reserved,
+        }
+        
+        # Capture detailed breakdown if we have model/outputs/batch
+        if model is not None or outputs is not None or batch is not None:
+            try:
+                breakdown = get_tensor_memory_breakdown(model, outputs, batch) if model else {}
+                checkpoint_data['breakdown'] = breakdown
+            except Exception as e:
+                checkpoint_data['breakdown_error'] = str(e)
+        
+        self.checkpoints[name] = checkpoint_data
+    
+    def end_batch(self, batch_idx: int, epoch: int = 0) -> Optional[str]:
+        """Print memory summary for this batch if within log_first_n_batches."""
+        self.batch_idx = batch_idx
+        
+        if not self.enabled or batch_idx >= self.log_first_n_batches:
+            self.checkpoints = {}  # Clear for next batch
+            return None
+        
+        # Build summary
+        lines = [f"\n  [MEMORY] Epoch {epoch} Batch {batch_idx}:"]
+        lines.append(f"    Baseline: alloc={self.baseline_allocated:.0f}MB, reserved={self.baseline_reserved:.0f}MB")
+        
+        prev_alloc = self.baseline_allocated
+        max_delta_name = None
+        max_delta = 0
+        
+        for name, data in self.checkpoints.items():
+            delta_from_prev = data['allocated'] - prev_alloc
+            sign = '+' if delta_from_prev >= 0 else ''
+            lines.append(
+                f"    {name}: alloc={data['allocated']:.0f}MB ({sign}{delta_from_prev:.0f}MB), "
+                f"reserved={data['reserved']:.0f}MB"
+            )
+            
+            # Track which checkpoint had biggest increase
+            if delta_from_prev > max_delta:
+                max_delta = delta_from_prev
+                max_delta_name = name
+            
+            prev_alloc = data['allocated']
+        
+        # Peak memory
+        peak_allocated = torch.cuda.max_memory_allocated() / 1024 / 1024
+        peak_reserved = torch.cuda.max_memory_reserved() / 1024 / 1024
+        total_gpu = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+        lines.append(f"    PEAK: alloc={peak_allocated:.0f}MB, reserved={peak_reserved:.0f}MB / {total_gpu:.0f}MB ({100*peak_reserved/total_gpu:.1f}%)")
+        
+        # Print detailed breakdown for the checkpoint with max memory increase
+        if max_delta_name and max_delta > 500:  # Only if >500MB increase
+            lines.append(f"\n    [BREAKDOWN] Largest increase at '{max_delta_name}' (+{max_delta:.0f}MB):")
+            if 'breakdown' in self.checkpoints[max_delta_name]:
+                breakdown = self.checkpoints[max_delta_name]['breakdown']
+                lines.append(format_memory_breakdown(breakdown, prefix="      "))
+        
+        summary = '\n'.join(lines)
+        print(summary)
+        
+        # Reset peak for next batch
+        torch.cuda.reset_peak_memory_stats()
+        
+        self.checkpoints = {}  # Clear for next batch
+        return summary
+    
+    def get_current_memory(self) -> Dict[str, float]:
+        """Get current memory stats as dict."""
+        if not self.enabled:
+            return {}
+        torch.cuda.synchronize()
+        return {
+            'allocated_mb': torch.cuda.memory_allocated() / 1024 / 1024,
+            'reserved_mb': torch.cuda.memory_reserved() / 1024 / 1024,
+            'peak_allocated_mb': torch.cuda.max_memory_allocated() / 1024 / 1024,
+            'peak_reserved_mb': torch.cuda.max_memory_reserved() / 1024 / 1024,
+        }
+
+
 def get_curriculum_stage(epoch: int, curriculum_stages: List[int]) -> int:
     """
     Determine curriculum stage based on current epoch.
@@ -1003,6 +1264,16 @@ def train_epoch(
     # This overlaps CPU→GPU transfer with GPU computation, eliminating stalls
     prefetcher = CUDAPrefetcher(dataloader, device)
     
+    # MEMORY DEBUGGING: Track memory at checkpoints for first N batches
+    # This helps identify what's causing unexpected memory usage
+    memory_debug_batches = config.get('logging', {}).get('memory_debug_batches', 5)
+    mem_tracker = MemoryTracker(
+        enabled=(device.type == 'cuda' and memory_debug_batches > 0),
+        log_first_n_batches=memory_debug_batches,
+        device=device.type
+    )
+    mem_tracker.reset_baseline()
+    
     for batch_idx, batch in enumerate(prefetcher):
         # Apply warmup with per-group LR preservation
         warmup_lr(optimizer, global_step, warmup_steps, base_lr, initial_lrs)
@@ -1019,6 +1290,9 @@ def train_epoch(
         # Track sample count
         batch_size = batch['test_inputs'].shape[0]
         total_samples += batch_size
+        
+        # MEMORY CHECKPOINT: After batch data is on GPU
+        mem_tracker.checkpoint("01_batch_on_gpu", batch=batch)
         
         # Batch already on device (prefetcher handles transfer asynchronously)
         test_inputs = batch['test_inputs']
@@ -1038,6 +1312,9 @@ def train_epoch(
                     temperature=temperature,
                     return_intermediates=True,
                 )
+                
+                # MEMORY CHECKPOINT: After main forward pass
+                mem_tracker.checkpoint("02_after_forward", model=model, outputs=outputs, batch=batch)
                 
                 losses = loss_fn(
                     logits=outputs['logits'],
@@ -1195,7 +1472,13 @@ def train_epoch(
             
             # Loss is finite - but only reset consecutive counter after successful optimizer step
             
+            # MEMORY CHECKPOINT: Before backward pass
+            mem_tracker.checkpoint("03_before_backward", model=model)
+            
             scaler.scale(loss).backward()
+            
+            # MEMORY CHECKPOINT: After backward pass (peak memory usually here)
+            mem_tracker.checkpoint("04_after_backward", model=model)
             
             # Step optimizer after accumulation
             if (batch_idx + 1) % grad_accumulation_steps == 0:
@@ -1389,6 +1672,9 @@ def train_epoch(
                 optimizer.step()
                 optimizer.zero_grad()
                 
+                # MEMORY CHECKPOINT: After optimizer step (gradients cleared)
+                mem_tracker.checkpoint("05_after_optim_step", model=model)
+                
                 # Update EMA after optimizer step
                 if ema is not None:
                     ema.update(model)
@@ -1400,6 +1686,9 @@ def train_epoch(
                 total_losses[key] += val.item() if torch.is_tensor(val) else val
         num_batches += 1
         global_step += 1
+        
+        # MEMORY DEBUGGING: Print per-batch memory summary for first N batches
+        mem_tracker.end_batch(batch_idx, epoch)
         
         # MEMORY MONITOR: Log memory for first 3 batches when new modules become active
         # This detects if staged module activation causes memory overflow to shared memory
@@ -2743,6 +3032,18 @@ Config Overrides:
     model = create_model(config)
     model = model.to(device)
     
+    # MEMORY DEBUG: Log baseline GPU memory after model is on device
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+        model_memory_mb = torch.cuda.memory_allocated() / 1024 / 1024
+        model_reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
+        total_gpu_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+        print(f"\n[MEMORY BASELINE] Model on GPU:")
+        print(f"  Allocated: {model_memory_mb:.0f}MB")
+        print(f"  Reserved:  {model_reserved_mb:.0f}MB")
+        print(f"  GPU Total: {total_gpu_mb:.0f}MB")
+        print(f"  Headroom:  {total_gpu_mb - model_reserved_mb:.0f}MB")
+    
     # Print parameter count
     param_counts = model.count_parameters()
     print(f"\nModel parameters:")
@@ -3241,7 +3542,7 @@ Config Overrides:
                 allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
                 reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
                 max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
-                print(f"\n  GPU MEMORY AT TRANSITION:")
+                print(f"\n  GPU MEMORY AT TRANSITION (before first forward):")
                 print(f"    Allocated: {allocated_mb:.0f} MB")
                 print(f"    Reserved:  {reserved_mb:.0f} MB") 
                 print(f"    Total:     {max_mb:.0f} MB")
@@ -3250,6 +3551,8 @@ Config Overrides:
                     print(f"    WARNING: >90% memory used! Risk of shared memory slowdown.")
                     print(f"    Consider reducing batch_size if training slows after this epoch.")
             
+            print(f"\n  NOTE: First 5 batches will show detailed memory breakdown")
+            print(f"        to identify which modules cause memory increase.")
             print(f"{'='*60}\n")
         
         # STAGED HPM: Activate HPM at hpm_start_epoch
@@ -3270,11 +3573,47 @@ Config Overrides:
         effective_loo_fn = loo_loss_fn if meta_learning_active else None
         effective_equiv_fn = equiv_loss_fn if meta_learning_active else None
         
+        # Record memory before training epoch for comparison
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+            pre_epoch_allocated = torch.cuda.memory_allocated() / 1024 / 1024
+            torch.cuda.reset_peak_memory_stats()
+        
         # Train
         train_losses, global_step = train_epoch(
             model, train_loader, loss_fn, optimizer, device,
             epoch, config, scaler, global_step, ema, effective_loo_fn, effective_equiv_fn
         )
+        
+        # Log epoch peak memory and compare to previous epochs
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+            epoch_peak_allocated = torch.cuda.max_memory_allocated() / 1024 / 1024
+            epoch_peak_reserved = torch.cuda.max_memory_reserved() / 1024 / 1024
+            total_gpu = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+            
+            # Store for comparison
+            if not hasattr(train_epoch, '_prev_epoch_peak'):
+                train_epoch._prev_epoch_peak = None
+            
+            prev_peak = train_epoch._prev_epoch_peak
+            delta_str = ""
+            if prev_peak is not None:
+                delta = epoch_peak_allocated - prev_peak
+                delta_str = f" (Δ{delta:+.0f}MB from prev epoch)"
+                # ALERT if memory increased significantly at transition epoch
+                if epoch == meta_learning_start_epoch and delta > 1000:
+                    print(f"\n  ⚠️  MEMORY SPIKE AT TRANSITION: +{delta:.0f}MB")
+                    print(f"      This is likely due to: HyperLoRA, SolverCrossAttention, or CrossAttention")
+                    print(f"      Check the batch-level breakdown above for details.")
+            
+            train_epoch._prev_epoch_peak = epoch_peak_allocated
+            
+            # Only print for first few epochs or at transitions
+            if epoch < 5 or epoch == meta_learning_start_epoch or epoch == meta_learning_start_epoch + 1:
+                print(f"\n  [EPOCH MEMORY] Peak: {epoch_peak_allocated:.0f}MB alloc, {epoch_peak_reserved:.0f}MB reserved{delta_str}")
+                if epoch_peak_reserved > total_gpu * 0.95:
+                    print(f"      ⚠️  >95% GPU used! May spill to shared memory (SLOW)")
         
         # Update scheduler (if using one)
         if scheduler is not None:
