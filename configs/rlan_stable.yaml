@@ -331,10 +331,26 @@ training:
   ema_decay: 0.999  # Not used when use_ema=false
   
   # =============================================================
+  # STAGED META-LEARNING (Dec 2025 - BG Collapse Fix)
+  # =============================================================
+  # PROBLEM: Enabling LOO + Equivariance from epoch 1 destabilizes
+  # early learning, causing the model to collapse to all-background.
+  #
+  # SOLUTION: Train base model first (pure task loss), then activate
+  # meta-learning losses after the model learns basic FG/BG distinction.
+  #
+  # This parameter controls when LOO and Equivariance losses activate.
+  # The model architecture (HyperLoRA) is always present, but the
+  # auxiliary meta-learning losses are delayed.
+  # =============================================================
+  meta_learning_start_epoch: 3  # Activate LOO/Equivariance after epoch 3
+  
+  # =============================================================
   # LOO TRAINING: LEAVE-ONE-OUT META-LEARNING LOSS
   # =============================================================
   # Teaches the model to generalize from N-1 examples to the Nth.
   # Only active when use_hyperlora: true in model section.
+  # Only active after meta_learning_start_epoch (staged training).
   #
   # For each training task with N pairs:
   #   1. Hold out one pair as the "test"
@@ -356,6 +372,7 @@ training:
   # Encourages consistent LoRA predictions across augmented views.
   # If a task is rotated 90°, the predicted LoRA weights should
   # have similar magnitudes (the "rule" is the same, just rotated).
+  # Only active after meta_learning_start_epoch (staged training).
   #
   # Loss: L2 on Frobenius norm difference of LoRA matrices.
   # =============================================================

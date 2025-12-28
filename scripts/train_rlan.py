@@ -2977,6 +2977,20 @@ Config Overrides:
         )
         print(f"Equivariance training enabled: weight={equiv_weight}, num_augs={equiv_config.get('num_augmentations', 4)}")
     
+    # STAGED META-LEARNING: Delay LOO/Equivariance to prevent early BG collapse
+    meta_learning_start_epoch = config.get('training', {}).get('meta_learning_start_epoch', 3)
+    if (use_loo or use_equivariance) and meta_learning_start_epoch > 0:
+        print(f"\n{'='*60}")
+        print(f"STAGED META-LEARNING ENABLED")
+        print(f"{'='*60}")
+        print(f"  Phase 1 (epochs 1-{meta_learning_start_epoch}): Pure task loss only")
+        print(f"    - Base model learns FG/BG distinction")
+        print(f"    - HyperLoRA architecture present but LOO/Equiv losses OFF")
+        print(f"  Phase 2 (epochs {meta_learning_start_epoch + 1}+): Meta-learning activated")
+        print(f"    - LOO loss: {'ON' if use_loo else 'OFF'} (weight={loo_weight if use_loo else 0})")
+        print(f"    - Equivariance loss: {'ON' if use_equivariance else 'OFF'} (weight={equiv_weight if use_equivariance else 0})")
+        print(f"{'='*60}\n")
+    
     # Training loop
     max_epochs = config['training']['max_epochs']
     save_every = log_cfg.get('save_every', 10)
@@ -3036,10 +3050,24 @@ Config Overrides:
                 )
                 print(f"  New train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
         
+        # STAGED META-LEARNING: Announce phase transition
+        if (use_loo or use_equivariance) and epoch == meta_learning_start_epoch:
+            print(f"\n{'='*60}")
+            print(f"META-LEARNING PHASE ACTIVATED (epoch {epoch + 1})")
+            print(f"{'='*60}")
+            print(f"  LOO loss: NOW ACTIVE (weight={loo_weight if use_loo else 0})")
+            print(f"  Equivariance loss: NOW ACTIVE (weight={equiv_weight if use_equivariance else 0})")
+            print(f"{'='*60}\n")
+        
+        # Determine if meta-learning is active this epoch
+        meta_learning_active = epoch >= meta_learning_start_epoch
+        effective_loo_fn = loo_loss_fn if meta_learning_active else None
+        effective_equiv_fn = equiv_loss_fn if meta_learning_active else None
+        
         # Train
         train_losses, global_step = train_epoch(
             model, train_loader, loss_fn, optimizer, device,
-            epoch, config, scaler, global_step, ema, loo_loss_fn, equiv_loss_fn
+            epoch, config, scaler, global_step, ema, effective_loo_fn, effective_equiv_fn
         )
         
         # Update scheduler (if using one)
