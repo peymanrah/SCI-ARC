@@ -188,13 +188,16 @@ model:
   # - Dynamic banks use CPU storage with FAISS for fast retrieval
   #
   # THREE-PHASE TRAINING WORKFLOW:
-  # Phase 1: Train baseline RLAN (HPM gate stays ~0)
-  # Phase 2: Populate dynamic buffers with solved tasks
+  # Phase 1: Train baseline RLAN (HPM inactive)
+  # Phase 2: Activate HPM (gate learns to open gradually)
   # Phase 3: Fine-tune with HPM retrieval enabled
   #
-  # PRODUCTION DEFAULT: DISABLED (enable for continual learning)
+  # STAGED HPM: Aligned with meta_learning_start_epoch for stability
+  # HPM stays OFF during early training, then activates with meta-learning.
+  # This ensures the base model learns FG/BG distinction first.
   # =============================================================
-  use_hpm: false                      # DISABLED - enable for continual learning
+  use_hpm: true                       # ENABLED - staged activation via hpm_start_epoch
+  hpm_start_epoch: 3                  # Activate HPM after epoch 3 (aligns with meta_learning_start_epoch)
   
   # Sparse MoE Routing Configuration
   hpm_top_k: 2                        # Number of banks to route to per sample
@@ -344,6 +347,9 @@ training:
   # This parameter controls when LOO and Equivariance losses activate.
   # The model architecture (HyperLoRA) is always present, but the
   # auxiliary meta-learning losses are delayed.
+  #
+  # NOTE: HPM also uses hpm_start_epoch (model section) for alignment.
+  # Both should typically be set to the same value for stable training.
   # =============================================================
   meta_learning_start_epoch: 3  # Activate LOO/Equivariance after epoch 3
   

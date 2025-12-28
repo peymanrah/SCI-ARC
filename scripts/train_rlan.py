@@ -2991,6 +2991,29 @@ Config Overrides:
         print(f"    - Equivariance loss: {'ON' if use_equivariance else 'OFF'} (weight={equiv_weight if use_equivariance else 0})")
         print(f"{'='*60}\n")
     
+    # STAGED HPM: Delay HPM activation to align with meta-learning
+    use_hpm = config.get('model', {}).get('use_hpm', False)
+    hpm_start_epoch = config.get('model', {}).get('hpm_start_epoch', 3)
+    if use_hpm and hpm_start_epoch > 0:
+        print(f"\n{'='*60}")
+        print(f"STAGED HPM ENABLED")
+        print(f"{'='*60}")
+        print(f"  Phase 1 (epochs 1-{hpm_start_epoch}): HPM inactive")
+        print(f"    - HPM module exists but use_hpm=False during forward")
+        print(f"    - No HPM load balancing loss added")
+        print(f"  Phase 2 (epochs {hpm_start_epoch + 1}+): HPM activated")
+        print(f"    - HPM contributes to features (gated residual)")
+        print(f"    - Load balancing loss ensures all banks utilized")
+        print(f"{'='*60}\n")
+        # Set HPM state based on start_epoch (handles resume case)
+        if hasattr(model, 'use_hpm'):
+            if start_epoch >= hpm_start_epoch:
+                model.use_hpm = True
+                print(f"  [HPM] Already past start epoch - HPM ACTIVE")
+            else:
+                model.use_hpm = False
+                print(f"  [HPM] Temporarily disabled until epoch {hpm_start_epoch + 1}")
+    
     # Training loop
     max_epochs = config['training']['max_epochs']
     save_every = log_cfg.get('save_every', 10)
@@ -3058,6 +3081,19 @@ Config Overrides:
             print(f"  LOO loss: NOW ACTIVE (weight={loo_weight if use_loo else 0})")
             print(f"  Equivariance loss: NOW ACTIVE (weight={equiv_weight if use_equivariance else 0})")
             print(f"{'='*60}\n")
+        
+        # STAGED HPM: Activate HPM at hpm_start_epoch
+        if use_hpm and epoch == hpm_start_epoch:
+            print(f"\n{'='*60}")
+            print(f"HPM PHASE ACTIVATED (epoch {epoch + 1})")
+            print(f"{'='*60}")
+            print(f"  Hierarchical Primitive Memory: NOW ACTIVE")
+            print(f"  Banks: Compositional, Pattern, Relational")
+            print(f"  Top-K routing: {config.get('model', {}).get('hpm_top_k', 2)}")
+            print(f"  Load balance weight: {config.get('model', {}).get('hpm_balance_weight', 0.01)}")
+            print(f"{'='*60}\n")
+            if hasattr(model, 'use_hpm'):
+                model.use_hpm = True
         
         # Determine if meta-learning is active this epoch
         meta_learning_active = epoch >= meta_learning_start_epoch
