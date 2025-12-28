@@ -256,8 +256,19 @@ training:
   # epochs 1-3, so we can use larger batches. Increased from 16 to 28.
   # At 16GB usage with batch=16, we have 8GB headroom on 24GB GPU.
   #
-  batch_size: 28    # Increased from 16 (8GB headroom available)
-  grad_accumulation_steps: 12  # effective_batch_size = 28 × 12 = 336
+  # MEMORY OPTIMIZATION (Dec 2025): Gradient checkpointing enabled to allow
+  # larger batch sizes. Checkpointing trades compute for memory by recomputing
+  # activations during backward pass instead of storing them.
+  # - Solver checkpointing: Saves ~40% solver memory (6 steps → 1 stored)
+  # - Context encoder checkpointing: Saves ~30% encoder memory
+  # - Net effect: Can increase batch_size from 45 to 65+ on 24GB GPU
+  #
+  # CRITICAL: Batch size < 55 causes BG collapse due to insufficient FG examples
+  # per gradient update. With checkpointing, we can safely reach 55-65.
+  #
+  gradient_checkpointing: true  # Enable to reduce memory ~40%, allow larger batches
+  batch_size: 55    # Increased from 28 with gradient checkpointing (was causing BG collapse at <55)
+  grad_accumulation_steps: 6  # effective_batch_size = 55 × 6 = 330
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization

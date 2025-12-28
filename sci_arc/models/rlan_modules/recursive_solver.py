@@ -36,6 +36,7 @@ from typing import Optional, Tuple, List, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 # Import SwiGLU for enhanced FFN
 try:
@@ -500,6 +501,7 @@ class RecursiveSolver(nn.Module):
         use_solver_context: bool = True,  # NEW: Enable solver cross-attention to support set
         num_context_heads: int = 4,  # Heads for solver cross-attention
         use_dsc: bool = True,  # Kept for API compatibility but not used for module creation
+        gradient_checkpointing: bool = False,  # Enable to reduce memory ~40%
     ):
         """
         Args:
@@ -519,6 +521,8 @@ class RecursiveSolver(nn.Module):
                                 Phase 2.5 feature - gives solver direct access to examples.
             num_context_heads: Number of attention heads for solver cross-attention.
             use_dsc: Kept for API compatibility. Mode is determined at runtime.
+            gradient_checkpointing: Whether to use gradient checkpointing to reduce memory.
+                                   Trades compute for memory by recomputing activations during backward.
         """
         super().__init__()
         
@@ -531,6 +535,10 @@ class RecursiveSolver(nn.Module):
         self.use_feedback = use_feedback
         self.use_solver_context = use_solver_context
         self.use_dsc = use_dsc
+        self.gradient_checkpointing = gradient_checkpointing
+        
+        if gradient_checkpointing:
+            print(f"[RecursiveSolver] Gradient checkpointing ENABLED (memory optimization)")
         
         # Clue feature aggregation
         self.clue_aggregator = nn.Sequential(
@@ -775,6 +783,37 @@ class RecursiveSolver(nn.Module):
             
         return self.predicate_gate(features, predicates)
     
+    def _solver_step(
+        self,
+        combined: torch.Tensor,
+        h: Optional[torch.Tensor],
+        support_features: Optional[torch.Tensor],
+        lora_deltas: Optional[Dict[str, torch.Tensor]],
+    ) -> torch.Tensor:
+        """
+        Single solver step - wrapped for gradient checkpointing.
+        
+        This function is designed to be called with torch.utils.checkpoint.checkpoint()
+        which trades compute for memory by recomputing activations during backward.
+        
+        Args:
+            combined: (B, 2D, H, W) concatenated features
+            h: Optional hidden state from previous step
+            support_features: Optional support set for cross-attention
+            lora_deltas: Optional HyperLoRA weight deltas
+            
+        Returns:
+            h_new: Updated hidden state (B, D, H, W)
+        """
+        # GRU update with optional LoRA modulation
+        h_new = self.gru(combined, h, lora_deltas=lora_deltas)
+        
+        # Phase 2.5: Cross-attention to support set at each step
+        if self.solver_cross_attn is not None and support_features is not None:
+            h_new = self.solver_cross_attn(h_new, support_features)
+            
+        return h_new
+    
     def forward(
         self,
         clue_features: torch.Tensor,
@@ -875,13 +914,21 @@ class RecursiveSolver(nn.Module):
             combined = torch.cat([aggregated, input_embed], dim=1)  # (B, 2D, H, W)
             combined = self.dropout(combined)
             
-            # GRU update with optional LoRA modulation
-            h_new = self.gru(combined, h, lora_deltas=lora_deltas)
-            
-            # Phase 2.5: Cross-attention to support set at each step
-            # This gives the solver "eyes" to look back at the examples
-            if self.solver_cross_attn is not None and support_features is not None:
-                h_new = self.solver_cross_attn(h_new, support_features)
+            # Core solver step - GRU + cross-attention
+            # Use gradient checkpointing during training to reduce memory
+            if self.gradient_checkpointing and self.training:
+                # Checkpoint requires use_reentrant=False for proper gradient flow
+                # We must ensure all inputs have requires_grad for checkpointing to work
+                h_new = torch_checkpoint(
+                    self._solver_step,
+                    combined,
+                    h,
+                    support_features,
+                    lora_deltas,
+                    use_reentrant=False,
+                )
+            else:
+                h_new = self._solver_step(combined, h, support_features, lora_deltas)
             
             # Store initial hidden state for residual connections
             if t == 0:

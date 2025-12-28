@@ -452,6 +452,7 @@ def create_model(config: dict) -> RLAN:
     from sci_arc.models.rlan import RLANConfig
     
     model_config = config['model']
+    train_config = config.get('training', {})
     
     # Create RLANConfig with all parameters including ablation flags
     rlan_config = RLANConfig(
@@ -485,6 +486,8 @@ def create_model(config: dict) -> RLAN:
         hyperlora_scaling=model_config.get('hyperlora_scaling', 1.0),
         hyperlora_dropout=model_config.get('hyperlora_dropout', 0.0),
         hyperlora_init_scale=model_config.get('hyperlora_init_scale', 0.01),
+        # Memory optimization: gradient checkpointing
+        gradient_checkpointing=train_config.get('gradient_checkpointing', False),
     )
     
     model = RLAN(config=rlan_config)

@@ -130,6 +130,7 @@ class RLANConfig:
     
     # Training parameters
     dropout: float = 0.1
+    gradient_checkpointing: bool = False  # Enable to reduce memory ~40%, trade compute for memory
     
     # Positional encoding option
     use_learned_pos: bool = False  # Use learned pos embed vs sinusoidal (default)
@@ -348,6 +349,7 @@ class RLAN(nn.Module):
         # Phase 3: Best-step selection for handling over-iteration
         self.use_solver_context = config.use_solver_context if config else True
         self.use_best_step_selection = config.use_best_step_selection if config else False
+        self.gradient_checkpointing = config.gradient_checkpointing if config else False
         self.solver = RecursiveSolver(
             hidden_dim=hidden_dim,
             num_classes=num_classes,
@@ -362,6 +364,7 @@ class RLAN(nn.Module):
             use_solver_context=self.use_solver_context,  # Phase 2.5: Solver cross-attention to support set
             num_context_heads=config.solver_context_heads if config else 4,
             use_dsc=self.use_dsc,  # BUG FIX #5: DSC provides per-clue counts, bypassing count_proj
+            gradient_checkpointing=self.gradient_checkpointing,  # Memory optimization
         )
         
         # HyperLoRA for meta-learning weight adaptation (optional)
