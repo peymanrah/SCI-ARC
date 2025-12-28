@@ -3088,6 +3088,35 @@ Config Overrides:
                 model.use_hpm = False
                 print(f"  [HPM] Temporarily disabled until epoch {hpm_start_epoch + 1}")
     
+    # STAGED HYPERLORA AND SOLVER CROSS-ATTENTION
+    # These modules exist in the model but should not CONTRIBUTE during early epochs
+    # This prevents gradient noise from untrained modules destabilizing the base model
+    use_hyperlora = config.get('model', {}).get('use_hyperlora', False)
+    use_solver_context = config.get('model', {}).get('use_solver_context', False)
+    
+    if use_hyperlora or use_solver_context:
+        print(f"\n{'='*60}")
+        print(f"STAGED NEW MODULE CONTRIBUTIONS")
+        print(f"{'='*60}")
+        if use_hyperlora:
+            if start_epoch >= meta_learning_start_epoch:
+                model.hyperlora_active = True
+                print(f"  [HyperLoRA] Already past start epoch - LoRA deltas ACTIVE")
+            else:
+                model.hyperlora_active = False
+                print(f"  [HyperLoRA] LoRA deltas disabled until epoch {meta_learning_start_epoch + 1}")
+                print(f"    - Module trains via LOO/Equiv losses after activation")
+        
+        if use_solver_context:
+            if start_epoch >= meta_learning_start_epoch:
+                model.solver_context_active = True
+                print(f"  [SolverCrossAttention] Already past start epoch - ACTIVE")
+            else:
+                model.solver_context_active = False
+                print(f"  [SolverCrossAttention] Disabled until epoch {meta_learning_start_epoch + 1}")
+                print(f"    - Solver runs without cross-attention initially")
+        print(f"{'='*60}\n")
+    
     # Training loop
     max_epochs = config['training']['max_epochs']
     save_every = log_cfg.get('save_every', 10)
@@ -3147,13 +3176,24 @@ Config Overrides:
                 )
                 print(f"  New train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
         
-        # STAGED META-LEARNING: Announce phase transition
+        # STAGED META-LEARNING: Announce phase transition and activate modules
         if (use_loo or use_equivariance) and epoch == meta_learning_start_epoch:
             print(f"\n{'='*60}")
             print(f"META-LEARNING PHASE ACTIVATED (epoch {epoch + 1})")
             print(f"{'='*60}")
             print(f"  LOO loss: NOW ACTIVE (weight={loo_weight if use_loo else 0})")
             print(f"  Equivariance loss: NOW ACTIVE (weight={equiv_weight if use_equivariance else 0})")
+            
+            # Activate HyperLoRA contributions
+            if use_hyperlora:
+                model.hyperlora_active = True
+                print(f"  HyperLoRA: LoRA deltas NOW CONTRIBUTING to forward pass")
+            
+            # Activate SolverCrossAttention
+            if use_solver_context:
+                model.solver_context_active = True
+                print(f"  SolverCrossAttention: NOW ACTIVE in solver loop")
+            
             print(f"{'='*60}\n")
         
         # STAGED HPM: Activate HPM at hpm_start_epoch

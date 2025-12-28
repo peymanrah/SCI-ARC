@@ -644,8 +644,11 @@ class RLAN(nn.Module):
         
         # 6.5. HyperLoRA - compute task-specific weight adaptations (if enabled)
         # CRITICAL FIX: This must be called BEFORE solver so LoRA weights are used!
+        # STAGING: hyperlora_active flag allows disabling LoRA during early epochs
+        # while keeping the module trainable (it still gets gradients via LOO/Equiv later)
         lora_deltas = None
-        if self.use_hyperlora and self.hyper_lora is not None:
+        hyperlora_active = getattr(self, 'hyperlora_active', True)  # Default: active
+        if self.use_hyperlora and self.hyper_lora is not None and hyperlora_active:
             if support_features is not None:
                 # HyperLoRA expects (B, N, D, H, W) and returns weight deltas
                 lora_deltas = self.hyper_lora(support_features)
@@ -672,6 +675,10 @@ class RLAN(nn.Module):
         # This creates gradient flow: task_loss -> stop_probs -> stop_predictor
         # Making clue count a TRUE latent variable learned from target grids
         # Phase 2.5: Pass support_features for solver cross-attention
+        # STAGING: solver_context_active flag allows disabling cross-attention during early epochs
+        solver_context_active = getattr(self, 'solver_context_active', True)  # Default: active
+        effective_support_features = support_features if solver_context_active else None
+        
         act_outputs = None
         if return_all_steps or return_intermediates:
             solver_output = self.solver(
@@ -681,11 +688,11 @@ class RLAN(nn.Module):
                 input_grid=input_grid,
                 attention_maps=attention_maps,
                 stop_logits=stop_logits,  # For latent clue count learning
-                support_features=support_features,  # Phase 2.5: Solver cross-attention
+                support_features=effective_support_features,  # STAGED: None during early epochs
                 return_all_steps=True,
                 return_act_outputs=return_intermediates and self.use_act,
                 num_steps_override=num_steps_override,
-                lora_deltas=lora_deltas,  # HyperLoRA weight adaptations
+                lora_deltas=lora_deltas,  # HyperLoRA weight adaptations (None during early epochs)
             )
             # Handle ACT outputs if returned
             if isinstance(solver_output, tuple):
@@ -701,10 +708,10 @@ class RLAN(nn.Module):
                 input_grid=input_grid,
                 attention_maps=attention_maps,
                 stop_logits=stop_logits,  # For latent clue count learning
-                support_features=support_features,  # Phase 2.5: Solver cross-attention
+                support_features=effective_support_features,  # STAGED: None during early epochs
                 return_all_steps=False,
                 num_steps_override=num_steps_override,
-                lora_deltas=lora_deltas,  # HyperLoRA weight adaptations
+                lora_deltas=lora_deltas,  # HyperLoRA weight adaptations (None during early epochs)
             )
             all_logits = None
         

@@ -620,9 +620,12 @@ class RecursiveSolver(nn.Module):
         - bg_bias=-0.5 (6% BG): Combined with 10x FG weight, caused FG collapse!
         - bg_bias=0.0 (10% BG): Uniform, let weighted loss guide learning
         
-        New approach: bg_bias=0.0, NEUTRAL initialization
-        This is NEUTRAL and lets the weighted loss (bg_cap=2.0, fg_cap=5.0) guide learning.
-        The key insight is that initialization bias + loss weighting was too aggressive.
+        STABLE APPROACH (Dec 2025): bg_bias=0.0, NEUTRAL initialization
+        This works when the architecture is simple (no noisy new modules).
+        
+        LESSON LEARNED: bg_bias=-0.5 caused instability when combined with
+        HyperLoRA, HPM, and SolverCrossAttention - too much gradient noise.
+        NEUTRAL initialization is most robust.
         """
         # Get the final Conv2d layer in output_head
         final_layer = None
@@ -631,13 +634,13 @@ class RecursiveSolver(nn.Module):
                 final_layer = module
         
         if final_layer is not None and final_layer.bias is not None:
-            # ANTI-COLLAPSE initialization - disfavor all-black predictions at init
-            # bg_bias=-0.5 makes "predict black" slightly uphill, giving DSC time
-            # to establish useful gradients before the head commits to all-black
+            # NEUTRAL initialization - let the loss function guide learning
+            # This is more stable than anti-collapse bias when architecture has
+            # multiple modules that add noise (HyperLoRA, HPM, CrossAttention)
             with torch.no_grad():
-                final_layer.bias[0] = -0.5  # Disfavor background to prevent collapse
+                final_layer.bias[0] = 0.0  # NEUTRAL for background
                 final_layer.bias[1:] = 0.0  # NEUTRAL for foreground classes
-            print(f"[RecursiveSolver] Output head initialized: bg_bias=-0.5 (ANTI-COLLAPSE), fg_bias=0.0")
+            print(f"[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0")
     
     def _aggregate_clues(
         self,
@@ -783,6 +786,32 @@ class RecursiveSolver(nn.Module):
             
         return self.predicate_gate(features, predicates)
     
+    def _solver_step_for_checkpoint(
+        self,
+        combined: torch.Tensor,
+        h: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Minimal solver step for gradient checkpointing - NO optional args.
+        
+        IMPORTANT: torch.utils.checkpoint does NOT handle:
+        - None values (causes silent gradient issues)
+        - Dict arguments (not checkpointed correctly)
+        
+        So we only use this for the basic GRU step, without LoRA or cross-attention.
+        Those are applied OUTSIDE the checkpointed region.
+        
+        Args:
+            combined: (B, 2D, H, W) concatenated features
+            h: Hidden state from previous step (or zeros if first step)
+            
+        Returns:
+            h_new: Updated hidden state (B, D, H, W)
+        """
+        # GRU update WITHOUT LoRA (LoRA applied separately)
+        h_new = self.gru(combined, h, lora_deltas=None)
+        return h_new
+    
     def _solver_step(
         self,
         combined: torch.Tensor,
@@ -791,10 +820,8 @@ class RecursiveSolver(nn.Module):
         lora_deltas: Optional[Dict[str, torch.Tensor]],
     ) -> torch.Tensor:
         """
-        Single solver step - wrapped for gradient checkpointing.
-        
-        This function is designed to be called with torch.utils.checkpoint.checkpoint()
-        which trades compute for memory by recomputing activations during backward.
+        Full solver step with all optional features.
+        Used when gradient checkpointing is disabled.
         
         Args:
             combined: (B, 2D, H, W) concatenated features
@@ -914,20 +941,39 @@ class RecursiveSolver(nn.Module):
             combined = torch.cat([aggregated, input_embed], dim=1)  # (B, 2D, H, W)
             combined = self.dropout(combined)
             
-            # Core solver step - GRU + cross-attention
-            # Use gradient checkpointing during training to reduce memory
+            # Core solver step - GRU + optional LoRA + optional cross-attention
+            # Gradient checkpointing trades compute for memory by recomputing activations
             if self.gradient_checkpointing and self.training:
-                # Checkpoint requires use_reentrant=False for proper gradient flow
-                # We must ensure all inputs have requires_grad for checkpointing to work
+                # CRITICAL: Use minimal checkpoint function (no Dict/None args)
+                # Initialize h to zeros if None (first step)
+                if h is None:
+                    B_size = combined.shape[0]
+                    h_for_ckpt = torch.zeros(
+                        B_size, self.hidden_dim, combined.shape[2], combined.shape[3],
+                        device=combined.device, dtype=combined.dtype
+                    )
+                else:
+                    h_for_ckpt = h
+                
+                # Checkpointed GRU step (no LoRA - applied separately)
                 h_new = torch_checkpoint(
-                    self._solver_step,
+                    self._solver_step_for_checkpoint,
                     combined,
-                    h,
-                    support_features,
-                    lora_deltas,
+                    h_for_ckpt,
                     use_reentrant=False,
                 )
+                
+                # Apply LoRA OUTSIDE checkpoint (Dict not supported by checkpoint)
+                if lora_deltas is not None:
+                    # Re-apply GRU with LoRA for correct weight modulation
+                    # This is a compromise - we lose some memory savings but get correctness
+                    h_new = self.gru(combined, h, lora_deltas=lora_deltas)
+                
+                # Apply cross-attention OUTSIDE checkpoint
+                if self.solver_cross_attn is not None and support_features is not None:
+                    h_new = self.solver_cross_attn(h_new, support_features)
             else:
+                # Standard forward - all features included
                 h_new = self._solver_step(combined, h, support_features, lora_deltas)
             
             # Store initial hidden state for residual connections
