@@ -25,7 +25,7 @@ from functools import partial
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.nn.utils.rnn import pad_sequence
 
 from .transform_families import (
@@ -33,6 +33,181 @@ from .transform_families import (
     infer_transform_from_grids,
     NUM_TRANSFORM_FAMILIES,
 )
+
+
+# ============================================================================
+# BucketedBatchSampler: Groups samples by grid size for memory efficiency
+# ============================================================================
+
+class BucketedBatchSampler(Sampler):
+    """
+    Batch sampler that groups samples by grid size for memory efficiency.
+    
+    Problem: When batching variable-size grids, ALL samples are padded to the
+    MAX size in the batch. One 30x30 grid in a batch of 69 15x15 grids causes
+    all 70 samples to use 30x30 memory = 4x waste!
+    
+    Solution: Group samples into buckets by grid size, create batches within
+    buckets, then shuffle the batch ORDER (not the samples within batches).
+    
+    This gives:
+    - Memory efficiency: Similar sizes per batch = minimal padding
+    - Unbiased learning: Batch order is random each epoch
+    - Same sample frequency: Each sample seen exactly once per epoch
+    
+    Usage:
+        sampler = BucketedBatchSampler(
+            dataset,
+            batch_size=70,
+            bucket_boundaries=[10, 15, 20, 25],  # Grid size thresholds
+            drop_last=False,
+        )
+        loader = DataLoader(dataset, batch_sampler=sampler)
+    """
+    
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        bucket_boundaries: List[int] = None,
+        drop_last: bool = False,
+        shuffle: bool = True,
+        seed: int = 42,
+    ):
+        """
+        Args:
+            dataset: Dataset with cached samples
+            batch_size: Number of samples per batch
+            bucket_boundaries: Grid size thresholds [10, 15, 20, 25] creates buckets:
+                               [0-10], [11-15], [16-20], [21-25], [26+]
+                               Default: [10, 15, 20, 25] covers ARC grid sizes well
+            drop_last: Whether to drop incomplete batches
+            shuffle: Whether to shuffle batch order each epoch
+            seed: Random seed for reproducibility
+        """
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.bucket_boundaries = bucket_boundaries or [10, 15, 20, 25]
+        self.drop_last = drop_last
+        self.shuffle = shuffle
+        self.seed = seed
+        self.epoch = 0
+        
+        # Build buckets: map sample indices to their grid size bucket
+        self._build_buckets()
+    
+    def _get_sample_max_grid_size(self, idx: int) -> int:
+        """Get the maximum grid dimension for a sample."""
+        sample = self.dataset[idx]
+        
+        max_size = 0
+        
+        # Check test input/output
+        if 'test_input' in sample:
+            t = sample['test_input']
+            if isinstance(t, torch.Tensor):
+                # Get non-padded size by finding last non-pad row/col
+                # For now, just use tensor shape (it's padded to max_size anyway)
+                # The key is relative sizes between samples
+                max_size = max(max_size, t.shape[-1], t.shape[-2])
+            elif isinstance(t, np.ndarray):
+                max_size = max(max_size, t.shape[-1], t.shape[-2])
+        
+        # Check train input/output grids (list of tensors)
+        for key in ['input_grids', 'output_grids']:
+            if key in sample:
+                for g in sample[key]:
+                    if isinstance(g, torch.Tensor):
+                        max_size = max(max_size, g.shape[-1], g.shape[-2])
+                    elif isinstance(g, np.ndarray):
+                        max_size = max(max_size, g.shape[-1], g.shape[-2])
+        
+        return max_size
+    
+    def _get_bucket_id(self, grid_size: int) -> int:
+        """Map grid size to bucket ID."""
+        for i, boundary in enumerate(self.bucket_boundaries):
+            if grid_size <= boundary:
+                return i
+        return len(self.bucket_boundaries)  # Largest bucket
+    
+    def _build_buckets(self):
+        """Build sample index buckets based on grid sizes."""
+        num_buckets = len(self.bucket_boundaries) + 1
+        self.buckets = [[] for _ in range(num_buckets)]
+        
+        # Sample a subset for large datasets to speed up bucket building
+        dataset_len = len(self.dataset)
+        
+        print(f"[BucketedBatchSampler] Building {num_buckets} buckets for {dataset_len:,} samples...")
+        
+        # For cached samples, we can access grid sizes efficiently
+        for idx in range(dataset_len):
+            # Use a fast path if dataset stores grid size metadata
+            if hasattr(self.dataset, '_cached_samples') and self.dataset._cached_samples:
+                sample = self.dataset._cached_samples[idx]
+                # Compute max grid size from sample
+                max_size = 0
+                if 'test_input' in sample:
+                    t = sample['test_input']
+                    if isinstance(t, torch.Tensor):
+                        max_size = max(max_size, t.shape[-1], t.shape[-2])
+                for key in ['input_grids', 'output_grids']:
+                    if key in sample:
+                        for g in sample[key]:
+                            if isinstance(g, torch.Tensor):
+                                max_size = max(max_size, g.shape[-1], g.shape[-2])
+            else:
+                max_size = self._get_sample_max_grid_size(idx)
+            
+            bucket_id = self._get_bucket_id(max_size)
+            self.buckets[bucket_id].append(idx)
+        
+        # Print bucket statistics
+        for i, bucket in enumerate(self.buckets):
+            if i < len(self.bucket_boundaries):
+                size_range = f"<={self.bucket_boundaries[i]}"
+            else:
+                size_range = f">{self.bucket_boundaries[-1]}"
+            print(f"  Bucket {i} (grid {size_range}): {len(bucket):,} samples")
+        
+        # Pre-compute batches
+        self._create_batches()
+    
+    def _create_batches(self):
+        """Create batches from buckets."""
+        self.batches = []
+        
+        for bucket in self.buckets:
+            # Shuffle within bucket for variety
+            bucket_copy = bucket.copy()
+            random.Random(self.seed + self.epoch).shuffle(bucket_copy)
+            
+            # Create batches
+            for i in range(0, len(bucket_copy), self.batch_size):
+                batch = bucket_copy[i:i + self.batch_size]
+                if len(batch) == self.batch_size or not self.drop_last:
+                    self.batches.append(batch)
+        
+        # Shuffle batch order (KEY: unbiased learning)
+        if self.shuffle:
+            random.Random(self.seed + self.epoch).shuffle(self.batches)
+    
+    def __iter__(self):
+        """Iterate over batches."""
+        # Recreate batches with current epoch's shuffle
+        self._create_batches()
+        
+        for batch in self.batches:
+            yield batch
+    
+    def __len__(self):
+        """Number of batches."""
+        return len(self.batches)
+    
+    def set_epoch(self, epoch: int):
+        """Set epoch for shuffling (call before each epoch)."""
+        self.epoch = epoch
 
 
 # ============================================================================

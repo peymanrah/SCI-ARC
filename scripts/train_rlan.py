@@ -53,7 +53,7 @@ from sci_arc.models.rlan_modules.loo_training import (
     LOOTrainingLoss, LOOConfig,
     AugmentationEquivarianceLoss, EquivarianceConfig,
 )
-from sci_arc.data import ARCDataset, collate_sci_arc
+from sci_arc.data import ARCDataset, collate_sci_arc, BucketedBatchSampler
 from sci_arc.evaluation.trm_style_evaluator import TRMStyleEvaluator
 from sci_arc.utils.gap_monitor import GapHealthMonitor
 
@@ -608,17 +608,43 @@ def create_train_loader(
     
     collate_fn = partial(collate_sci_arc, max_grid_size=max_grid_size)
     
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        prefetch_factor=prefetch_factor,
-        persistent_workers=persistent_workers,
-        collate_fn=collate_fn,
-        drop_last=True,
-    )
+    # BUCKETED BATCHING: Group samples by grid size for memory efficiency
+    # This prevents one large 30x30 grid from forcing all 70 samples to use 30x30 memory
+    use_bucketed_batching = data_cfg.get('bucketed_batching', True)  # Default ON for cached samples
+    bucket_boundaries = data_cfg.get('bucket_boundaries', [10, 15, 20, 25])
+    
+    if use_bucketed_batching and cache_samples:
+        print(f"  Using BUCKETED BATCHING (groups samples by grid size)")
+        batch_sampler = BucketedBatchSampler(
+            dataset=train_dataset,
+            batch_size=batch_size,
+            bucket_boundaries=bucket_boundaries,
+            drop_last=True,
+            shuffle=True,
+            seed=train_cfg.get('seed', 42),
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=batch_sampler,  # Use batch_sampler instead of batch_size/shuffle
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            collate_fn=collate_fn,
+        )
+    else:
+        # Standard random sampling
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            collate_fn=collate_fn,
+            drop_last=True,
+        )
     
     return train_loader
 
@@ -1100,6 +1126,8 @@ def train_epoch(
     ema: Optional[EMAHelper] = None,
     loo_loss_fn: Optional[LOOTrainingLoss] = None,
     equiv_loss_fn: Optional[AugmentationEquivarianceLoss] = None,
+    loo_start_epoch: int = 12,
+    equiv_start_epoch: int = 8,
 ) -> Dict[str, float]:
     """
     Train for one epoch with augmentation diversity tracking.
@@ -1117,6 +1145,8 @@ def train_epoch(
         ema: Optional EMA helper
         loo_loss_fn: Optional LOO training loss for meta-learning
         equiv_loss_fn: Optional Augmentation Equivariance loss for meta-learning
+        loo_start_epoch: Epoch when LOO loss activates (default: 12)
+        equiv_start_epoch: Epoch when equivariance loss activates (default: 8)
     
     Returns losses dict AND augmentation statistics for debugging.
     """
@@ -1333,7 +1363,9 @@ def train_epoch(
                 # This prevents O(N) memory accumulation from holding all N computation graphs
                 loo_loss_value = 0.0  # Float for logging (backward done inside)
                 loo_metrics = None
-                if loo_loss_fn is not None and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                # Check epoch threshold - LOO activates at loo_start_epoch
+                loo_active = loo_loss_fn is not None and epoch >= loo_start_epoch
+                if loo_active and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
                     # LOO requires at least min_pairs training pairs
                     num_pairs = pair_mask.sum(dim=1).min().item() if pair_mask is not None else train_inputs.shape[1]
                     if num_pairs >= loo_loss_fn.config.min_pairs_for_loo:
@@ -1366,7 +1398,9 @@ def train_epoch(
                 # Compute Augmentation Equivariance loss if enabled (meta-learning)
                 # MEMORY FIX v3: Use iterative backward - backward happens INSIDE the function
                 equiv_loss_value = 0.0  # Float for logging
-                if equiv_loss_fn is not None and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                # Check epoch threshold - Equivariance activates at equiv_start_epoch
+                equiv_active = equiv_loss_fn is not None and epoch >= equiv_start_epoch
+                if equiv_active and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
                     support_features = outputs.get('support_features')  # (B, N, D, H, W)
                     lora_deltas = outputs.get('lora_deltas')  # Dict with original deltas
                     
@@ -1572,7 +1606,9 @@ def train_epoch(
             # Compute LOO loss if enabled (meta-learning via HyperLoRA)
             loo_loss = torch.tensor(0.0, device=device)
             loo_metrics = None
-            if loo_loss_fn is not None and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+            # Check epoch threshold - LOO activates at loo_start_epoch
+            loo_active = loo_loss_fn is not None and epoch >= loo_start_epoch
+            if loo_active and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
                 # LOO requires at least min_pairs training pairs
                 num_pairs = pair_mask.sum(dim=1).min().item() if pair_mask is not None else train_inputs.shape[1]
                 if num_pairs >= loo_loss_fn.config.min_pairs_for_loo:
@@ -3345,22 +3381,24 @@ Config Overrides:
     # Initialize LOO training for meta-learning (requires HyperLoRA)
     loo_config = config.get('training', {}).get('loo_training', {})
     use_loo = loo_config.get('enabled', False) and config.get('model', {}).get('use_hyperlora', False)
+    loo_start_epoch = loo_config.get('start_epoch', 12)  # Default: epoch 12
+    loo_weight = loo_config.get('loss_weight', 0.2)
+    loo_min_pairs = loo_config.get('min_pairs_for_loo', 2)
     loo_loss_fn = None
     if use_loo:
-        loo_weight = loo_config.get('loss_weight', 0.5)
-        loo_min_pairs = loo_config.get('min_pairs_for_loo', 2)
         loo_loss_fn = LOOTrainingLoss(
             config=LOOConfig(
                 loss_weight=loo_weight,
                 min_pairs_for_loo=loo_min_pairs,
             )
         )
-        print(f"LOO training enabled: weight={loo_weight}, min_pairs={loo_min_pairs}")
+        print(f"LOO training configured: weight={loo_weight}, min_pairs={loo_min_pairs}, start_epoch={loo_start_epoch}")
     
     # Initialize equivariance training (consistency across augmentations)
     equiv_config = config.get('training', {}).get('equivariance_training', {})
     use_equivariance = equiv_config.get('enabled', False) and config.get('model', {}).get('use_hyperlora', False)
-    equiv_weight = equiv_config.get('loss_weight', 0.1) if use_equivariance else 0.0
+    equiv_start_epoch = equiv_config.get('start_epoch', 8)  # Default: epoch 8
+    equiv_weight = equiv_config.get('loss_weight', 0.05) if use_equivariance else 0.0
     equiv_loss_fn = None
     if use_equivariance:
         hidden_dim = config.get('model', {}).get('hidden_dim', 256)
@@ -3372,20 +3410,22 @@ Config Overrides:
             ),
             hidden_dim=hidden_dim,
         )
-        print(f"Equivariance training enabled: weight={equiv_weight}, num_augs={equiv_config.get('num_augmentations', 4)}")
+        print(f"Equivariance training configured: weight={equiv_weight}, num_augs={equiv_config.get('num_augmentations', 4)}, start_epoch={equiv_start_epoch}")
     
     # STAGED META-LEARNING: Delay LOO/Equivariance to prevent early BG collapse
+    # Each loss has its own start_epoch for fine-grained control
     meta_learning_start_epoch = config.get('training', {}).get('meta_learning_start_epoch', 3)
-    if (use_loo or use_equivariance) and meta_learning_start_epoch > 0:
+    if use_loo or use_equivariance:
         print(f"\n{'='*60}")
-        print(f"STAGED META-LEARNING ENABLED")
+        print(f"STAGED META-LEARNING ENABLED (Per-Loss Scheduling)")
         print(f"{'='*60}")
-        print(f"  Phase 1 (epochs 1-{meta_learning_start_epoch}): Pure task loss only")
-        print(f"    - Base model learns FG/BG distinction")
-        print(f"    - HyperLoRA architecture present but LOO/Equiv losses OFF")
-        print(f"  Phase 2 (epochs {meta_learning_start_epoch + 1}+): Meta-learning activated")
-        print(f"    - LOO loss: {'ON' if use_loo else 'OFF'} (weight={loo_weight if use_loo else 0})")
-        print(f"    - Equivariance loss: {'ON' if use_equivariance else 'OFF'} (weight={equiv_weight if use_equivariance else 0})")
+        print(f"  HyperLoRA/SolverContext: Epoch {meta_learning_start_epoch + 1}+")
+        if use_equivariance:
+            print(f"  Equivariance Loss: Epoch {equiv_start_epoch + 1}+ (weight={equiv_weight})")
+            print(f"    \u2192 Fixes dihedral invariance (currently 13% TTA consensus)")
+        if use_loo:
+            print(f"  LOO Loss: Epoch {loo_start_epoch + 1}+ (weight={loo_weight})")
+            print(f"    \u2192 Teaches few-shot generalization (fixes 60x entropy gap)")
         print(f"{'='*60}\n")
     
     # STAGED HPM: Delay HPM activation to align with meta-learning
@@ -3486,6 +3526,10 @@ Config Overrides:
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
         
+        # Set epoch for bucketed batch sampler (ensures different batch order each epoch)
+        if hasattr(train_loader, 'batch_sampler') and hasattr(train_loader.batch_sampler, 'set_epoch'):
+            train_loader.batch_sampler.set_epoch(epoch)
+        
         # HPM epoch start callback: reset routing statistics for load balancing
         if hasattr(model, 'hpm_on_epoch_start'):
             model.hpm_on_epoch_start()
@@ -3513,13 +3557,11 @@ Config Overrides:
                 )
                 print(f"  New train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
         
-        # STAGED META-LEARNING: Announce phase transition and activate modules
-        if (use_loo or use_equivariance) and epoch == meta_learning_start_epoch:
+        # STAGED MODULE ACTIVATION: Activate HyperLoRA/SolverContext at meta_learning_start_epoch
+        if (use_hyperlora or use_solver_context or use_cross_attention_context) and epoch == meta_learning_start_epoch:
             print(f"\n{'='*60}")
-            print(f"META-LEARNING PHASE ACTIVATED (epoch {epoch + 1})")
+            print(f"MODULE CONTRIBUTIONS ACTIVATED (epoch {epoch + 1})")
             print(f"{'='*60}")
-            print(f"  LOO loss: NOW ACTIVE (weight={loo_weight if use_loo else 0})")
-            print(f"  Equivariance loss: NOW ACTIVE (weight={equiv_weight if use_equivariance else 0})")
             
             # Activate HyperLoRA contributions
             if use_hyperlora:
@@ -3536,23 +3578,56 @@ Config Overrides:
                 model.cross_attention_active = True
                 print(f"  CrossAttentionInjector: NOW ACTIVE (was using FiLM fallback)")
             
-            # Log GPU memory at transition (detect if we'll spill to shared memory)
+            # Log GPU memory at transition
             if device.type == 'cuda':
                 torch.cuda.synchronize()
                 allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
                 reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
                 max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
-                print(f"\n  GPU MEMORY AT TRANSITION (before first forward):")
-                print(f"    Allocated: {allocated_mb:.0f} MB")
-                print(f"    Reserved:  {reserved_mb:.0f} MB") 
-                print(f"    Total:     {max_mb:.0f} MB")
-                print(f"    Headroom:  {max_mb - reserved_mb:.0f} MB")
-                if reserved_mb > max_mb * 0.9:
-                    print(f"    WARNING: >90% memory used! Risk of shared memory slowdown.")
-                    print(f"    Consider reducing batch_size if training slows after this epoch.")
+                print(f"\n  GPU MEMORY AT TRANSITION:")
+                print(f"    Allocated: {allocated_mb:.0f} MB, Reserved: {reserved_mb:.0f} MB, Total: {max_mb:.0f} MB")
             
-            print(f"\n  NOTE: First 5 batches will show detailed memory breakdown")
-            print(f"        to identify which modules cause memory increase.")
+            print(f"{'='*60}\n")
+        
+        # STAGED EQUIVARIANCE LOSS: Activate at equiv_start_epoch
+        if use_equivariance and epoch == equiv_start_epoch:
+            print(f"\n{'='*60}")
+            print(f"EQUIVARIANCE LOSS ACTIVATED (epoch {epoch + 1})")
+            print(f"{'='*60}")
+            print(f"  Weight: {equiv_weight}")
+            print(f"  Augmentations per task: {equiv_config.get('num_augmentations', 4)}")
+            print(f"  Purpose: Enforce dihedral invariance (fix 13% TTA consensus)")
+            print(f"  Expected effect: Predictions consistent across rotations/flips")
+            
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+                reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
+                max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+                print(f"\n  GPU MEMORY: {allocated_mb:.0f}MB alloc, {reserved_mb:.0f}MB reserved / {max_mb:.0f}MB")
+                print(f"  NOTE: Equivariance does 4 forward passes - expect ~2-3GB memory increase")
+            
+            print(f"{'='*60}\n")
+        
+        # STAGED LOO LOSS: Activate at loo_start_epoch
+        if use_loo and epoch == loo_start_epoch:
+            print(f"\n{'='*60}")
+            print(f"LOO (LEAVE-ONE-OUT) LOSS ACTIVATED (epoch {epoch + 1})")
+            print(f"{'='*60}")
+            print(f"  Weight: {loo_weight}")
+            print(f"  Min pairs required: {loo_min_pairs}")
+            print(f"  Purpose: Teach few-shot generalization (fix 60x entropy gap)")
+            print(f"  Expected effect: Generalize from N-1 examples to Nth")
+            
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+                reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
+                max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+                print(f"\n  GPU MEMORY: {allocated_mb:.0f}MB alloc, {reserved_mb:.0f}MB reserved / {max_mb:.0f}MB")
+                print(f"  NOTE: LOO does N forward passes per sample - expect significant memory increase")
+                print(f"  If OOM occurs, reduce batch_size or set enabled: false")
+            
             print(f"{'='*60}\n")
         
         # STAGED HPM: Activate HPM at hpm_start_epoch
@@ -3582,7 +3657,8 @@ Config Overrides:
         # Train
         train_losses, global_step = train_epoch(
             model, train_loader, loss_fn, optimizer, device,
-            epoch, config, scaler, global_step, ema, effective_loo_fn, effective_equiv_fn
+            epoch, config, scaler, global_step, ema, effective_loo_fn, effective_equiv_fn,
+            loo_start_epoch=loo_start_epoch, equiv_start_epoch=equiv_start_epoch,
         )
         
         # Log epoch peak memory and compare to previous epochs
@@ -3601,16 +3677,31 @@ Config Overrides:
             if prev_peak is not None:
                 delta = epoch_peak_allocated - prev_peak
                 delta_str = f" (Δ{delta:+.0f}MB from prev epoch)"
-                # ALERT if memory increased significantly at transition epoch
-                if epoch == meta_learning_start_epoch and delta > 1000:
+                # ALERT if memory increased significantly at transition epochs
+                is_transition = (
+                    epoch == meta_learning_start_epoch or 
+                    (use_equivariance and epoch == equiv_start_epoch) or 
+                    (use_loo and epoch == loo_start_epoch)
+                )
+                if is_transition and delta > 1000:
                     print(f"\n  ⚠️  MEMORY SPIKE AT TRANSITION: +{delta:.0f}MB")
-                    print(f"      This is likely due to: HyperLoRA, SolverCrossAttention, or CrossAttention")
-                    print(f"      Check the batch-level breakdown above for details.")
+                    if epoch == equiv_start_epoch:
+                        print(f"      Equivariance loss now active (4 forward passes per sample)")
+                    if epoch == loo_start_epoch:
+                        print(f"      LOO loss now active (N forward passes per sample)")
+                    if epoch == meta_learning_start_epoch:
+                        print(f"      HyperLoRA/SolverCrossAttention/CrossAttention now contributing")
             
             train_epoch._prev_epoch_peak = epoch_peak_allocated
             
-            # Only print for first few epochs or at transitions
-            if epoch < 5 or epoch == meta_learning_start_epoch or epoch == meta_learning_start_epoch + 1:
+            # Only print for first few epochs or at key transitions
+            is_key_epoch = (
+                epoch < 5 or 
+                epoch == meta_learning_start_epoch or 
+                (use_equivariance and epoch == equiv_start_epoch) or
+                (use_loo and epoch == loo_start_epoch)
+            )
+            if is_key_epoch:
                 print(f"\n  [EPOCH MEMORY] Peak: {epoch_peak_allocated:.0f}MB alloc, {epoch_peak_reserved:.0f}MB reserved{delta_str}")
                 if epoch_peak_reserved > total_gpu * 0.95:
                     print(f"      ⚠️  >95% GPU used! May spill to shared memory (SLOW)")

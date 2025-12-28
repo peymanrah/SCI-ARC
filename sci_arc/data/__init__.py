@@ -18,6 +18,7 @@ from .dataset import (
     create_dataloader,
     pad_grid,
     TRMCompatibleDataset,
+    BucketedBatchSampler,  # Memory-efficient batching by grid size
     # Dihedral transforms
     dihedral_transform,
     inverse_dihedral_transform,
@@ -44,6 +45,7 @@ __all__ = [
     'create_dataloader',
     'pad_grid',
     'TRMCompatibleDataset',
+    'BucketedBatchSampler',  # Memory-efficient batching by grid size
     # Dihedral transforms
     'dihedral_transform',
     'inverse_dihedral_transform',

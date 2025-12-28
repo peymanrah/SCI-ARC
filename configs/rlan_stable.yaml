@@ -387,14 +387,25 @@ training:
   # NOTE: HPM also uses hpm_start_epoch (model section) for alignment.
   # Both should typically be set to the same value for stable training.
   # =============================================================
-  meta_learning_start_epoch: 3  # Activate LOO/Equivariance after epoch 3
+  meta_learning_start_epoch: 3  # Activate HyperLoRA/SolverContext contributions
+  
+  # =============================================================
+  # STAGED LOSS ACTIVATION (Dec 2025)
+  # =============================================================
+  # Enable losses at DIFFERENT epochs based on training needs:
+  # - Equivariance: Earlier (epoch 8) - lighter, helps dihedral consistency
+  # - LOO: Later (epoch 12) - heavier, requires stable base model
+  #
+  # This addresses the 60x eval entropy explosion by enforcing:
+  # 1. Dihedral invariance early (fixes 13% consensus problem)
+  # 2. Few-shot generalization later (fixes train→eval gap)
+  # =============================================================
   
   # =============================================================
   # LOO TRAINING: LEAVE-ONE-OUT META-LEARNING LOSS
   # =============================================================
   # Teaches the model to generalize from N-1 examples to the Nth.
   # Only active when use_hyperlora: true in model section.
-  # Only active after meta_learning_start_epoch (staged training).
   #
   # For each training task with N pairs:
   #   1. Hold out one pair as the "test"
@@ -405,12 +416,12 @@ training:
   #
   # This explicitly trains the HyperLoRA to GENERALIZE.
   #
-  # WARNING (Dec 2025): LOO does N forward passes per sample, causing
-  # massive memory spike. DISABLED until memory-efficient implementation.
+  # STAGED (Dec 2025): Activates at epoch 12 - needs stable base model first
   # =============================================================
   loo_training:
-    enabled: false  # DISABLED: Causes 20GB+ memory spike (N forward passes)
-    loss_weight: 0.2       # MIDDLE GROUND: 20% of task loss (was 0.5, caused instability)
+    enabled: true          # ENABLED: Auto-activates at start_epoch
+    start_epoch: 12        # Activate at epoch 12 (stable base required)
+    loss_weight: 0.2       # MIDDLE GROUND: 20% of task loss
     min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
   
   # =============================================================
@@ -419,16 +430,16 @@ training:
   # Encourages consistent LoRA predictions across augmented views.
   # If a task is rotated 90°, the predicted LoRA weights should
   # have similar magnitudes (the "rule" is the same, just rotated).
-  # Only active after meta_learning_start_epoch (staged training).
   #
   # Loss: L2 on Frobenius norm difference of LoRA matrices.
   #
-  # WARNING (Dec 2025): Equivariance does 4 forward passes per sample,
-  # causing significant memory increase. DISABLED until optimized.
+  # STAGED (Dec 2025): Activates at epoch 8 - fixes dihedral invariance early
+  # This addresses the 13% TTA consensus problem before LOO.
   # =============================================================
   equivariance_training:
-    enabled: false  # DISABLED: Causes memory spike (4 forward passes)
-    loss_weight: 0.05      # MIDDLE GROUND: Lighter regularization (was 0.1)
+    enabled: true          # ENABLED: Auto-activates at start_epoch
+    start_epoch: 8         # Activate at epoch 8 (earlier than LOO)
+    loss_weight: 0.05      # MIDDLE GROUND: Lighter regularization
     num_augmentations: 4   # Number of random augmentations per task
   
   # =============================================================
@@ -508,6 +519,12 @@ data:
   cache_load_percent: 4    # ~2GB (4% of 50GB) for quick testing
                            # Use 10-20 for quick testing (~20s load instead of 3min)
                            # Set to 100 for full training runs
+  
+  # BUCKETED BATCHING: Group samples by grid size for memory efficiency
+  # Prevents one 30x30 grid from forcing all 70 samples to use 30x30 memory
+  # Batch ORDER is shuffled each epoch to avoid learning bias
+  bucketed_batching: true
+  bucket_boundaries: [10, 15, 20, 25]  # Creates 5 buckets: <=10, 11-15, 16-20, 21-25, >25
   
   augmentation:
     enabled: true
