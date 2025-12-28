@@ -195,8 +195,11 @@ model:
   # STAGED HPM: Aligned with meta_learning_start_epoch for stability
   # HPM stays OFF during early training, then activates with meta-learning.
   # This ensures the base model learns FG/BG distinction first.
+  #
+  # WARNING (Dec 2025): HPM adds significant memory (~1-2GB).
+  # DISABLED temporarily to isolate memory issues from other modules.
   # =============================================================
-  use_hpm: true                       # ENABLED - staged activation via hpm_start_epoch
+  use_hpm: false                      # DISABLED: Testing memory without HPM first
   hpm_start_epoch: 3                  # Activate HPM after epoch 3 (aligns with meta_learning_start_epoch)
   
   # Sparse MoE Routing Configuration
@@ -401,9 +404,12 @@ training:
   #   5. Backprop loss on held-out prediction
   #
   # This explicitly trains the HyperLoRA to GENERALIZE.
+  #
+  # WARNING (Dec 2025): LOO does N forward passes per sample, causing
+  # massive memory spike. DISABLED until memory-efficient implementation.
   # =============================================================
   loo_training:
-    enabled: true
+    enabled: false  # DISABLED: Causes 20GB+ memory spike (N forward passes)
     loss_weight: 0.2       # MIDDLE GROUND: 20% of task loss (was 0.5, caused instability)
     min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
   
@@ -416,9 +422,12 @@ training:
   # Only active after meta_learning_start_epoch (staged training).
   #
   # Loss: L2 on Frobenius norm difference of LoRA matrices.
+  #
+  # WARNING (Dec 2025): Equivariance does 4 forward passes per sample,
+  # causing significant memory increase. DISABLED until optimized.
   # =============================================================
   equivariance_training:
-    enabled: true
+    enabled: false  # DISABLED: Causes memory spike (4 forward passes)
     loss_weight: 0.05      # MIDDLE GROUND: Lighter regularization (was 0.1)
     num_augmentations: 4   # Number of random augmentations per task
   
