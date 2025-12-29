@@ -2228,13 +2228,30 @@ def train_epoch(
             total_processed = epoch_diagnostics['total_samples']
             exact_pct = (total_exact / total_processed * 100) if total_processed > 0 else 0.0
             
+            # Get meta-learning losses for display (if active)
+            loo_loss_val = losses.get('loo_loss', torch.tensor(0.0))
+            loo_loss_val = loo_loss_val.item() if hasattr(loo_loss_val, 'item') else loo_loss_val
+            equiv_loss_val = losses.get('equiv_loss', torch.tensor(0.0))
+            equiv_loss_val = equiv_loss_val.item() if hasattr(equiv_loss_val, 'item') else equiv_loss_val
+            hpm_loss_val = losses.get('hpm_balance_loss', torch.tensor(0.0))
+            hpm_loss_val = hpm_loss_val.item() if hasattr(hpm_loss_val, 'item') else hpm_loss_val
+            
+            # Build meta-learning suffix if active
+            meta_str = ""
+            if loo_loss_val > 0:
+                meta_str += f", loo={loo_loss_val:.4f}"
+            if equiv_loss_val > 0:
+                meta_str += f", equiv={equiv_loss_val:.4f}"
+            if hpm_loss_val > 0:
+                meta_str += f", hpm={hpm_loss_val:.4f}"
+            
             print(f"  Batch {batch_idx}/{len(dataloader)}: "
                   f"loss={losses['total_loss'].item():.4f}, "
                   f"{loss_mode}={task_loss_val:.4f}, "
                   f"batch_acc={batch_accuracy:.1%}, "
                   f"exact={total_exact}/{total_processed} ({exact_pct:.1f}%), "
                   f"running_acc={running_acc:.1%}, "
-                  f"lr={current_lr:.2e}")
+                  f"lr={current_lr:.2e}{meta_str}")
             
             # FG/BG accuracy for this batch and running averages
             fg_window = epoch_diagnostics['fg_running_window']

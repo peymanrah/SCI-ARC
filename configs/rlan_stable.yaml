@@ -316,8 +316,8 @@ training:
   use_torch_compile: false    # DISABLED - can cause issues with dynamic shapes in ARC grids
   torch_compile_mode: 'reduce-overhead'  # Options: 'default', 'reduce-overhead', 'max-autotune'
   
-  batch_size: 90    # Safe with memory optimizations (epochs 0-13). LOO/Equi add N passes at epoch 8+/12+
-  grad_accumulation_steps: 4  # effective_batch_size = 90 × 4 = 360
+  batch_size: 80    # Safe with memory optimizations (epochs 0-13). LOO/Equi add N passes at epoch 8+/12+
+  grad_accumulation_steps: 4  # effective_batch_size = 80 × 4 = 320
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
