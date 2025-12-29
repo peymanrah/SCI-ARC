@@ -36,6 +36,151 @@ from .transform_families import (
 
 
 # ============================================================================
+# Stratified Sampling for Representative Testing
+# ============================================================================
+
+def stratified_sample_tasks(
+    tasks: List[Dict],
+    n_samples: int,
+    seed: int = 42,
+    verbose: bool = True
+) -> List[Dict]:
+    """
+    Stratified sampling to ensure representative coverage of ARC tasks.
+    
+    Stratifies by multiple dimensions to ensure the sample is representative:
+    1. Grid size bucket (small/medium/large) - preserves bucketed batching benefits
+    2. Number of train pairs (1-5+) - covers few-shot to many-shot tasks
+    3. Transform complexity (inferred from grid analysis)
+    
+    This guarantees that even a 5% sample will cover the full diversity of
+    the 400 ARC training tasks, enabling valid meta-learning signal during
+    smoke tests and epoch-end validation.
+    
+    Args:
+        tasks: List of task dictionaries with 'task_id', 'train', 'test' keys
+        n_samples: Number of tasks to sample
+        seed: Random seed for deterministic, reproducible sampling
+        verbose: Print stratification statistics
+        
+    Returns:
+        Stratified subset of tasks
+    """
+    if n_samples >= len(tasks):
+        return tasks
+    
+    # Use fixed seed for deterministic coverage
+    rng = random.Random(seed)
+    
+    # Compute stratification features for each task
+    def get_max_grid_size(task: Dict) -> int:
+        """Get maximum grid dimension across all grids in task."""
+        max_dim = 0
+        for pair in task.get('train', []):
+            inp = pair.get('input', [])
+            out = pair.get('output', [])
+            if inp:
+                max_dim = max(max_dim, len(inp), len(inp[0]) if inp else 0)
+            if out:
+                max_dim = max(max_dim, len(out), len(out[0]) if out else 0)
+        for pair in task.get('test', []):
+            inp = pair.get('input', [])
+            if inp:
+                max_dim = max(max_dim, len(inp), len(inp[0]) if inp else 0)
+        return max_dim
+    
+    def get_grid_size_bucket(size: int) -> str:
+        """Bucket grid sizes for stratification (matches BucketedBatchSampler)."""
+        if size <= 10:
+            return "small"
+        elif size <= 20:
+            return "medium"
+        else:
+            return "large"
+    
+    def get_num_pairs_bucket(task: Dict) -> str:
+        """Bucket number of training pairs."""
+        n = len(task.get('train', []))
+        if n <= 2:
+            return "few_shot"  # 1-2 pairs
+        elif n <= 4:
+            return "medium_shot"  # 3-4 pairs
+        else:
+            return "many_shot"  # 5+ pairs
+    
+    def get_size_change_type(task: Dict) -> str:
+        """Detect if task involves grid size changes."""
+        for pair in task.get('train', []):
+            inp = pair.get('input', [])
+            out = pair.get('output', [])
+            if inp and out:
+                in_h, in_w = len(inp), len(inp[0]) if inp else 0
+                out_h, out_w = len(out), len(out[0]) if out else 0
+                if in_h != out_h or in_w != out_w:
+                    return "size_change"
+        return "same_size"
+    
+    # Create stratification key for each task
+    strata: Dict[str, List[Dict]] = {}
+    for task in tasks:
+        grid_size = get_max_grid_size(task)
+        key = (
+            get_grid_size_bucket(grid_size),
+            get_num_pairs_bucket(task),
+            get_size_change_type(task)
+        )
+        strata_key = f"{key[0]}_{key[1]}_{key[2]}"
+        if strata_key not in strata:
+            strata[strata_key] = []
+        strata[strata_key].append(task)
+    
+    # Sample proportionally from each stratum
+    sampled = []
+    remaining = n_samples
+    strata_list = list(strata.items())
+    rng.shuffle(strata_list)  # Randomize order for fairness
+    
+    # First pass: proportional allocation
+    for strata_key, strata_tasks in strata_list:
+        # Proportional allocation based on stratum size
+        stratum_proportion = len(strata_tasks) / len(tasks)
+        stratum_allocation = max(1, int(n_samples * stratum_proportion))
+        stratum_allocation = min(stratum_allocation, len(strata_tasks), remaining)
+        
+        rng.shuffle(strata_tasks)
+        sampled.extend(strata_tasks[:stratum_allocation])
+        remaining -= stratum_allocation
+        
+        if remaining <= 0:
+            break
+    
+    # Second pass: fill remaining slots with under-represented strata
+    if remaining > 0:
+        # Collect unused tasks from all strata
+        used_ids = {t['task_id'] for t in sampled}
+        unused = [t for t in tasks if t['task_id'] not in used_ids]
+        rng.shuffle(unused)
+        sampled.extend(unused[:remaining])
+    
+    # Final shuffle to avoid stratum ordering bias during training
+    rng.shuffle(sampled)
+    
+    if verbose:
+        # Report coverage statistics
+        sampled_strata = {}
+        for task in sampled:
+            grid_size = get_max_grid_size(task)
+            key = f"{get_grid_size_bucket(grid_size)}_{get_num_pairs_bucket(task)}_{get_size_change_type(task)}"
+            sampled_strata[key] = sampled_strata.get(key, 0) + 1
+        
+        print(f"  Stratified sampling: {len(sampled)}/{len(tasks)} tasks ({100*len(sampled)/len(tasks):.1f}%)")
+        print(f"  Strata covered: {len(sampled_strata)}/{len(strata)} ({100*len(sampled_strata)/len(strata):.1f}%)")
+        print(f"  Distribution: " + ", ".join(f"{k}={v}" for k, v in sorted(sampled_strata.items())))
+    
+    return sampled
+
+
+# ============================================================================
 # BucketedBatchSampler: Groups samples by grid size for memory efficiency
 # ============================================================================
 
@@ -321,11 +466,14 @@ class ARCDataset(Dataset):
         self.tasks = self._load_tasks()
         
         # Limit tasks if max_tasks specified (for testing)
+        # Uses STRATIFIED sampling to ensure representative coverage
         if max_tasks is not None and max_tasks > 0:
-            import random
-            random.shuffle(self.tasks)
-            self.tasks = self.tasks[:max_tasks]
-            print(f"  Limited to {len(self.tasks)} random tasks (max_tasks={max_tasks})")
+            self.tasks = stratified_sample_tasks(
+                self.tasks,
+                n_samples=max_tasks,
+                seed=42,  # Fixed seed for deterministic, reproducible sampling
+                verbose=True
+            )
         
         # Apply curriculum filtering if enabled
         if curriculum_stage > 0:
@@ -1047,6 +1195,117 @@ def inverse_dihedral_transform(arr: np.ndarray, tid: int) -> np.ndarray:
     return dihedral_transform(arr, DIHEDRAL_INVERSE[tid])
 
 
+def stratified_sample_arc_tasks(
+    tasks: List['ARCTask'],
+    n_samples: int,
+    seed: int = 42,
+    verbose: bool = True
+) -> List['ARCTask']:
+    """
+    Stratified sampling for ARCTask objects (used by SCIARCDataset).
+    
+    Same stratification logic as stratified_sample_tasks but for ARCTask dataclass.
+    Ensures representative coverage for meta-learning validation.
+    
+    Stratifies by:
+    1. Grid size bucket (small/medium/large) - preserves bucketed batching benefits
+    2. Number of train pairs (1-2, 3-4, 5+) - covers few-shot to many-shot
+    3. Size change type (same_size vs size_change) - structural diversity
+    
+    Args:
+        tasks: List of ARCTask objects
+        n_samples: Number of tasks to sample
+        seed: Random seed for deterministic sampling
+        verbose: Print statistics
+        
+    Returns:
+        Stratified subset of ARCTask objects
+    """
+    if n_samples >= len(tasks):
+        return tasks
+    
+    rng = random.Random(seed)
+    
+    def get_max_grid_size(task: 'ARCTask') -> int:
+        max_dim = 0
+        for inp, out in task.train_pairs:
+            max_dim = max(max_dim, inp.shape[0], inp.shape[1], out.shape[0], out.shape[1])
+        for inp, out in task.test_pairs:
+            max_dim = max(max_dim, inp.shape[0], inp.shape[1])
+        return max_dim
+    
+    def get_grid_size_bucket(size: int) -> str:
+        if size <= 10:
+            return "small"
+        elif size <= 20:
+            return "medium"
+        else:
+            return "large"
+    
+    def get_num_pairs_bucket(task: 'ARCTask') -> str:
+        n = len(task.train_pairs)
+        if n <= 2:
+            return "few_shot"
+        elif n <= 4:
+            return "medium_shot"
+        else:
+            return "many_shot"
+    
+    def get_size_change_type(task: 'ARCTask') -> str:
+        for inp, out in task.train_pairs:
+            if inp.shape != out.shape:
+                return "size_change"
+        return "same_size"
+    
+    # Create strata
+    strata: Dict[str, List['ARCTask']] = {}
+    for task in tasks:
+        grid_size = get_max_grid_size(task)
+        key = f"{get_grid_size_bucket(grid_size)}_{get_num_pairs_bucket(task)}_{get_size_change_type(task)}"
+        if key not in strata:
+            strata[key] = []
+        strata[key].append(task)
+    
+    # Sample proportionally from each stratum
+    sampled = []
+    remaining = n_samples
+    strata_list = list(strata.items())
+    rng.shuffle(strata_list)
+    
+    for strata_key, strata_tasks in strata_list:
+        stratum_proportion = len(strata_tasks) / len(tasks)
+        stratum_allocation = max(1, int(n_samples * stratum_proportion))
+        stratum_allocation = min(stratum_allocation, len(strata_tasks), remaining)
+        
+        rng.shuffle(strata_tasks)
+        sampled.extend(strata_tasks[:stratum_allocation])
+        remaining -= stratum_allocation
+        
+        if remaining <= 0:
+            break
+    
+    # Fill remaining slots
+    if remaining > 0:
+        used_ids = {t.task_id for t in sampled}
+        unused = [t for t in tasks if t.task_id not in used_ids]
+        rng.shuffle(unused)
+        sampled.extend(unused[:remaining])
+    
+    rng.shuffle(sampled)
+    
+    if verbose:
+        sampled_strata = {}
+        for task in sampled:
+            grid_size = get_max_grid_size(task)
+            key = f"{get_grid_size_bucket(grid_size)}_{get_num_pairs_bucket(task)}_{get_size_change_type(task)}"
+            sampled_strata[key] = sampled_strata.get(key, 0) + 1
+        
+        print(f"  Stratified sampling: {len(sampled)}/{len(tasks)} tasks ({100*len(sampled)/len(tasks):.1f}%)")
+        print(f"  Strata covered: {len(sampled_strata)}/{len(strata)} ({100*len(sampled_strata)/len(strata):.1f}%)")
+    
+    return sampled
+
+
 @dataclass
 class ARCTask:
     """Represents a single ARC task."""
@@ -1100,6 +1359,8 @@ class SCIARCDataset(Dataset):
         color_permutation: bool = True,  # Enable color permutation augmentation
         color_permutation_prob: float = 0.5,  # Probability of applying color permutation
         translational_augment: bool = False,  # Enable translational augmentation
+        max_tasks: int = None,  # Limit number of tasks (uses stratified sampling for representativeness)
+        stratified_seed: int = 42,  # Seed for deterministic stratified sampling
     ):
         """
         Initialize the dataset.
@@ -1142,6 +1403,8 @@ class SCIARCDataset(Dataset):
         self.color_permutation = color_permutation
         self.color_permutation_prob = color_permutation_prob
         self.translational_augment = translational_augment
+        self.max_tasks = max_tasks
+        self.stratified_seed = stratified_seed
         
         # Auto-enable expand_test_pairs for evaluation to ensure deterministic coverage
         # of all official test inputs (some ARC tasks have multiple test cases)
@@ -1168,6 +1431,16 @@ class SCIARCDataset(Dataset):
         if include_rearc and rearc_dir:
             rearc_tasks = self._load_rearc(rearc_dir)
             self.tasks.extend(rearc_tasks)
+        
+        # Apply stratified sampling if max_tasks specified
+        # This ensures representative coverage for meta-learning validation
+        if max_tasks is not None and max_tasks > 0 and len(self.tasks) > max_tasks:
+            self.tasks = stratified_sample_arc_tasks(
+                self.tasks,
+                n_samples=max_tasks,
+                seed=stratified_seed,
+                verbose=True
+            )
         
         # Apply curriculum filtering
         if curriculum_stage > 0:
