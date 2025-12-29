@@ -1286,6 +1286,18 @@ def train_epoch(
         'hyperlora_grad_norm_sum': 0.0,           # Gradient norm for HyperLoRA params
         'hyperlora_weight_norm_sum': 0.0,         # Weight magnitude of HyperLoRA (should be small)
         'hyperlora_update_count': 0,              # Number of batches with HyperLoRA updates
+        
+        # =============================================================
+        # DETAILED META-LEARNING TRACKING (for debugging epoch 14+)
+        # =============================================================
+        'lora_delta_norm_sum': 0.0,               # Sum of LoRA delta norms (should be non-zero after epoch 3)
+        'lora_delta_batch_count': 0,              # Number of batches with LoRA deltas
+        'context_magnitude_sum': 0.0,             # Sum of context/support feature magnitudes
+        'context_batch_count': 0,                 # Number of batches with context features
+        'hpm_routing_entropy_sum': 0.0,           # HPM routing entropy (lower = more specialized banks)
+        'hpm_batch_count': 0,                     # Number of batches with HPM routing
+        'equiv_consistency_sum': 0.0,             # Avg consistency of LoRA across augmentations
+        'equiv_batch_count': 0,                   # Number of batches with equivariance computed
     }
     
     temperature = get_temperature(epoch, config)
@@ -2213,6 +2225,31 @@ def train_epoch(
             # Sample some per-sample accuracies for detailed logging (every 10th batch)
             if batch_idx % 10 == 0:
                 epoch_diagnostics['per_sample_accuracies'].extend(batch_sample_accuracies[:4])  # First 4 samples
+            
+            # =============================================================
+            # TRACK META-LEARNING METRICS (for epoch 8+ debugging)
+            # =============================================================
+            # LoRA delta norms (shows HyperLoRA is producing non-trivial adaptations)
+            if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
+                lora_norm = 0.0
+                for key, delta in outputs['lora_deltas'].items():
+                    lora_norm += delta.norm().item() ** 2
+                lora_norm = lora_norm ** 0.5
+                epoch_diagnostics['lora_delta_norm_sum'] += lora_norm
+                epoch_diagnostics['lora_delta_batch_count'] += 1
+            
+            # Context/support feature magnitude (shows context encoder is contributing)
+            if 'support_features' in outputs and outputs['support_features'] is not None:
+                ctx_mag = outputs['support_features'].abs().mean().item()
+                epoch_diagnostics['context_magnitude_sum'] += ctx_mag
+                epoch_diagnostics['context_batch_count'] += 1
+            
+            # HPM routing entropy (shows bank specialization)
+            if 'hpm_routing_weights' in outputs and outputs['hpm_routing_weights'] is not None:
+                routing = outputs['hpm_routing_weights']
+                routing_entropy = -(routing * (routing + 1e-10).log()).sum(dim=-1).mean().item()
+                epoch_diagnostics['hpm_routing_entropy_sum'] += routing_entropy
+                epoch_diagnostics['hpm_batch_count'] += 1
         
         # Log progress
         if batch_idx % log_every == 0:
@@ -2296,6 +2333,37 @@ def train_epoch(
                     else:
                         status = f"⚠ best={best_step_idx}"
                     print(f"    Solver: [{loss_str}] {status}")
+            
+            # =============================================================
+            # META-LEARNING DETAILED BATCH LOGGING (epoch 8+)
+            # =============================================================
+            # Only log every 20 batches to avoid spam, but critical for debugging
+            if batch_idx % 20 == 0 and (loo_loss_val > 0 or equiv_loss_val > 0):
+                # Get LoRA delta norms from outputs if available
+                lora_delta_norm = 0.0
+                if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
+                    for key, delta in outputs['lora_deltas'].items():
+                        lora_delta_norm += delta.norm().item() ** 2
+                    lora_delta_norm = lora_delta_norm ** 0.5
+                
+                # Get context encoder contribution
+                context_contrib = 0.0
+                if 'support_features' in outputs and outputs['support_features'] is not None:
+                    context_contrib = outputs['support_features'].abs().mean().item()
+                
+                # Build meta info string
+                meta_detail = f"    [META] LoRA_norm={lora_delta_norm:.4f}, ctx_mag={context_contrib:.4f}"
+                
+                # Get HPM routing info if available
+                if 'hpm_routing_weights' in outputs and outputs['hpm_routing_weights'] is not None:
+                    routing = outputs['hpm_routing_weights']  # (B, num_banks)
+                    # Compute routing entropy (lower = more specialized)
+                    routing_entropy = -(routing * (routing + 1e-10).log()).sum(dim=-1).mean().item()
+                    # Get top bank usage
+                    top_bank = routing.argmax(dim=-1).float().mean().item()
+                    meta_detail += f", hpm_ent={routing_entropy:.3f}, top_bank={top_bank:.1f}"
+                
+                print(meta_detail)
         
         # MEMORY FIX: Explicitly clear intermediate tensors at END of loop iteration
         # This is critical for LOO/Equivariance training which creates large graphs
@@ -4303,6 +4371,56 @@ Config Overrides:
                     if meta_health_score >= threshold:
                         icon = ico
                 print(f"  Overall: {icon} [{' | '.join(meta_health_reasons)}] (score={meta_health_score:.1f}/1.0)")
+                
+                # =============================================================
+                # DETAILED META-LEARNING BREAKDOWN (for debugging after epoch 14)
+                # =============================================================
+                lora_delta_sum = diagnostics.get('lora_delta_norm_sum', 0.0)
+                lora_delta_count = diagnostics.get('lora_delta_batch_count', 0)
+                context_mag_sum = diagnostics.get('context_magnitude_sum', 0.0)
+                context_count = diagnostics.get('context_batch_count', 0)
+                hpm_entropy_sum = diagnostics.get('hpm_routing_entropy_sum', 0.0)
+                hpm_count = diagnostics.get('hpm_batch_count', 0)
+                
+                print(f"  --- Detailed Attribution ---")
+                
+                # LoRA delta magnitude (should be > 0 if HyperLoRA is contributing)
+                if lora_delta_count > 0:
+                    avg_lora_norm = lora_delta_sum / lora_delta_count
+                    print(f"  LoRA Delta Norm (avg): {avg_lora_norm:.4f}", end="")
+                    if avg_lora_norm < 0.001:
+                        print(" [!] Near-zero: HyperLoRA not adapting weights!")
+                    elif avg_lora_norm < 0.01:
+                        print(" (small - may need higher hyperlora_init_scale)")
+                    elif avg_lora_norm > 1.0:
+                        print(" [!] Very large - may cause instability")
+                    else:
+                        print(" ✓ (healthy range)")
+                else:
+                    print(f"  LoRA Delta: Not computed (HyperLoRA inactive)")
+                
+                # Context encoder contribution
+                if context_count > 0:
+                    avg_ctx_mag = context_mag_sum / context_count
+                    print(f"  Context Magnitude (avg): {avg_ctx_mag:.4f}", end="")
+                    if avg_ctx_mag < 0.01:
+                        print(" [!] Near-zero: ContextEncoder not contributing!")
+                    elif avg_ctx_mag > 5.0:
+                        print(" [!] Very large - may dominate other signals")
+                    else:
+                        print(" ✓")
+                
+                # HPM bank specialization
+                if hpm_count > 0:
+                    avg_hpm_entropy = hpm_entropy_sum / hpm_count
+                    # Entropy of uniform dist over N banks = log(N). Lower = more specialized.
+                    print(f"  HPM Routing Entropy (avg): {avg_hpm_entropy:.3f}", end="")
+                    if avg_hpm_entropy < 0.5:
+                        print(" ✓ (specialized - banks have distinct roles)")
+                    elif avg_hpm_entropy < 1.5:
+                        print(" (moderate specialization)")
+                    else:
+                        print(" [!] High entropy - banks not specializing")
             
             # NEW: Color embedding diversity check
             color_embed_sim = diagnostics.get('color_embed_similarity', None)
