@@ -479,20 +479,20 @@ training:
   #    - Objective: Predict correct output grids
   #    - Target: Direct task performance
   #
-  # 2. LOO LOSS (weight=0.5): Leave-one-out generalization
+  # 2. LOO LOSS (weight=0.2): Leave-one-out generalization
   #    - Objective: Predict Nth pair from N-1 context
   #    - Target: Few-shot generalization within a task
   #    - Complementary: Doesn't conflict with task loss - both want correct predictions
   #                     LOO adds EXPLICIT generalization signal during training
   #
-  # 3. EQUIVARIANCE LOSS (weight=0.1): Augmentation consistency
+  # 3. EQUIVARIANCE LOSS (weight=0.05): Augmentation consistency
   #    - Objective: Same LoRA weights for rotated/flipped versions
   #    - Target: Transform-invariant representations
   #    - Complementary: Acts as REGULARIZER - prevents overfitting to specific orientations
-  #                     Light weight (0.1) ensures it doesn't dominate task learning
+  #                     Light weight (0.05) ensures it doesn't dominate task learning
   #
   # MATHEMATICAL RELATIONSHIP:
-  #   L_total = L_task + 0.5 * L_loo + 0.1 * L_equiv
+  #   L_total = L_task + 0.2 * L_loo + 0.05 * L_equiv
   #
   # WHY THIS IS OPTIMAL (NOT OVERKILL):
   # - Task loss drives direct performance

@@ -45,29 +45,19 @@ def test_sciarcdataset_split_loads_only_expected_directory():
     assert (eval_ids_loaded & train_ids_on_disk) == set()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "SCIARCDataset._load_tasks silently falls back to data_dir when split subdir is missing; "
-        "passing data_dir=<.../training> with split='evaluation' leaks training tasks into evaluation. "
-        "This should raise or produce empty dataset to prevent accidental leakage."
-    ),
-)
-def test_sciarcdataset_should_not_silently_fallback_when_split_missing():
+def test_sciarcdataset_raises_on_missing_split_directory():
+    """Verify SCIARCDataset raises FileNotFoundError when split subdir is missing.
+    
+    This prevents accidental data leakage from misconfigured paths.
+    """
     data_root = _arc_agi_data_root()
     if not data_root.exists():
         pytest.skip(f"Real ARC-AGI data not found at: {data_root}")
 
     training_dir = data_root / "training"
-    evaluation_dir = data_root / "evaluation"
-    assert training_dir.exists() and evaluation_dir.exists()
+    assert training_dir.exists()
 
     # This is an easy user error: passing the split directory as data_dir.
-    ds = SCIARCDataset(str(training_dir), split="evaluation", augment=False)
-
-    eval_ids_on_disk = _list_task_ids(evaluation_dir)
-    loaded_ids = {t.task_id for t in ds.tasks}
-
-    # Expected behavior (safer): should NOT load training tasks here.
-    # Current behavior: will fall back to data_dir and load training tasks.
-    assert loaded_ids.issubset(eval_ids_on_disk)
+    # Should raise FileNotFoundError, not silently load wrong data.
+    with pytest.raises(FileNotFoundError, match="Split directory.*not found"):
+        SCIARCDataset(str(training_dir), split="evaluation", augment=False)

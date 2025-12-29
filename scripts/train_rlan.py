@@ -615,13 +615,15 @@ def create_train_loader(
     
     if use_bucketed_batching and cache_samples:
         print(f"  Using BUCKETED BATCHING (groups samples by grid size)")
+        # Use hardware.seed for reproducibility (consistent with rest of training)
+        global_seed = config.get('hardware', {}).get('seed', 42)
         batch_sampler = BucketedBatchSampler(
             dataset=train_dataset,
             batch_size=batch_size,
             bucket_boundaries=bucket_boundaries,
             drop_last=True,
             shuffle=True,
-            seed=train_cfg.get('seed', 42),
+            seed=global_seed,
         )
         train_loader = DataLoader(
             train_dataset,
@@ -739,7 +741,11 @@ def get_temperature(epoch: int, config: dict) -> float:
 
 
 def create_model(config: dict) -> RLAN:
-    """Create RLAN model from config."""
+    """Create RLAN model from config.
+    
+    CRITICAL: All model.* fields in YAML must be passed through here!
+    If a field exists in RLANConfig but is missing here, the YAML value is silently ignored.
+    """
     from sci_arc.models.rlan import RLANConfig
     
     model_config = config['model']
@@ -768,15 +774,34 @@ def create_model(config: dict) -> RLAN:
         use_lcr=model_config.get('use_lcr', True),
         use_sph=model_config.get('use_sph', True),
         use_learned_pos=model_config.get('use_learned_pos', False),
+        # Context injection mode (CRITICAL for architecture behavior)
+        use_cross_attention_context=model_config.get('use_cross_attention_context', False),
+        spatial_downsample=model_config.get('spatial_downsample', 1),
         # Phase 2.5: Solver cross-attention to support set
         use_solver_context=model_config.get('use_solver_context', True),
         solver_context_heads=model_config.get('solver_context_heads', 4),
+        use_best_step_selection=model_config.get('use_best_step_selection', False),
         # HyperLoRA: Meta-learning weight adaptation
         use_hyperlora=model_config.get('use_hyperlora', False),
         hyperlora_rank=model_config.get('hyperlora_rank', 8),
         hyperlora_scaling=model_config.get('hyperlora_scaling', 1.0),
         hyperlora_dropout=model_config.get('hyperlora_dropout', 0.0),
-        hyperlora_init_scale=model_config.get('hyperlora_init_scale', 0.01),
+        hyperlora_init_scale=model_config.get('hyperlora_init_scale', 0.1),  # Default matches YAML
+        # HPM (Hierarchical Primitive Memory v2) - all fields from YAML
+        use_hpm=model_config.get('use_hpm', False),
+        hpm_top_k=model_config.get('hpm_top_k', 2),
+        hpm_balance_weight=model_config.get('hpm_balance_weight', 0.01),
+        hpm_primitives_per_bank=model_config.get('hpm_primitives_per_bank', 16),
+        hpm_levels_per_bank=model_config.get('hpm_levels_per_bank', 2),
+        hpm_use_cross_attention=model_config.get('hpm_use_cross_attention', True),
+        hpm_memory_size=model_config.get('hpm_memory_size', 10000),
+        hpm_retrieval_k=model_config.get('hpm_retrieval_k', 5),
+        hpm_use_compositional_bank=model_config.get('hpm_use_compositional_bank', True),
+        hpm_use_pattern_bank=model_config.get('hpm_use_pattern_bank', True),
+        hpm_use_relational_bank=model_config.get('hpm_use_relational_bank', True),
+        hpm_use_concept_bank=model_config.get('hpm_use_concept_bank', False),
+        hpm_use_procedural_bank=model_config.get('hpm_use_procedural_bank', False),
+        hpm_use_instance_bank=model_config.get('hpm_use_instance_bank', False),
         # Memory optimization: gradient checkpointing
         gradient_checkpointing=train_config.get('gradient_checkpointing', False),
     )

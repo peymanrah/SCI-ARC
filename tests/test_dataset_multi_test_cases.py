@@ -15,32 +15,41 @@ def _find_task_with_multiple_tests(split_dir: Path) -> Path:
     raise FileNotFoundError("No ARC task with multiple test cases found")
 
 
-@pytest.mark.xfail(
-    reason=(
-        "SCIARCDataset indexes by task, not by (task,test_idx). For tasks with multiple ARC test items, "
-        "the dataset provides only a single sample per task and selects a random test pair, so an evaluation "
-        "pass cannot deterministically cover all official test items."
-    ),
-    strict=True,
-)
-def test_dataset_should_represent_all_test_items_not_just_first():
+def test_evaluation_split_auto_expands_test_pairs():
+    """Verify evaluation split automatically enables expand_test_pairs for deterministic coverage."""
     data_root = Path("data/arc-agi/data")
-    training_dir = data_root / "training"
-
-    task_fp = _find_task_with_multiple_tests(training_dir)
+    
+    # Find a task with multiple test cases
+    eval_dir = data_root / "evaluation"
+    task_fp = _find_task_with_multiple_tests(eval_dir)
     task_id = task_fp.stem
-
+    
     with open(task_fp, "r", encoding="utf-8") as f:
         task = json.load(f)
+    
+    num_tests = len(task["test"])
+    assert num_tests > 1, "Test requires a task with multiple test cases"
+    
+    # Create evaluation dataset - should auto-enable expand_test_pairs
+    ds = SCIARCDataset(str(data_root), split="evaluation", augment=False)
+    
+    # Check that expand_test_pairs was auto-enabled
+    assert ds.expand_test_pairs, "expand_test_pairs should be auto-enabled for evaluation split"
+    
+    # Check that the expanded index covers all test pairs for this task
+    task_test_indices = [(task_idx, test_idx) for task_idx, test_idx in ds._expanded_index 
+                         if ds.tasks[task_idx].task_id == task_id]
+    
+    assert len(task_test_indices) == num_tests, (
+        f"Expected {num_tests} entries for task {task_id}, got {len(task_test_indices)}"
+    )
 
-    # Ground truth: there are multiple tests
-    assert len(task["test"]) > 1
 
+def test_training_split_does_not_auto_expand():
+    """Verify training split does NOT auto-enable expand_test_pairs (preserves random selection)."""
+    data_root = Path("data/arc-agi/data")
+    
     ds = SCIARCDataset(str(data_root), split="training", augment=False)
-
-    # Dataset has exactly one entry per task_id, regardless of number of test items.
-    occurrences = sum(1 for t in ds.tasks if t.task_id == task_id)
-
-    # Scientific requirement (for deterministic evaluation): one dataset item per test input.
-    # This intentionally fails today (occurrences is 1).
-    assert occurrences == len(task["test"])
+    
+    # Training should NOT auto-expand (random test selection is fine for training)
+    assert not ds.expand_test_pairs, "expand_test_pairs should NOT be auto-enabled for training split"

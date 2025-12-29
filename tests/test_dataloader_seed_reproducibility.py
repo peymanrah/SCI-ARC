@@ -46,9 +46,8 @@ def test_create_dataloader_seed_reproducible_for_shuffle_when_augment_disabled()
 
 
 @pytest.mark.cpu
-@pytest.mark.xfail(strict=True, reason="Deterministic augmentations require seeding at iteration time, not just at dataloader creation; RNG state consumed during dataset init breaks reproducibility")
-def test_create_dataloader_seed_insufficient_for_deterministic_augmentations_when_num_workers_zero():
-    """Strict repro for augmentation non-determinism with num_workers=0."""
+def test_create_dataloader_seed_produces_deterministic_augmentations_when_num_workers_zero():
+    """Verify seeding before dataset creation produces deterministic augmented batches."""
     from sci_arc.data.dataset import create_dataloader
 
     data_root = Path("data/arc-agi/data")

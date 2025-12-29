@@ -1139,10 +1139,15 @@ class SCIARCDataset(Dataset):
         self.curriculum_stage = curriculum_stage
         self.cache_samples = cache_samples
         self.cache_augmentations = cache_augmentations
-        self.expand_test_pairs = expand_test_pairs
         self.color_permutation = color_permutation
         self.color_permutation_prob = color_permutation_prob
         self.translational_augment = translational_augment
+        
+        # Auto-enable expand_test_pairs for evaluation to ensure deterministic coverage
+        # of all official test inputs (some ARC tasks have multiple test cases)
+        if split == "evaluation" and not expand_test_pairs:
+            expand_test_pairs = True
+        self.expand_test_pairs = expand_test_pairs
         
         # Handle scl_family_mode with backward compatibility
         # DEPRECATED: use_augment_family is ignored if scl_family_mode is explicitly set
@@ -1194,15 +1199,14 @@ class SCIARCDataset(Dataset):
             split_dir = self.data_dir / f"{self.split}_challenges"
         
         if not split_dir.exists():
-            # Single directory with all tasks - emit warning to prevent silent data leakage
-            import warnings
-            warnings.warn(
+            # FAIL CLOSED: Do not silently fall back to data_dir
+            # This prevents accidental train/eval data leakage
+            raise FileNotFoundError(
                 f"Split directory '{self.split}' not found in {self.data_dir}. "
-                f"Falling back to loading all tasks from {self.data_dir}. "
-                "This may cause train/eval data leakage if the directory contains both splits!",
-                UserWarning
+                f"Expected one of: {self.data_dir / self.split}, {self.data_dir / f'{self.split}_challenges'}. "
+                f"Please ensure your data_dir points to the parent containing 'training/' and 'evaluation/' subdirectories, "
+                f"not directly to a split directory."
             )
-            split_dir = self.data_dir
         
         # Load JSON files
         for json_file in split_dir.glob('*.json'):
@@ -1385,12 +1389,15 @@ class SCIARCDataset(Dataset):
         """
         task = self.tasks[idx]
         
-        # Select a test pair (deterministic if fixed_test_idx provided, else random)
+        # Create per-sample RNG for deterministic test pair selection
+        sample_rng = random.Random(idx)
+        
+        # Select a test pair (deterministic if fixed_test_idx provided, else per-sample random)
         if task.test_pairs:
             if fixed_test_idx is not None:
                 test_idx = fixed_test_idx
             else:
-                test_idx = random.randint(0, len(task.test_pairs) - 1)
+                test_idx = sample_rng.randint(0, len(task.test_pairs) - 1)
             test_input, test_output = task.test_pairs[test_idx]
         else:
             # If no test pairs, use last train pair
@@ -1407,7 +1414,7 @@ class SCIARCDataset(Dataset):
         # Apply augmentation if requested
         if apply_augment:
             input_grids, output_grids, test_input, test_output, augment_info = self._augment(
-                input_grids, output_grids, test_input, test_output
+                input_grids, output_grids, test_input, test_output, sample_idx=idx
             )
             
             # Determine transform_family based on scl_family_mode
@@ -1460,7 +1467,8 @@ class SCIARCDataset(Dataset):
         input_grids: List[np.ndarray],
         output_grids: List[np.ndarray],
         test_input: np.ndarray,
-        test_output: np.ndarray
+        test_output: np.ndarray,
+        sample_idx: int = 0,
     ) -> Tuple[List[np.ndarray], List[np.ndarray], np.ndarray, np.ndarray, Dict[str, Any]]:
         """
         Apply data augmentation matching TRM exactly.
@@ -1472,21 +1480,29 @@ class SCIARCDataset(Dataset):
         
         CRITICAL: All augmentations match TRM's dataset/build_arc_dataset.py
         
+        Args:
+            sample_idx: Sample index used to create per-sample deterministic RNG.
+                        Combined with global seed for reproducibility.
+        
         Returns:
             Tuple of (aug_inputs, aug_outputs, aug_test_in, aug_test_out, augment_info)
             where augment_info contains {'dihedral_id': int, 'color_permuted': bool}
             for use in SCL transform_family assignment.
         """
+        # Create per-sample RNG for deterministic augmentation
+        # This ensures same augmentation for same (seed, sample_idx) pair
+        sample_rng = random.Random(sample_idx)
+        
         # Dihedral transform (0-7)
-        dihedral_id = random.randint(0, 7)
+        dihedral_id = sample_rng.randint(0, 7)
         
         # Color permutation (keep 0 fixed, permute 1-9)
         # Only apply if color_permutation is enabled AND probability check passes
-        do_color_perm = self.color_permutation and random.random() < self.color_permutation_prob
+        do_color_perm = self.color_permutation and sample_rng.random() < self.color_permutation_prob
         if do_color_perm:
             # TRM style: permute colors 1-9, keep 0 (black/background) fixed
             color_perm = list(range(1, self.num_colors))  # [1, 2, ..., 9]
-            random.shuffle(color_perm)
+            sample_rng.shuffle(color_perm)
             # color_map: old_color -> new_color
             color_map = {0: 0}  # 0 stays 0
             for i, new_c in enumerate(color_perm):
@@ -1495,7 +1511,7 @@ class SCIARCDataset(Dataset):
             color_map = None
         
         # Translational augmentation (only if enabled via config)
-        do_translate = self.translational_augment and random.random() < 0.3
+        do_translate = self.translational_augment and sample_rng.random() < 0.3
         if do_translate:
             # Find max grid dimensions to determine safe translation range
             all_grids = input_grids + output_grids + [test_input, test_output]
@@ -1504,8 +1520,8 @@ class SCIARCDataset(Dataset):
             # Translation range: up to 4 cells, but stay within bounds
             max_translate_r = min(4, self.max_grid_size - max_h)
             max_translate_c = min(4, self.max_grid_size - max_w)
-            translate_r = random.randint(0, max(0, max_translate_r))
-            translate_c = random.randint(0, max(0, max_translate_c))
+            translate_r = sample_rng.randint(0, max(0, max_translate_r))
+            translate_c = sample_rng.randint(0, max(0, max_translate_c))
         else:
             translate_r = translate_c = 0
         
@@ -1743,6 +1759,16 @@ def create_dataloader(
     Returns:
         PyTorch DataLoader
     """
+    # CRITICAL: Seed RNG BEFORE creating dataset so that:
+    # 1. Cache building uses deterministic augmentations
+    # 2. Any randomness during dataset init is reproducible
+    if seed is not None:
+        import random
+        import numpy as np
+        torch.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+    
     dataset = SCIARCDataset(
         data_dir=data_dir,
         split=split,

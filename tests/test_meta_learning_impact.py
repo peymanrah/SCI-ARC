@@ -54,7 +54,7 @@ class TestHyperLoRAConfiguration:
         assert 'enabled' in loo_config, "LOO enabled not in config"
         assert loo_config['enabled'] == True, "LOO should be enabled"
         assert 'loss_weight' in loo_config, "LOO loss_weight not in config"
-        assert loo_config['loss_weight'] == 0.5, "LOO weight should be 0.5"
+        assert loo_config['loss_weight'] == 0.2, "LOO weight should be 0.2 (tuned middle ground)"
         
     def test_hyperlora_lr_multiplier_in_yaml(self):
         """Verify HyperLoRA gets its own LR multiplier."""

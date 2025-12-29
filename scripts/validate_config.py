@@ -18,7 +18,7 @@ def main():
     
     # Load config
     config_path = "configs/rlan_stable.yaml"
-    with open(config_path) as f:
+    with open(config_path, encoding='utf-8') as f:
         config = yaml.safe_load(f)
     
     print(f"\n✓ Config loaded: {config_path}")
