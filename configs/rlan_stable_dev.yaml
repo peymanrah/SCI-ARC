@@ -1,7 +1,15 @@
-# RLAN STABLE Configuration
-# ==========================
-# Production-ready configuration validated by ablation testing
-# 
+# RLAN STABLE DEV Configuration
+# ==============================
+# Development/iteration configuration for quick testing
+# Uses 50 stratified tasks with 50K samples (~625 iters/epoch)
+#
+# USE THIS CONFIG FOR:
+# - Quick iteration and debugging
+# - Testing code changes
+# - Stratified representative testing
+#
+# For production training (400K samples), use: rlan_stable_prod.yaml
+#
 # HARDWARE TARGET: RTX 3090 (24GB VRAM), 48 virtual CPUs, 128GB RAM
 #
 # USE THIS CONFIG WHEN:
@@ -608,11 +616,9 @@ data:
   
   # num_cached_samples is the TOTAL samples, not per-task!
   # With max_tasks=50, you get: 50,000 / 50 = 1000 samples per task (like TRM)
-  # With max_tasks=null (production), use 400,000 for full training
-  num_cached_samples: 50000  # DEV: 50 tasks × 1000 = 50K (625 iters/epoch)
-                             # PROD: Set to 400000 with max_tasks=null
+  num_cached_samples: 50000  # 50 tasks × 1000 = 50K (625 iters/epoch @ batch 80)
   
-  cache_path: "./cache/rlan_stable.pkl"  # Version tracked internally (v4+)
+  cache_path: "./cache/rlan_stable_50k.pkl"  # DEV: 50K samples
   
   # See max_tasks vs cache_load_percent explanation above!
   # This controls RAM usage by loading a random subset of cached samples.

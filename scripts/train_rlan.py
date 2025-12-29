@@ -1591,7 +1591,35 @@ def train_epoch(
             # MEMORY CHECKPOINT: Before backward pass
             mem_tracker.checkpoint("03_before_backward", model=model)
             
-            scaler.scale(loss).backward()
+            # Wrap backward pass in try-catch to handle CUDA errors gracefully
+            # CUDA kernel errors (e.g., launch failures) can occur with memory fragmentation
+            try:
+                scaler.scale(loss).backward()
+            except RuntimeError as e:
+                error_str = str(e).lower()
+                if 'cuda' in error_str or 'out of memory' in error_str or 'launch' in error_str:
+                    print(f"\n{'!'*60}")
+                    print(f"[ERROR] CUDA error during backward pass at batch {batch_idx}!")
+                    print(f"  Error: {e}")
+                    print(f"  This is often caused by memory fragmentation or OOM.")
+                    print(f"  Attempting recovery...")
+                    print(f"{'!'*60}\n")
+                    
+                    # Clear gradients and CUDA cache
+                    optimizer.zero_grad(set_to_none=True)
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    
+                    # Skip this batch
+                    nan_batches += 1
+                    consecutive_nan += 1
+                    if consecutive_nan >= max_consecutive_nan:
+                        print(f"[ERROR] {max_consecutive_nan} consecutive CUDA errors - cannot recover!")
+                        raise
+                    continue
+                else:
+                    # Re-raise non-CUDA errors
+                    raise
             
             # MEMORY CHECKPOINT: After backward pass (peak memory usually here)
             mem_tracker.checkpoint("04_after_backward", model=model)

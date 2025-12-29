@@ -1,0 +1,774 @@
+# RLAN STABLE PROD Configuration
+# ===============================
+# Production training configuration with full 400K samples
+# Uses all 400 tasks with 400K samples (~5000 iters/epoch)
+#
+# USE THIS CONFIG FOR:
+# - Full production training runs
+# - Final model training before evaluation
+# - Establishing baseline performance
+#
+# For quick dev iteration (50K samples), use: rlan_stable_dev.yaml
+#
+# HARDWARE TARGET: RTX 3090 (24GB VRAM), 48 virtual CPUs, 128GB RAM
+#
+# USE THIS CONFIG WHEN:
+# - Training new models from scratch
+# - Production training runs
+# - Establishing baseline performance
+#
+# ABLATION VALIDATION (Dec 2025):
+# - Achieves 100% exact match on simple ARC tasks in 2-5 epochs
+# - Grid expansion tasks (3x3→9x9) reach 100% in ~130 epochs
+# - Clue regularization validated: faster convergence, stable training
+# - No NaN issues with proper padding (ignore_index=-100)
+#
+# CONTEXT INJECTION (Dec 2025):
+# - use_cross_attention_context=true with spatial_downsample=8
+# - Preserves spatial structure for generalization (unlike FiLM compression)
+# - Adaptive pooling: all grids → 8×8 + learned refinement + position re-encoding
+# - Memory efficient: 64 tokens/pair vs 900 (14x reduction)
+#
+# DATA LOADING (Dec 2025):
+# - 400K cached samples in CPU RAM (not GPU VRAM!)
+# - num_workers=0 when cached (avoids memory duplication)
+# - CUDAPrefetcher for async CPU→GPU transfer (no GPU stalls)
+#
+# SAMPLE COUNT (TRM comparison):
+# - TRM: 1000x pre-generated augmentation = 800,000 samples
+# - RLAN Phase 1: 400,000 cached (1000 per task)
+# - RLAN Phase 2: INFINITE on-the-fly augmentation
+#
+# KEY PRINCIPLES:
+# 1. No scheduler - constant learning rate (most stable)
+# 2. Clue regularization ENABLED (prevents clue collapse)
+# 3. Core modules: ContextEncoder (CrossAttention+Pooling), DSC, MSRE
+# 4. Light auxiliary losses (entropy, sparsity, predicate)
+# 5. max_grid_size=30 (official ARC-AGI maximum)
+#
+# TRAINING WORKFLOW:
+# Phase 1: Train with cache_samples=true until convergence (memorization)
+# Phase 2: Resume with cache_samples=false for diversity (generalization)
+#
+# CACHE AUTO-VALIDATION: Cache version and augmentation settings are
+# stored in metadata. Stale caches are auto-deleted and regenerated.
+# No manual deletion needed - just change settings and run training!
+#
+# ==========================
+
+model:
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10  # colors 0-9
+  max_grid_size: 30
+  
+  max_clues: 7
+  num_predicates: 32  # More predicates for diversity
+  num_solver_steps: 5   # Reduced from 6 to save ~150MB (logs showed best step was 4 anyway)
+  
+  use_act: false       # DISABLED
+  dropout: 0.1
+  
+  # =============================================================
+  # BEST-STEP SELECTION (Dec 2025)
+  # =============================================================
+  # When enabled, selects the best prediction from all solver steps:
+  # - Training: Uses lowest loss (ground truth available)
+  # - Inference: Uses lowest entropy (confidence-based)
+  # 
+  # This prevents over-iteration from hurting accuracy. If step 3
+  # is better than step 6 for a simple task, we use step 3.
+  # 
+  # Recommended workflow:
+  # 1. Train with use_best_step_selection: false (default)
+  # 2. At inference, set use_best_step_selection: true to use entropy
+  # 3. The model doesn't need retraining - this is inference-only
+  #
+  # Can also enable during training to track best-step histograms.
+  use_best_step_selection: false
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4     # Not used
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8      # Not used
+  
+  # CORE MODULES ONLY (ablation validated)
+  use_context_encoder: true   # REQUIRED - learns task from demos
+  use_dsc: true               # REQUIRED - dynamic spatial cluing
+  use_msre: true              # REQUIRED - multi-scale relative encoding
+  use_lcr: false              # DISABLED - not needed for learning
+  
+  # Context injection mode (CRITICAL FOR STABILITY!)
+  # false = FiLM conditioning (stable, proven, compresses context to vector)
+  # true = CrossAttention (experimental, high memory, can cause mode collapse)
+  #
+  # MIDDLE GROUND: Enable CrossAttention but with spatial downsampling
+  # This gives spatial context without the massive memory cost
+  use_cross_attention_context: true
+  
+  # Spatial downsample TARGET SIZE (not divisor!)
+  # All support grids (3x3 to 30x30) are pooled to this fixed size
+  # 8 = 8x8 output (64 tokens per pair, ~14x reduction from 30x30)
+  # Uses learned refinement + position re-encoding after pooling
+  spatial_downsample: 8       # 8x8 target - preserves objects while being memory-efficient
+  use_sph: false              # DISABLED - not needed for learning
+  use_learned_pos: false      # DISABLED - sinusoidal works better
+  
+  # Phase 2.5: Solver Cross-Attention to Support Set (Dec 2025)
+  # ENABLED: Critical for generalization to unseen ARC rules
+  # 
+  # WHY THIS IS NEEDED:
+  # - DSC injection provides GLOBAL context (baked in once at start)
+  # - Solver cross-attention provides LOCAL verification at EVERY step
+  # - These are COMPLEMENTARY: spatial priors + iterative verification
+  #
+  # MEMORY COST: ~100MB additional (trivial on 24GB GPU)
+  # - Support: (B, N, 256, 8, 8) computed ONCE, reused across 6 steps
+  # - Attention: O(900 × 256) per step = ~230K ops = <1ms/step
+  #
+  # PREVIOUS ISSUE: Mode collapse was caused by hardcoded CrossAttentionInjector
+  # not by solver cross-attention. Now with spatial_downsample=8, memory is fine.
+  use_solver_context: true    # ENABLED - critical for iterative verification
+  solver_context_heads: 4     # Multi-head attention for diverse queries
+  
+  # =============================================================
+  # HYPER-LORA: META-LEARNING WEIGHT ADAPTATION (Dec 2025)
+  # =============================================================
+  # HyperLoRA predicts task-specific LoRA weight deltas from context.
+  # This allows the model to adapt its GRU gates and output head to
+  # each specific task, similar to test-time training (TTT) but
+  # without gradient updates at inference time.
+  #
+  # ARCHITECTURE:
+  # - Pools context from encoded support features
+  # - Predicts low-rank weight deltas (A, B matrices) for:
+  #   - GRU reset gate, update gate, candidate gate
+  #   - Output head (logits projection)
+  # - Applied via additive LoRA: W' = W + A @ B.T
+  #
+  # TRAINING:
+  # - Task loss: Standard cross-entropy on predictions
+  # - LOO loss: Leave-one-out generalization (predict held-out pair)
+  # - Equivariance loss: Consistent predictions across augmentations
+  #
+  # INFERENCE:
+  # - Sanity check: Verify LoRA works on support set (>90%)
+  # - ACW: Augmented Confidence Weighting for voting
+  #
+  # PRODUCTION DEFAULT: ENABLED for generalization
+  # =============================================================
+  use_hyperlora: true        # ENABLED - critical for task-specific adaptation
+  hyperlora_rank: 8          # LoRA rank (lower = fewer params, less expressive)
+  hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
+  hyperlora_dropout: 0.0     # Dropout on LoRA activations
+  hyperlora_init_scale: 0.1  # INCREASED: Was 0.01, now 0.1 for stronger meta-learning signal
+
+  # =============================================================
+  # HIERARCHICAL PRIMITIVE MEMORY (HPM v2) - Dec 2025
+  # =============================================================
+  # HPM is a multi-bank memory system for universal continual learning.
+  # It stores ALL types of useful primitives (not just compositional).
+  #
+  # v2 IMPROVEMENTS:
+  # - Sparse MoE Top-K routing (prevents mode collapse)
+  # - Gated residual initialized to 0 (training stability)
+  # - Static vs Dynamic bank split (unbounded memory)
+  # - Load Balancing Loss (ensures all banks utilized)
+  #
+  # BANK TYPES:
+  # - STATIC BANKS (nn.Parameter, learned during training):
+  #   - Compositional: Transformations that compose (rotate, translate)
+  #   - Pattern: Holistic patterns/templates (textures, shapes)
+  #   - Relational: Spatial/logical relationships (above, inside)
+  #   - Concept: Domain knowledge (semantics, categories)
+  #
+  # - DYNAMIC BANKS (KV-cache, grows with solved tasks):
+  #   - Procedural: HyperLoRA latent codes for task procedures
+  #   - Instance: ContextEncoder outputs for retrieval-based reasoning
+  #
+  # MEMORY EFFICIENCY:
+  # - Gate starts at 0, so HPM contributes nothing initially
+  # - Top-K routing means only k banks queried per sample
+  # - Dynamic banks use CPU storage with FAISS for fast retrieval
+  #
+  # THREE-PHASE TRAINING WORKFLOW:
+  # Phase 1: Train baseline RLAN (HPM inactive)
+  # Phase 2: Activate HPM (gate learns to open gradually)
+  # Phase 3: Fine-tune with HPM retrieval enabled
+  #
+  # STAGED HPM: Aligned with meta_learning_start_epoch for stability
+  # HPM stays OFF during early training, then activates with meta-learning.
+  # This ensures the base model learns FG/BG distinction first.
+  #
+  # WARNING (Dec 2025): HPM adds significant memory (~1-2GB).
+  # DISABLED temporarily to isolate memory issues from other modules.
+  # =============================================================
+  use_hpm: false                      # DISABLED: Testing memory without HPM first
+  hpm_start_epoch: 3                  # Activate HPM after epoch 3 (aligns with meta_learning_start_epoch)
+  
+  # Sparse MoE Routing Configuration
+  hpm_top_k: 2                        # Number of banks to route to per sample
+  hpm_balance_weight: 0.01            # Load balancing loss weight (prevents mode collapse)
+  
+  # Static Bank Configuration (AGGRESSIVE for ARC expressiveness)
+  # Total primitives = 3 banks × 32 primitives × 3 levels = 288 primitives
+  hpm_primitives_per_bank: 32         # Number of primitives per static bank (was 16)
+  hpm_levels_per_bank: 3              # Hierarchical levels within each bank (was 2)
+  hpm_use_cross_attention: true       # Use cross-attention aggregation
+  
+  # Dynamic Bank Configuration
+  hpm_memory_size: 10000              # Max entries in dynamic banks (enough for 10x ARC)
+  hpm_retrieval_k: 5                  # Number of neighbors to retrieve
+  
+  # Bank Selection (which banks to enable)
+  # Static banks (learned primitives):
+  hpm_use_compositional_bank: true    # Transformations that compose
+  hpm_use_pattern_bank: true          # Holistic patterns/templates
+  hpm_use_relational_bank: true       # Spatial/logical relationships
+  hpm_use_concept_bank: false         # Domain knowledge (optional)
+  
+  # Dynamic banks (KV-cache, populated on solved tasks):
+  # ENABLED: These grow during training as tasks are solved correctly
+  hpm_use_procedural_bank: true       # HyperLoRA codes (requires HyperLoRA enabled)
+  hpm_use_instance_bank: true         # ContextEncoder cache (retrieval-augmented reasoning)
+
+training:
+  max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
+  
+  # CONSERVATIVE batch size to stay within 24GB GPU VRAM only
+  # 
+  # MEMORY ANALYSIS (Dec 2025 with CrossAttention + SolverCrossAttention):
+  # - Base model (commit 2a50f2d, no cross-attention): batch=75 used ~22GB
+  # - CrossAttentionInjector adds: ~160 MB (query+key+value+FFN activations)
+  # - SolverCrossAttention adds: ~400 MB (6 steps × 67 MB each)
+  # - Backward pass: ~2× forward = +1.1 GB from cross-attention
+  # - TOTAL additional: ~1.7 GB from cross-attention features
+  #
+  # ADDITIONAL MEMORY (Dec 2025 with HyperLoRA + LOO + Equivariance):
+  # - HyperLoRA: ~500 MB (5M params + activations)
+  # - LOO training: N forward passes per sample (N=3-5 avg)
+  # - Equivariance: 4 augmentations = 4x forward passes
+  # - TOTAL: ~4-5 GB additional on top of base model
+  #
+  # To stay within 24GB with ~2GB headroom:
+  # - Reduce batch from 64 to 16 (saves ~12 GB)
+  # - Use grad_accumulation=20 for effective batch of 320 (TRM-competitive)
+  #
+  # MEMORY FIX (Dec 2025): OOM with batch=32 due to:
+  # - LOO training: N forward passes (N=3-5) with graph accumulation
+  # - Equivariance: 4 augmentation forward passes per sample
+  # - Combined: up to 9x memory multiplier in worst case!
+  # 
+  # UPDATE (Dec 2025): With staged meta-learning, LOO/Equiv are OFF for
+  # epochs 1-3, so we can use larger batches. Increased from 16 to 28.
+  # At 16GB usage with batch=16, we have 8GB headroom on 24GB GPU.
+  #
+  # GRADIENT CHECKPOINTING ISSUE (Dec 2025):
+  # Gradient checkpointing has bugs with Dict and None arguments in PyTorch.
+  # DISABLED until proper fix is implemented. Use conservative batch size instead.
+  #
+  # BATCH SIZE STABILITY (Dec 2025):
+  # The old stable config (2a50f2d) used batch=75, grad_accum=4 WITHOUT collapse.
+  # The difference was NOT batch size, but:
+  # 1. No HyperLoRA forward pass noise in early epochs
+  # 2. No SolverCrossAttention forward pass noise in early epochs
+  # 3. Simpler architecture = cleaner gradients
+  #
+  # =====================================================================
+  # MEMORY PLANNING FOR STAGED ACTIVATION
+  # =====================================================================
+  # At epoch 3 (meta_learning_start_epoch), additional modules activate:
+  #
+  # EPOCHS 0-2 (Staged - minimal memory):
+  #   - FiLM context injection: ~1MB (just γ*features+β)
+  #   - Solver without cross-attention: baseline
+  #   - HyperLoRA deltas = 0 (module exists but doesn't contribute)
+  #
+  # EPOCH 3+ (Active - additional memory per batch):
+  #   - CrossAttentionInjector: +17MB (Q/K/V attention over spatial context)
+  #   - SolverCrossAttention: +100MB (6 steps × 17MB per step)
+  #   - HyperLoRA deltas: +5MB (small delta matrices)
+  #   - TOTAL INCREASE: ~120MB per forward pass
+  #
+  # With memory optimizations (8-bit AdamW + gradient checkpointing), batch_size=90 is safe.
+  # Previous limit was 70 without optimizations. Now we have ~40% memory reduction.
+  #
+  # =============================================================
+  # MEMORY OPTIMIZATIONS (Dec 2025)
+  # =============================================================
+  # These optimizations reduce VRAM usage and speed up training.
+  # All are backward-compatible with fallback to default behavior.
+  #
+  # 1. 8-bit AdamW: Reduces optimizer state memory by ~75%
+  #    - Requires: pip install bitsandbytes
+  #    - Fallback: Standard AdamW if bitsandbytes not installed
+  #
+  # 2. Gradient Checkpointing: Trades compute for memory
+  #    - Re-computes activations during backward (slower but less memory)
+  #    - Saves 20-50% of activation memory
+  #    - SMART UNPACK/REPACK: Works with HyperLoRA via tensor unpacking
+  #    - Memory savings apply to ALL epochs (not just early training)
+  #
+  # 3. torch.compile: JIT compilation for faster kernels
+  #    - Requires PyTorch 2.0+
+  #    - 10-30% speedup on compatible hardware
+  #
+  # 4. Flash Attention (SDPA): Automatic in PyTorch 2.0+
+  #    - nn.MultiheadAttention uses SDPA by default
+  #    - O(N) memory instead of O(N²) for attention
+  # =============================================================
+  use_8bit_optimizer: true    # ~75% optimizer memory savings (fallback to AdamW if bitsandbytes missing)
+  gradient_checkpointing: true   # ~30% activation memory savings (trades compute for memory)
+  use_torch_compile: false    # DISABLED - can cause issues with dynamic shapes in ARC grids
+  torch_compile_mode: 'reduce-overhead'  # Options: 'default', 'reduce-overhead', 'max-autotune'
+  
+  batch_size: 80    # Safe with memory optimizations (epochs 0-13). LOO/Equi add N passes at epoch 8+/12+
+  grad_accumulation_steps: 4  # effective_batch_size = 80 × 4 = 320
+  
+  learning_rate: 5.0e-4  # Works well in ablation
+  weight_decay: 0.01     # Light regularization
+  gradient_clip: 1.0     # Conservative
+  
+  # Per-module LR boosting
+  # NOTE: Set to 1.0 for stable training. Higher values may cause NaN.
+  # HyperLoRA benefits from higher LR to learn meta-weight prediction faster.
+  # MIDDLE GROUND (Dec 2025): Reduced from 10.0 to 3.0 for smoother staged training
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  hyperlora_lr_multiplier: 3.0   # 3x base LR (was 10x, caused instability)
+  
+  # Temperature for DSC attention
+  temperature_start: 1.0
+  temperature_end: 0.5    # Don't go below 0.5
+  
+  # =============================================================
+  # LOSS CONFIGURATION - PURE STABLEMAX (TRM PROVEN)
+  # =============================================================
+  # TRM uses PURE stablemax_cross_entropy with NO class weighting.
+  # They handle class imbalance through:
+  #   1. Color permutation on every sample (shuffles which color is rare)
+  #   2. Large pre-generated cache (1000x augmentation per task)
+  #   3. Long training (100K epochs)
+  #
+  # For RLAN, we adopt the same approach:
+  #   - Pure stablemax (no weighting, no focal)
+  #   - 100% color permutation (shuffles class distribution)
+  #   - 400K cached samples (500 per task)
+  #
+  # If RLAN's architecture is superior, it should learn faster!
+  # =============================================================
+  loss_mode: 'stablemax'  # TRM-proven: pure cross-entropy, no weighting
+  bg_weight_cap: 2.0      # Not used with stablemax mode
+  fg_weight_cap: 5.0      # Not used with stablemax mode
+  
+  focal_gamma: 2.0        # Not used with stablemax mode
+  focal_alpha: 0.75       # Not used with stablemax mode
+  
+  # AUXILIARY LOSSES (minimized for stability)
+  lambda_entropy: 0.01          # Light attention sharpness
+  lambda_sparsity: 0.5          # Required for clue regularization
+  lambda_predicate: 0.01        # Light predicate diversity
+  lambda_curriculum: 0.0        # OFF
+  lambda_deep_supervision: 0.0  # OFF - not needed with weighted_stablemax
+  lambda_act: 0.0               # OFF
+  
+  # Clue regularization (ENABLED - validated stable Dec 2025)
+  # Helps model learn appropriate clue count per task
+  min_clues: 1.0             # Allow 1-clue simple tasks (was 2.5)
+  min_clue_weight: 5.0       # Prevents collapse to 0 clues
+  ponder_weight: 0.02        # Small cost per clue (encourages efficiency)
+  entropy_ponder_weight: 0.02  # Encourages sharp attention
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  # NO SCHEDULER - constant LR (most stable)
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 5.0e-4  # Same as learning_rate
+  
+  # =============================================================
+  # EMA CONFIGURATION - DISABLED FOR 20-EPOCH TRAINING
+  # =============================================================
+  # Analysis showed EMA with decay=0.999 creates 1000-step lag.
+  # For 20-epoch training (~26K steps), EMA never catches up.
+  # Disabled based on user guidance: "EMA doesn't benefit 20 epochs"
+  # =============================================================
+  use_ema: false
+  ema_decay: 0.999  # Not used when use_ema=false
+  
+  # =============================================================
+  # STAGED META-LEARNING (Dec 2025 - BG Collapse Fix)
+  # =============================================================
+  # PROBLEM: Enabling LOO + Equivariance from epoch 1 destabilizes
+  # early learning, causing the model to collapse to all-background.
+  #
+  # SOLUTION: Train base model first (pure task loss), then activate
+  # meta-learning losses after the model learns basic FG/BG distinction.
+  #
+  # This parameter controls when LOO and Equivariance losses activate.
+  # The model architecture (HyperLoRA) is always present, but the
+  # auxiliary meta-learning losses are delayed.
+  #
+  # NOTE: HPM also uses hpm_start_epoch (model section) for alignment.
+  # Both should typically be set to the same value for stable training.
+  # =============================================================
+  meta_learning_start_epoch: 3  # Activate HyperLoRA/SolverContext contributions
+  
+  # =============================================================
+  # STAGED LOSS ACTIVATION (Dec 2025)
+  # =============================================================
+  # Enable losses at DIFFERENT epochs based on training needs:
+  # - Equivariance: Earlier (epoch 8) - lighter, helps dihedral consistency
+  # - LOO: Later (epoch 12) - heavier, requires stable base model
+  #
+  # This addresses the 60x eval entropy explosion by enforcing:
+  # 1. Dihedral invariance early (fixes 13% consensus problem)
+  # 2. Few-shot generalization later (fixes train→eval gap)
+  # =============================================================
+  
+  # =============================================================
+  # LOO TRAINING: LEAVE-ONE-OUT META-LEARNING LOSS
+  # =============================================================
+  # Teaches the model to generalize from N-1 examples to the Nth.
+  # Only active when use_hyperlora: true in model section.
+  #
+  # For each training task with N pairs:
+  #   1. Hold out one pair as the "test"
+  #   2. Pool context from remaining N-1 pairs
+  #   3. Predict LoRA weights from this context
+  #   4. Use LoRA to predict held-out pair
+  #   5. Backprop loss on held-out prediction
+  #
+  # This explicitly trains the HyperLoRA to GENERALIZE.
+  #
+  # STAGED (Dec 2025): Activates at epoch 12 - needs stable base model first
+  # =============================================================
+  loo_training:
+    enabled: true          # ENABLED: Auto-activates at start_epoch
+    start_epoch: 12        # Activate at epoch 12 (stable base required)
+    loss_weight: 0.2       # MIDDLE GROUND: 20% of task loss
+    min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
+  
+  # =============================================================
+  # AUGMENTATION EQUIVARIANCE LOSS
+  # =============================================================
+  # Encourages consistent LoRA predictions across augmented views.
+  # If a task is rotated 90°, the predicted LoRA weights should
+  # have similar magnitudes (the "rule" is the same, just rotated).
+  #
+  # Loss: L2 on Frobenius norm difference of LoRA matrices.
+  #
+  # STAGED (Dec 2025): Activates at epoch 8 - fixes dihedral invariance early
+  # This addresses the 13% TTA consensus problem before LOO.
+  # =============================================================
+  equivariance_training:
+    enabled: true          # ENABLED: Auto-activates at start_epoch
+    start_epoch: 8         # Activate at epoch 8 (earlier than LOO)
+    loss_weight: 0.05      # MIDDLE GROUND: Lighter regularization
+    num_augmentations: 4   # Number of random augmentations per task
+  
+  # =============================================================
+  # META-LEARNING STRATEGY SUMMARY (COMPLEMENTARY LOSSES)
+  # =============================================================
+  # The three meta-learning losses work together without conflict:
+  #
+  # 1. TASK LOSS (weight=1.0): Standard cross-entropy on predictions
+  #    - Objective: Predict correct output grids
+  #    - Target: Direct task performance
+  #
+  # 2. LOO LOSS (weight=0.2): Leave-one-out generalization
+  #    - Objective: Predict Nth pair from N-1 context
+  #    - Target: Few-shot generalization within a task
+  #    - Complementary: Doesn't conflict with task loss - both want correct predictions
+  #                     LOO adds EXPLICIT generalization signal during training
+  #
+  # 3. EQUIVARIANCE LOSS (weight=0.05): Augmentation consistency
+  #    - Objective: Same LoRA weights for rotated/flipped versions
+  #    - Target: Transform-invariant representations
+  #    - Complementary: Acts as REGULARIZER - prevents overfitting to specific orientations
+  #                     Light weight (0.05) ensures it doesn't dominate task learning
+  #
+  # MATHEMATICAL RELATIONSHIP:
+  #   L_total = L_task + 0.2 * L_loo + 0.05 * L_equiv
+  #
+  # WHY THIS IS OPTIMAL (NOT OVERKILL):
+  # - Task loss drives direct performance
+  # - LOO loss adds explicit generalization pressure (meta-learning signal)
+  # - Equivariance loss adds regularization (prevents orientation bias)
+  # - Weights are calibrated so task loss dominates, meta-losses support
+  #
+  # HYPERLORA LR MULTIPLIER (10x):
+  # - HyperLoRA needs faster learning to adapt its meta-prediction
+  # - Base model has stable pretrained weights, HyperLoRA learns from scratch
+  # - 10x ensures HyperLoRA doesn't become a bottleneck
+  # =============================================================
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  
+  # CRITICAL: Ignore padding in loss
+  ignore_padding_in_loss: true
+  
+  # ==========================================================================
+  # DATA SAMPLING CONFIGURATION
+  # ==========================================================================
+  # 
+  # SIMPLE MENTAL MODEL:
+  # 1. max_tasks: How many TASKS to use (STRATIFIED sampling from 400)
+  # 2. cache_samples: Whether to use pre-cached augmentations
+  # 3. cache_load_percent: How much of cache to load into RAM
+  #
+  # BUCKETED BATCHING: ALWAYS ON (non-negotiable for memory efficiency)
+  # Groups same-sized grids together to minimize padding waste.
+  #
+  # ==========================================================================
+  # VALID CONFIGURATIONS (what actually works)
+  # ==========================================================================
+  #
+  # | Scenario           | max_tasks | cache_samples | cache_load_percent | Sampling           |
+  # |--------------------|-----------|---------------|--------------------|--------------------|
+  # | Full training      | null      | true          | 100                | All 400K samples   |
+  # | Memory-limited     | null      | true          | 6                  | RANDOM 6% (~24K)   |
+  # | Stratified test    | 50        | true          | 100                | STRATIFIED 50 tasks|
+  # | Quick smoke test   | 25        | false         | (ignored)          | STRATIFIED 25 tasks|
+  # | On-the-fly train   | null      | false         | (ignored)          | All 400, infinite  |
+  #
+  # WHAT'S STRATIFIED vs RANDOM:
+  # - max_tasks → STRATIFIED: Covers all 18 strata (grid sizes × shot counts × size changes)
+  # - cache_load_percent → RANDOM: Just loads first N% of shuffled chunks (fast but random)
+  #
+  # INVALID/WASTEFUL COMBINATIONS:
+  # - max_tasks=100 + cache_load_percent=6: Loads 24K samples, filters to ~6K → wasteful!
+  #   Better: Use max_tasks=100 + cache_load_percent=100 (gets all 100K samples for 100 tasks)
+  #
+  # RECOMMENDED CONFIGURATIONS:
+  # | Use Case          | Config                                      | Expected Samples |
+  # |-------------------|---------------------------------------------|------------------|
+  # | Quick smoke test  | max_tasks=25, cache_samples=false           | 25 tasks, fresh  |
+  # | Dev iteration     | max_tasks=50, cache_samples=true, pct=100   | ~50K samples     |
+  # | Full validation   | max_tasks=100, cache_samples=true, pct=100  | ~100K samples    |
+  # | Production train  | max_tasks=null, cache_samples=true, pct=100 | 400K samples     |
+  # | Memory-constrained| max_tasks=null, cache_samples=true, pct=10  | ~40K samples     |
+  #
+  # ==========================================================================
+  # CACHE AUTO-VALIDATION (Dec 2025)
+  # ==========================================================================
+  # The code automatically validates cached data before loading:
+  # - Checks cache version (must match current code version)
+  # - Checks augmentation settings (augment, color_perm, translational, max_size)
+  # - If mismatch detected: AUTOMATICALLY deletes old cache and regenerates!
+  #
+  # This means you DON'T need to manually delete caches when settings change.
+  # The code is smart enough to detect stale caches and regenerate them.
+  # ==========================================================================
+  
+  # ==========================================================================
+  # CURRENT MODE: PRODUCTION (full 400K samples)
+  # ==========================================================================
+  max_tasks: null  # PRODUCTION: Use ALL 400 tasks
+  stratified_seed: 42  # Seed for reproducible stratified sampling
+  
+  # Data loading configuration
+  # NOTE: When cache_samples=true, num_workers is automatically set to 0
+  # to avoid duplicating the 400K cache across worker processes.
+  # GPU stalls are prevented by CUDAPrefetcher (async CPU→GPU transfer).
+  num_workers: 12      # Used when cache_samples=false (on-the-fly augmentation)
+  pin_memory: true     # Enables async GPU transfer (always beneficial)
+  prefetch_factor: 6   # Used when num_workers > 0
+  persistent_workers: true
+  
+  # ==========================================================================
+  # CACHING + AUGMENTATION STRATEGY (TRM-INSPIRED)
+  # ==========================================================================
+  # TRM uses 1000x pre-generated augmentation per task with:
+  #   - 8 dihedral transforms
+  #   - Random color permutation (color 0 fixed, 1-9 shuffled)
+  #   - Translational offset
+  #
+  # We do the same with 400K cached samples:
+  #   - Each sample has RANDOM augmentation baked in
+  #   - color_permutation_prob: 1.0 = EVERY sample color-permuted (like TRM!)
+  #   - This naturally balances class distribution over training
+  #
+  # CACHE AUTO-VALIDATION: Code detects stale caches and auto-regenerates!
+  # No need to manually delete caches when changing augmentation settings.
+  # Version is tracked INSIDE the cache metadata, not in the filename.
+  # ==========================================================================
+  
+  cache_samples: true
+  
+  # num_cached_samples is the TOTAL samples, not per-task!
+  # With max_tasks=null, you get: 400,000 / 400 = 1000 samples per task (like TRM)
+  num_cached_samples: 400000  # 400 tasks × 1000 = 400K (5000 iters/epoch @ batch 80)
+  
+  cache_path: "./cache/rlan_stable_400k.pkl"  # PROD: 400K samples (~25GB)
+  
+  # See max_tasks vs cache_load_percent explanation above!
+  # This controls RAM usage by loading a random subset of cached samples.
+  # For representative testing, prefer max_tasks (stratified) over this (random).
+  cache_load_percent: 100  # DEV ITERATION: Load all samples for stratified tasks
+                           # Use 6-20 for quick testing (~20s load)
+                           # For production with max_tasks=null, use 100
+  
+  # ==========================================================================
+  # BUCKETED BATCHING - NON-NEGOTIABLE (ALWAYS ENABLED FOR MEMORY EFFICIENCY)
+  # ==========================================================================
+  # Groups samples by grid size to minimize padding waste.
+  # Without this: One 30x30 grid forces ALL 80 batch samples to 30x30 = 4x memory waste!
+  # With this: Each batch has similar-sized grids → minimal padding.
+  #
+  # This applies to ALL configurations:
+  # - Full training (400K samples)
+  # - Stratified testing (max_tasks=50)
+  # - On-the-fly augmentation (cache_samples=false)
+  # - Memory-limited runs (cache_load_percent < 100)
+  #
+  # Batch ORDER is shuffled each epoch to avoid learning bias.
+  # ==========================================================================
+  bucketed_batching: true  # WARNING: Setting to false wastes memory!
+  bucket_boundaries: [10, 15, 20, 25]  # Creates 5 buckets: ≤10, 11-15, 16-20, 21-25, >25
+  
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    color_permutation_prob: 1.0  # TRM STYLE: ALWAYS apply (was 0.3, now 1.0)
+    translational: true
+    track_augmentation: true  # REQUIRED for inverse aug at eval
+
+# =============================================================
+# EVALUATION - TRM-STYLE WITH INVERSE AUGMENTATION
+# =============================================================
+# Critical for measuring true generalization:
+# 1. Apply augmentations to test inputs
+# 2. Get model predictions
+# 3. REVERSE augmentations to canonical space
+# 4. Compare with original ground truth
+# 5. Use voting across predictions for robustness
+# =============================================================
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+  
+  # TRM-style evaluation settings
+  use_trm_style_eval: true
+  num_augmented_views: 8  # 8 dihedral transforms (D4 group)
+  num_color_perms: 4      # 4 color permutations per dihedral = 32 total views
+  use_voting: true        # Aggregate predictions
+  use_inverse_aug: true   # CRITICAL: Undo augmentations before comparison
+  pass_ks: [1, 2, 3]      # Report Pass@K: is answer in top K voted predictions?
+  max_eval_tasks: 100     # Number of eval tasks to run TTA on (100 for full eval)
+
+# =============================================================
+# GAP MONITORING - EARLY WARNING FOR GENERALIZATION ISSUES
+# =============================================================
+monitoring:
+  enabled: true
+  exact_match_warning: 0.10   # Warn if train-eval gap > 10%
+  exact_match_critical: 0.20  # Critical if gap > 20%
+  entropy_ratio_warning: 2.0  # Warn if eval entropy > 2x train
+  entropy_ratio_critical: 5.0 # Critical if > 5x
+  stop_value_warning: 0.15    # Warn if stop value gap > 0.15
+  stop_value_critical: 0.25   # Critical if > 0.25
+
+logging:
+  log_every: 1
+  save_every: 10
+  eval_every: 1  # Changed from 5 to detect train/eval gap early
+  keep_last_n: 3
+  checkpoint_dir: "checkpoints/rlan_stable"
+  log_to_file: true
+  track_augmentation: true  # Enable to verify augmentation diversity
+  memory_debug_batches: 5   # Log detailed memory checkpoints for first N batches per epoch
+  
+  use_wandb: false
+  wandb_project: "rlan-arc"
+  wandb_run_name: null
+
+# =============================================================
+# INFERENCE SETTINGS (Dec 2025)
+# =============================================================
+# These settings can be overridden via command-line arguments:
+#   --use-best-step, --no-best-step, --num-steps <N>
+#
+# Example commands:
+#   # Use entropy-based best step + 10 solver iterations
+#   python evaluate_rlan.py --checkpoint best.pt --use-best-step --num-steps 10
+#
+#   # Compare 6 vs 10 steps
+#   python evaluate_rlan.py --checkpoint best.pt --num-steps 6
+#   python evaluate_rlan.py --checkpoint best.pt --num-steps 10
+#
+inference:
+  # Temperature for softmax (lower = sharper predictions)
+  # Should match training end temperature for consistency
+  temperature: 0.1
+  
+  # Best-step selection: pick step with lowest entropy (most confident)
+  # - false: Always use last step (default, matches training)
+  # - true: Use entropy-based selection (may improve accuracy)
+  use_best_step_selection: false
+  
+  # Solver steps override (null = use model's trained default)
+  # Can test with more steps than trained (e.g., train=6, infer=10)
+  num_steps_override: null
+  
+  # Test-Time Augmentation (matches training TTA for consistent results)
+  # With 8 dihedral x 4 color perms = 32 views, same as evaluate_trm_style()
+  use_tta: true
+  num_dihedral: 8      # Full D4 group (identity + 3 rotations + 4 reflections)
+  num_color_perms: 4   # Color permutations per dihedral (keeps color 0 fixed)
+  
+  # Batch size for evaluation (can be larger than training)
+  batch_size: 32
+  
+  # =============================================================
+  # HYPER-LORA INFERENCE SETTINGS
+  # =============================================================
+  # LOO Sanity Check: Verify predicted LoRA weights work on support set
+  # If accuracy on training pairs is below threshold, fall back to
+  # standard forward pass without LoRA (safety mechanism).
+  # =============================================================
+  loo_sanity_check: true
+  loo_threshold: 0.9    # Require 90% accuracy on support set
+  
+  # =============================================================
+  # ACW: AUGMENTED CONFIDENCE WEIGHTING
+  # =============================================================
+  # Instead of simple voting, weight each augmented prediction by
+  # how consistent it is with other augmentations. More consistent
+  # predictions get higher weight in the final vote.
+  #
+  # Consistency = 1 - mean(pairwise_disagreement_with_other_views)
+  # =============================================================
+  acw_enabled: true
+  acw_num_views: 8     # Number of augmented views to consider
+
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false  # Set true for reproducibility (slower)
+  check_nan_inf: true   # Enable NaN/Inf detection in training loop
+
+device:
+  use_cuda: true
+  mixed_precision: true
+  dtype: "bfloat16"
+  compile: false
