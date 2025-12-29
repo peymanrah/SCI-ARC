@@ -60,6 +60,10 @@ outputs/
 runs/
 wandb/
 
+# Cache files (large files - generated during training)
+cache/*.pkl
+cache/**/*.pkl
+
 # Logs
 logs/
 *.log
