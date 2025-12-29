@@ -291,17 +291,23 @@ class BucketedBatchSampler(Sampler):
             # Use a fast path if dataset stores grid size metadata
             if hasattr(self.dataset, '_cached_samples') and self.dataset._cached_samples:
                 sample = self.dataset._cached_samples[idx]
-                # Compute max grid size from sample
-                max_size = 0
-                if 'test_input' in sample:
-                    t = sample['test_input']
-                    if isinstance(t, torch.Tensor):
-                        max_size = max(max_size, t.shape[-1], t.shape[-2])
-                for key in ['input_grids', 'output_grids']:
-                    if key in sample:
-                        for g in sample[key]:
-                            if isinstance(g, torch.Tensor):
-                                max_size = max(max_size, g.shape[-1], g.shape[-2])
+                # Use stored original_max_size if available (before padding)
+                # This is CRITICAL: padded grids are all max_size (e.g., 30x30)
+                # but we want to bucket by ORIGINAL size for memory efficiency
+                if 'original_max_size' in sample:
+                    max_size = sample['original_max_size']
+                else:
+                    # Fallback: compute from tensor shapes (all padded, so less useful)
+                    max_size = 0
+                    if 'test_input' in sample:
+                        t = sample['test_input']
+                        if isinstance(t, torch.Tensor):
+                            max_size = max(max_size, t.shape[-1], t.shape[-2])
+                    for key in ['input_grids', 'output_grids']:
+                        if key in sample:
+                            for g in sample[key]:
+                                if isinstance(g, torch.Tensor):
+                                    max_size = max(max_size, g.shape[-1], g.shape[-2])
             else:
                 max_size = self._get_sample_max_grid_size(idx)
             
@@ -740,6 +746,15 @@ class ARCDataset(Dataset):
         # Check if we need to filter by task_id (max_tasks is active)
         filter_by_task = hasattr(self, '_active_task_ids') and self.max_tasks is not None
         
+        # DEBUG: Always print filter status
+        print(f"  DEBUG: max_tasks={self.max_tasks}, has _active_task_ids={hasattr(self, '_active_task_ids')}")
+        print(f"  DEBUG: filter_by_task={filter_by_task}")
+        if hasattr(self, '_active_task_ids'):
+            print(f"  DEBUG: len(_active_task_ids)={len(self._active_task_ids)}")
+            # Show a few sample IDs
+            sample_ids = list(self._active_task_ids)[:5]
+            print(f"  DEBUG: sample _active_task_ids={sample_ids}")
+        
         # Calculate how many samples to load
         num_to_load = max(1, int(total_samples * load_percent / 100))
         chunks_to_load = (num_to_load + chunk_size - 1) // chunk_size  # Ceiling division
@@ -754,11 +769,18 @@ class ARCDataset(Dataset):
         
         self._cached_samples = []
         samples_before_filter = 0
+        first_chunk_debug = True  # Show debug for first chunk only
         
         for chunk_idx in range(min(chunks_to_load, num_chunks)):
             chunk_path = cache_dir / f'chunk_{chunk_idx:04d}.pkl'
             with open(chunk_path, 'rb') as f:
                 chunk_samples = pickle.load(f)
+            
+            # DEBUG: Show task_ids from first chunk
+            if first_chunk_debug and chunk_samples:
+                chunk_task_ids = {s.get('task_id') for s in chunk_samples[:20]}
+                print(f"  DEBUG: First chunk sample task_ids: {list(chunk_task_ids)[:5]}")
+                first_chunk_debug = False
             
             if filter_by_task:
                 # Filter samples to only include active tasks
@@ -912,6 +934,11 @@ class ARCDataset(Dataset):
         test_input_padded = self._pad_grid(test_input, offset, is_target=False)
         test_output_padded = self._pad_grid(test_output, offset, is_target=True)
         
+        # Compute ORIGINAL max grid size BEFORE padding for bucketed batching
+        # This allows BucketedBatchSampler to group similar-sized tasks together
+        all_original_grids = train_inputs + train_outputs + [test_input, test_output]
+        original_max_size = max(max(g.shape[0], g.shape[1]) for g in all_original_grids)
+        
         result = {
             'task_id': task.get('task_id', str(task_idx)),
             'input_grids': [torch.from_numpy(g) for g in train_inputs_padded],
@@ -920,6 +947,7 @@ class ARCDataset(Dataset):
             'test_output': torch.from_numpy(test_output_padded),
             'num_train_pairs': len(train_inputs),
             'transform_family': 0,
+            'original_max_size': original_max_size,  # For bucketed batching
         }
         
         if self.track_augmentation:

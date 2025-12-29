@@ -42,10 +42,9 @@
 # Phase 1: Train with cache_samples=true until convergence (memorization)
 # Phase 2: Resume with cache_samples=false for diversity (generalization)
 #
-# ⚠️ CACHE NOTE: DELETE CACHE after augmentation order fix (Dec 2025)!
-# Previous cache had wrong order (dihedral→color), now using TRM order (color→dihedral)
-#   rm ./cache/rlan_stable_400k_v2.pkl
-#   rm ./cache/rlan_stable_400k_v3.pkl  # v3 with correct TRM-style order
+# CACHE AUTO-VALIDATION: Cache version and augmentation settings are
+# stored in metadata. Stale caches are auto-deleted and regenerated.
+# No manual deletion needed - just change settings and run training!
 #
 # ==========================
 
@@ -602,11 +601,18 @@ data:
   #
   # CACHE AUTO-VALIDATION: Code detects stale caches and auto-regenerates!
   # No need to manually delete caches when changing augmentation settings.
+  # Version is tracked INSIDE the cache metadata, not in the filename.
   # ==========================================================================
   
   cache_samples: true
-  num_cached_samples: 400000  # 1000 per task × 400 tasks (TRM uses 1000x)
-  cache_path: "./cache/rlan_stable_400k_v4.pkl"  # v4: with auto-validation
+  
+  # num_cached_samples is the TOTAL samples, not per-task!
+  # With max_tasks=50, you get: 50,000 / 50 = 1000 samples per task (like TRM)
+  # With max_tasks=null (production), use 400,000 for full training
+  num_cached_samples: 50000  # DEV: 50 tasks × 1000 = 50K (625 iters/epoch)
+                             # PROD: Set to 400000 with max_tasks=null
+  
+  cache_path: "./cache/rlan_stable.pkl"  # Version tracked internally (v4+)
   
   # See max_tasks vs cache_load_percent explanation above!
   # This controls RAM usage by loading a random subset of cached samples.
