@@ -1602,8 +1602,24 @@ def train_epoch(
                     print(f"[ERROR] CUDA error during backward pass at batch {batch_idx}!")
                     print(f"  Error: {e}")
                     print(f"  This is often caused by memory fragmentation or OOM.")
+                    print(f"{'!'*60}")
+                    
+                    # Log diagnostic info for debugging
+                    print(f"\n  === DIAGNOSTIC INFO ===")
+                    print(f"  Batch shape: test_inputs={test_inputs.shape}")
+                    print(f"  train_inputs={train_inputs.shape}, train_outputs={train_outputs.shape}")
+                    if 'task_ids' in batch:
+                        task_ids = batch['task_ids'][:5]  # First 5 task IDs
+                        print(f"  Task IDs (first 5): {task_ids}")
+                    try:
+                        mem_allocated = torch.cuda.memory_allocated() / (1024**3)
+                        mem_reserved = torch.cuda.memory_reserved() / (1024**3)
+                        print(f"  GPU Memory: {mem_allocated:.2f}GB allocated, {mem_reserved:.2f}GB reserved")
+                    except:
+                        pass
+                    print(f"  Loss value: {loss.item() if torch.is_tensor(loss) else loss:.6f}")
                     print(f"  Attempting recovery...")
-                    print(f"{'!'*60}\n")
+                    print()
                     
                     # Clear gradients and CUDA cache
                     optimizer.zero_grad(set_to_none=True)
