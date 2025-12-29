@@ -302,6 +302,8 @@ training:
   # 2. Gradient Checkpointing: Trades compute for memory
   #    - Re-computes activations during backward (slower but less memory)
   #    - Saves 20-50% of activation memory
+  #    - LIMITATION: Only active during epochs 0-2 (before HyperLoRA)
+  #    - After epoch 3, LoRA requires Dict args which checkpoint doesn't support
   #
   # 3. torch.compile: JIT compilation for faster kernels
   #    - Requires PyTorch 2.0+

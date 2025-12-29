@@ -943,8 +943,18 @@ class RecursiveSolver(nn.Module):
             
             # Core solver step - GRU + optional LoRA + optional cross-attention
             # Gradient checkpointing trades compute for memory by recomputing activations
-            if self.gradient_checkpointing and self.training:
-                # CRITICAL: Use minimal checkpoint function (no Dict/None args)
+            #
+            # LIMITATION: torch.checkpoint does NOT support Dict arguments (lora_deltas).
+            # When LoRA is active, we MUST skip checkpointing to avoid double computation.
+            # Memory savings only apply during epochs 0-2 (before HyperLoRA activates).
+            can_checkpoint = (
+                self.gradient_checkpointing 
+                and self.training 
+                and lora_deltas is None  # CRITICAL: Skip checkpoint when LoRA active
+            )
+            
+            if can_checkpoint:
+                # Checkpointing ONLY when no LoRA (epochs 0-2, before meta_learning_start_epoch)
                 # Initialize h to zeros if None (first step)
                 if h is None:
                     B_size = combined.shape[0]
@@ -955,7 +965,7 @@ class RecursiveSolver(nn.Module):
                 else:
                     h_for_ckpt = h
                 
-                # Checkpointed GRU step (no LoRA - applied separately)
+                # Checkpointed GRU step
                 h_new = torch_checkpoint(
                     self._solver_step_for_checkpoint,
                     combined,
@@ -963,17 +973,11 @@ class RecursiveSolver(nn.Module):
                     use_reentrant=False,
                 )
                 
-                # Apply LoRA OUTSIDE checkpoint (Dict not supported by checkpoint)
-                if lora_deltas is not None:
-                    # Re-apply GRU with LoRA for correct weight modulation
-                    # This is a compromise - we lose some memory savings but get correctness
-                    h_new = self.gru(combined, h, lora_deltas=lora_deltas)
-                
-                # Apply cross-attention OUTSIDE checkpoint
+                # Apply cross-attention OUTSIDE checkpoint (still beneficial)
                 if self.solver_cross_attn is not None and support_features is not None:
                     h_new = self.solver_cross_attn(h_new, support_features)
             else:
-                # Standard forward - all features included
+                # Standard forward - all features included (LoRA active or checkpointing disabled)
                 h_new = self._solver_step(combined, h, support_features, lora_deltas)
             
             # Store initial hidden state for residual connections
