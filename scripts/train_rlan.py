@@ -1387,6 +1387,11 @@ def train_epoch(
     mem_tracker.reset_baseline()
     
     for batch_idx, batch in enumerate(prefetcher):
+        # Proactive memory cleanup every 50 batches to prevent fragmentation
+        # This helps avoid CUDA launch failures that occur after many batches
+        if batch_idx > 0 and batch_idx % 50 == 0:
+            torch.cuda.empty_cache()
+        
         # Apply warmup with per-group LR preservation
         warmup_lr(optimizer, global_step, warmup_steps, base_lr, initial_lrs)
         
