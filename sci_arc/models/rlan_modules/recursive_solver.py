@@ -786,20 +786,14 @@ class RecursiveSolver(nn.Module):
             
         return self.predicate_gate(features, predicates)
     
-    def _solver_step_for_checkpoint(
+    def _solver_step_for_checkpoint_no_lora(
         self,
         combined: torch.Tensor,
         h: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Minimal solver step for gradient checkpointing - NO optional args.
-        
-        IMPORTANT: torch.utils.checkpoint does NOT handle:
-        - None values (causes silent gradient issues)
-        - Dict arguments (not checkpointed correctly)
-        
-        So we only use this for the basic GRU step, without LoRA or cross-attention.
-        Those are applied OUTSIDE the checkpointed region.
+        Minimal solver step for gradient checkpointing WITHOUT LoRA.
+        Used during epochs 0-2 when HyperLoRA is inactive.
         
         Args:
             combined: (B, 2D, H, W) concatenated features
@@ -808,8 +802,42 @@ class RecursiveSolver(nn.Module):
         Returns:
             h_new: Updated hidden state (B, D, H, W)
         """
-        # GRU update WITHOUT LoRA (LoRA applied separately)
         h_new = self.gru(combined, h, lora_deltas=None)
+        return h_new
+    
+    def _solver_step_for_checkpoint_with_lora(
+        self,
+        combined: torch.Tensor,
+        h: torch.Tensor,
+        num_lora_keys: torch.Tensor,  # Scalar tensor holding number of LoRA keys
+        *lora_values: torch.Tensor,   # Unpacked LoRA delta tensors
+    ) -> torch.Tensor:
+        """
+        Solver step for gradient checkpointing WITH LoRA support.
+        
+        TRICK: torch.checkpoint doesn't support Dict arguments, but it DOES support
+        variable *args of tensors. We unpack the lora_deltas dict before checkpointing
+        and repack it inside this function.
+        
+        The keys are stored in self._checkpoint_lora_keys (set before checkpoint call).
+        
+        Args:
+            combined: (B, 2D, H, W) concatenated features
+            h: Hidden state from previous step
+            num_lora_keys: Scalar tensor (unused in compute, ensures gradient flow)
+            *lora_values: Unpacked LoRA delta tensors in key order
+            
+        Returns:
+            h_new: Updated hidden state (B, D, H, W)
+        """
+        # Repack the dictionary using stored keys
+        lora_deltas = {
+            key: lora_values[i] 
+            for i, key in enumerate(self._checkpoint_lora_keys)
+        }
+        
+        # GRU update WITH LoRA modulation
+        h_new = self.gru(combined, h, lora_deltas=lora_deltas)
         return h_new
     
     def _solver_step(
@@ -944,17 +972,10 @@ class RecursiveSolver(nn.Module):
             # Core solver step - GRU + optional LoRA + optional cross-attention
             # Gradient checkpointing trades compute for memory by recomputing activations
             #
-            # LIMITATION: torch.checkpoint does NOT support Dict arguments (lora_deltas).
-            # When LoRA is active, we MUST skip checkpointing to avoid double computation.
-            # Memory savings only apply during epochs 0-2 (before HyperLoRA activates).
-            can_checkpoint = (
-                self.gradient_checkpointing 
-                and self.training 
-                and lora_deltas is None  # CRITICAL: Skip checkpoint when LoRA active
-            )
-            
-            if can_checkpoint:
-                # Checkpointing ONLY when no LoRA (epochs 0-2, before meta_learning_start_epoch)
+            # SMART CHECKPOINTING (Dec 2025):
+            # torch.checkpoint doesn't support Dict args, but we can unpack/repack!
+            # This gives us memory savings for ALL epochs, not just 0-2.
+            if self.gradient_checkpointing and self.training:
                 # Initialize h to zeros if None (first step)
                 if h is None:
                     B_size = combined.shape[0]
@@ -965,19 +986,43 @@ class RecursiveSolver(nn.Module):
                 else:
                     h_for_ckpt = h
                 
-                # Checkpointed GRU step
-                h_new = torch_checkpoint(
-                    self._solver_step_for_checkpoint,
-                    combined,
-                    h_for_ckpt,
-                    use_reentrant=False,
-                )
+                if lora_deltas is not None:
+                    # UNPACK/REPACK STRATEGY: Checkpoint works with *args, not dicts
+                    # 1. Store keys in instance variable (accessible inside checkpoint)
+                    # 2. Pass values as *args to checkpoint
+                    # 3. Repack inside the checkpointed function
+                    self._checkpoint_lora_keys = list(lora_deltas.keys())
+                    lora_values = [lora_deltas[k] for k in self._checkpoint_lora_keys]
+                    
+                    # num_lora_keys ensures gradient flow even if unused
+                    num_lora_keys = torch.tensor(
+                        len(self._checkpoint_lora_keys), 
+                        device=combined.device, 
+                        dtype=combined.dtype
+                    )
+                    
+                    h_new = torch_checkpoint(
+                        self._solver_step_for_checkpoint_with_lora,
+                        combined,
+                        h_for_ckpt,
+                        num_lora_keys,
+                        *lora_values,  # Unpack as individual tensor args
+                        use_reentrant=False,
+                    )
+                else:
+                    # No LoRA - use simple checkpoint function
+                    h_new = torch_checkpoint(
+                        self._solver_step_for_checkpoint_no_lora,
+                        combined,
+                        h_for_ckpt,
+                        use_reentrant=False,
+                    )
                 
-                # Apply cross-attention OUTSIDE checkpoint (still beneficial)
+                # Apply cross-attention OUTSIDE checkpoint (its own memory is small)
                 if self.solver_cross_attn is not None and support_features is not None:
                     h_new = self.solver_cross_attn(h_new, support_features)
             else:
-                # Standard forward - all features included (LoRA active or checkpointing disabled)
+                # Standard forward - no checkpointing
                 h_new = self._solver_step(combined, h, support_features, lora_deltas)
             
             # Store initial hidden state for residual connections
