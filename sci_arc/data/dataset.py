@@ -242,23 +242,51 @@ class BucketedBatchSampler(Sampler):
         self._build_buckets()
     
     def _get_sample_max_grid_size(self, idx: int) -> int:
-        """Get the maximum grid dimension for a sample."""
+        """Get the maximum grid dimension for a sample.
+        
+        CRITICAL: For non-cached mode, we need the ORIGINAL grid size before
+        padding, not the padded tensor shape (which is always max_size).
+        
+        We use 'original_max_size' if stored, otherwise fall back to task
+        metadata to get pre-padding sizes.
+        """
         sample = self.dataset[idx]
         
-        max_size = 0
+        # Fast path: use stored original size if available
+        if 'original_max_size' in sample:
+            return sample['original_max_size']
         
-        # Check test input/output
+        # For non-cached mode, get original size from task metadata
+        # This avoids using padded tensor shapes which are all max_size
+        if hasattr(self.dataset, 'tasks') and idx < len(self.dataset.tasks):
+            task = self.dataset.tasks[idx % len(self.dataset.tasks)]
+            max_size = 0
+            for pair in task.get('train', []):
+                if 'input' in pair:
+                    inp = pair['input']
+                    max_size = max(max_size, len(inp), len(inp[0]) if inp else 0)
+                if 'output' in pair:
+                    out = pair['output']
+                    max_size = max(max_size, len(out), len(out[0]) if out else 0)
+            for pair in task.get('test', []):
+                if 'input' in pair:
+                    inp = pair['input']
+                    max_size = max(max_size, len(inp), len(inp[0]) if inp else 0)
+                if 'output' in pair:
+                    out = pair['output']
+                    max_size = max(max_size, len(out), len(out[0]) if out else 0)
+            if max_size > 0:
+                return max_size
+        
+        # Fallback: use tensor shapes (may be padded, less useful)
+        max_size = 0
         if 'test_input' in sample:
             t = sample['test_input']
             if isinstance(t, torch.Tensor):
-                # Get non-padded size by finding last non-pad row/col
-                # For now, just use tensor shape (it's padded to max_size anyway)
-                # The key is relative sizes between samples
                 max_size = max(max_size, t.shape[-1], t.shape[-2])
             elif isinstance(t, np.ndarray):
                 max_size = max(max_size, t.shape[-1], t.shape[-2])
         
-        # Check train input/output grids (list of tensors)
         for key in ['input_grids', 'output_grids']:
             if key in sample:
                 for g in sample[key]:
@@ -625,17 +653,22 @@ class ARCDataset(Dataset):
     
     def _validate_cache(self, cache_dir: Path) -> tuple:
         """
-        Validate that cached data matches current augmentation settings.
+        Validate that cached data matches current settings.
         
         Returns:
             (is_valid: bool, reason: str)
             
         CRITICAL (Dec 2025): This prevents using stale caches that were
-        generated with different augmentation settings.
+        generated with different augmentation settings or from different datasets.
+        
+        Validates:
+        - Cache version (must match current)
+        - Augmentation settings (augment, color_perm, translational, max_size)
+        - Data path (prevents accidentally using cache from different dataset)
         """
         import pickle
         
-        CURRENT_CACHE_VERSION = 4  # Must match version in _save_chunked_cache
+        CURRENT_CACHE_VERSION = 5  # Bumped: now validates data_path
         
         meta_path = cache_dir / 'meta.pkl'
         if not meta_path.exists():
@@ -651,6 +684,12 @@ class ARCDataset(Dataset):
         cache_version = meta.get('cache_version', 0)
         if cache_version < CURRENT_CACHE_VERSION:
             return False, f"Cache version {cache_version} < current {CURRENT_CACHE_VERSION}"
+        
+        # Check data_path matches (prevents using cache from different dataset)
+        cached_data_path = meta.get('data_path', '')
+        current_data_path = str(self.data_path)
+        if cached_data_path and cached_data_path != current_data_path:
+            return False, f"Data path mismatch: cached='{cached_data_path}', current='{current_data_path}'"
         
         # Check augmentation settings (only if present in meta)
         cached_aug = meta.get('augmentation_settings', {})
@@ -746,15 +785,6 @@ class ARCDataset(Dataset):
         # Check if we need to filter by task_id (max_tasks is active)
         filter_by_task = hasattr(self, '_active_task_ids') and self.max_tasks is not None
         
-        # DEBUG: Always print filter status
-        print(f"  DEBUG: max_tasks={self.max_tasks}, has _active_task_ids={hasattr(self, '_active_task_ids')}")
-        print(f"  DEBUG: filter_by_task={filter_by_task}")
-        if hasattr(self, '_active_task_ids'):
-            print(f"  DEBUG: len(_active_task_ids)={len(self._active_task_ids)}")
-            # Show a few sample IDs
-            sample_ids = list(self._active_task_ids)[:5]
-            print(f"  DEBUG: sample _active_task_ids={sample_ids}")
-        
         # Calculate how many samples to load
         num_to_load = max(1, int(total_samples * load_percent / 100))
         chunks_to_load = (num_to_load + chunk_size - 1) // chunk_size  # Ceiling division
@@ -769,18 +799,11 @@ class ARCDataset(Dataset):
         
         self._cached_samples = []
         samples_before_filter = 0
-        first_chunk_debug = True  # Show debug for first chunk only
         
         for chunk_idx in range(min(chunks_to_load, num_chunks)):
             chunk_path = cache_dir / f'chunk_{chunk_idx:04d}.pkl'
             with open(chunk_path, 'rb') as f:
                 chunk_samples = pickle.load(f)
-            
-            # DEBUG: Show task_ids from first chunk
-            if first_chunk_debug and chunk_samples:
-                chunk_task_ids = {s.get('task_id') for s in chunk_samples[:20]}
-                print(f"  DEBUG: First chunk sample task_ids: {list(chunk_task_ids)[:5]}")
-                first_chunk_debug = False
             
             if filter_by_task:
                 # Filter samples to only include active tasks
@@ -850,7 +873,7 @@ class ARCDataset(Dataset):
             # If current settings don't match cached settings, the cache
             # is invalid and should be regenerated.
             # =====================================================
-            'cache_version': 4,  # Increment when cache format changes
+            'cache_version': 5,  # v5: added data_path validation
             'augmentation_settings': {
                 'augment': getattr(self, 'augment', True),
                 'color_permutation': getattr(self, 'color_permutation', False),

@@ -630,46 +630,42 @@ def create_train_loader(
     # Groups samples by grid size to prevent memory waste from padding.
     # Without this, one 30x30 grid forces all batch samples to 30x30 memory.
     # This applies to ALL modes: cached, on-the-fly, full, or sampled.
+    # 
+    # NOTE: YAML setting is IGNORED - bucketing is ALWAYS enabled.
     # ==========================================================================
-    use_bucketed_batching = data_cfg.get('bucketed_batching', True)
     bucket_boundaries = data_cfg.get('bucket_boundaries', [10, 15, 20, 25])
     
-    if use_bucketed_batching:
-        print(f"  Using BUCKETED BATCHING (groups samples by grid size)")
-        print(f"    Bucket boundaries: {bucket_boundaries} → {len(bucket_boundaries)+1} buckets")
-        # Use hardware.seed for reproducibility (consistent with rest of training)
-        global_seed = config.get('hardware', {}).get('seed', 42)
-        batch_sampler = BucketedBatchSampler(
-            dataset=train_dataset,
-            batch_size=batch_size,
-            bucket_boundaries=bucket_boundaries,
-            drop_last=True,
-            shuffle=True,
-            seed=global_seed,
-        )
-        train_loader = DataLoader(
-            train_dataset,
-            batch_sampler=batch_sampler,  # Use batch_sampler instead of batch_size/shuffle
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            prefetch_factor=prefetch_factor,
-            persistent_workers=persistent_workers,
-            collate_fn=collate_fn,
-        )
-    else:
-        # Standard random sampling (NOT RECOMMENDED - wastes memory!)
-        print(f"  WARNING: Bucketed batching DISABLED - memory inefficient!")
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            prefetch_factor=prefetch_factor,
-            persistent_workers=persistent_workers,
-            collate_fn=collate_fn,
-            drop_last=True,
-        )
+    # Warn if user tried to disable bucketing (but we ignore the setting)
+    yaml_bucketing = data_cfg.get('bucketed_batching', True)
+    if not yaml_bucketing:
+        print(f"\n{'!'*60}")
+        print(f"WARNING: bucketed_batching=false in YAML is IGNORED!")
+        print(f"  Bucketed batching is NON-NEGOTIABLE for memory efficiency.")
+        print(f"  The setting will be forced to true.")
+        print(f"{'!'*60}\n")
+    
+    print(f"  Using BUCKETED BATCHING (groups samples by grid size)")
+    print(f"    Bucket boundaries: {bucket_boundaries} → {len(bucket_boundaries)+1} buckets")
+    
+    # Use hardware.seed for reproducibility (consistent with rest of training)
+    global_seed = config.get('hardware', {}).get('seed', 42)
+    batch_sampler = BucketedBatchSampler(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        bucket_boundaries=bucket_boundaries,
+        drop_last=True,
+        shuffle=True,
+        seed=global_seed,
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_sampler=batch_sampler,  # Use batch_sampler instead of batch_size/shuffle
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        collate_fn=collate_fn,
+    )
     
     return train_loader
 
