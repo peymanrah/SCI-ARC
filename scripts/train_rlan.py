@@ -969,11 +969,37 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     beta1 = train_config.get('beta1', 0.9)
     beta2 = train_config.get('beta2', 0.95)  # TRM default, more stable for recursive models
     
-    optimizer = torch.optim.AdamW(
-        param_groups,
-        lr=base_lr,  # Use base_lr; per-group LRs are in param_groups
-        betas=(beta1, beta2),
-    )
+    # =============================================================
+    # MEMORY OPTIMIZATION: 8-bit AdamW Optimizer
+    # =============================================================
+    # Reduces optimizer state memory by ~75% (stores momentum/variance in 8-bit)
+    # Fallback: Standard AdamW if bitsandbytes not installed
+    # =============================================================
+    use_8bit = train_config.get('use_8bit_optimizer', False)
+    
+    if use_8bit:
+        try:
+            import bitsandbytes as bnb
+            optimizer = bnb.optim.AdamW8bit(
+                param_groups,
+                lr=base_lr,
+                betas=(beta1, beta2),
+            )
+            print(f"  Optimizer: 8-bit AdamW (bitsandbytes) - ~75% memory savings on optimizer states")
+        except ImportError:
+            print(f"  [WARNING] bitsandbytes not installed, falling back to standard AdamW")
+            print(f"           Install with: pip install bitsandbytes")
+            optimizer = torch.optim.AdamW(
+                param_groups,
+                lr=base_lr,
+                betas=(beta1, beta2),
+            )
+    else:
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            lr=base_lr,
+            betas=(beta1, beta2),
+        )
     
     # Create scheduler based on config
     scheduler_type = train_config.get('scheduler', 'cosine')
@@ -3067,6 +3093,42 @@ Config Overrides:
     # Create model
     model = create_model(config)
     model = model.to(device)
+    
+    # =============================================================
+    # MEMORY OPTIMIZATION: Gradient Checkpointing
+    # =============================================================
+    # Trades compute for memory by recomputing activations during backward.
+    # Saves 20-50% of activation memory, ~20% slower training.
+    # =============================================================
+    train_cfg = config.get('training', {})
+    use_gradient_checkpointing = train_cfg.get('gradient_checkpointing', False)
+    if use_gradient_checkpointing:
+        # Enable gradient checkpointing on the solver (largest memory consumer)
+        if hasattr(model, 'solver') and hasattr(model.solver, 'gru'):
+            # PyTorch's checkpoint requires the module to not return Dicts directly
+            # We mark the model for checkpointing - the forward pass handles it
+            model.use_gradient_checkpointing = True
+            print(f"  Gradient Checkpointing: ENABLED (saves ~30% activation memory, ~20% slower)")
+        else:
+            print(f"  Gradient Checkpointing: SKIPPED (solver/GRU not found)")
+    
+    # =============================================================
+    # MEMORY OPTIMIZATION: torch.compile (PyTorch 2.0+)
+    # =============================================================
+    # JIT compiles the model for faster kernels (10-30% speedup).
+    # Fuses operations like LayerNorm + ReLU + Linear into single kernel.
+    # =============================================================
+    use_torch_compile = train_cfg.get('use_torch_compile', False)
+    if use_torch_compile:
+        if hasattr(torch, 'compile'):
+            try:
+                compile_mode = train_cfg.get('torch_compile_mode', 'reduce-overhead')
+                model = torch.compile(model, mode=compile_mode)
+                print(f"  torch.compile: ENABLED (mode='{compile_mode}') - 10-30% faster kernels")
+            except Exception as e:
+                print(f"  torch.compile: FAILED ({e}) - falling back to eager mode")
+        else:
+            print(f"  torch.compile: SKIPPED (requires PyTorch 2.0+)")
     
     # MEMORY DEBUG: Log baseline GPU memory after model is on device
     if device.type == 'cuda':

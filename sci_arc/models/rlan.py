@@ -218,6 +218,9 @@ class RLAN(nn.Module):
         self.max_grid_size = max_grid_size
         self.dropout = dropout  # BUG FIX #7: Store for checkpoint saving
         
+        # Memory optimization flags (set externally by training script)
+        self.use_gradient_checkpointing = False  # Enable for activation memory savings
+        
         # Module ablation flags (default to True if no config)
         self.use_context_encoder = config.use_context_encoder if config else True
         self.use_dsc = config.use_dsc if config else True

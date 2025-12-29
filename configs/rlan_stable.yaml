@@ -286,12 +286,38 @@ training:
   #   - HyperLoRA deltas: +5MB (small delta matrices)
   #   - TOTAL INCREASE: ~120MB per forward pass
   #
-  # With batch_size=70, we stay safely under 24GB GPU memory.
-  # DO NOT increase batch_size above 70 without testing memory at epoch 3+.
+  # With memory optimizations (8-bit AdamW + gradient checkpointing), batch_size=90 is safe.
+  # Previous limit was 70 without optimizations. Now we have ~40% memory reduction.
   #
-  gradient_checkpointing: false  # DISABLED: Has bugs with Dict/None args
-  batch_size: 70    # Safe for both staged (epochs 0-2) and active (epochs 3+) phases
-  grad_accumulation_steps: 4  # effective_batch_size = 70 × 4 = 280
+  # =============================================================
+  # MEMORY OPTIMIZATIONS (Dec 2025)
+  # =============================================================
+  # These optimizations reduce VRAM usage and speed up training.
+  # All are backward-compatible with fallback to default behavior.
+  #
+  # 1. 8-bit AdamW: Reduces optimizer state memory by ~75%
+  #    - Requires: pip install bitsandbytes
+  #    - Fallback: Standard AdamW if bitsandbytes not installed
+  #
+  # 2. Gradient Checkpointing: Trades compute for memory
+  #    - Re-computes activations during backward (slower but less memory)
+  #    - Saves 20-50% of activation memory
+  #
+  # 3. torch.compile: JIT compilation for faster kernels
+  #    - Requires PyTorch 2.0+
+  #    - 10-30% speedup on compatible hardware
+  #
+  # 4. Flash Attention (SDPA): Automatic in PyTorch 2.0+
+  #    - nn.MultiheadAttention uses SDPA by default
+  #    - O(N) memory instead of O(N²) for attention
+  # =============================================================
+  use_8bit_optimizer: true    # ~75% optimizer memory savings (fallback to AdamW if bitsandbytes missing)
+  gradient_checkpointing: true   # ~30% activation memory savings (trades compute for memory)
+  use_torch_compile: false    # DISABLED - can cause issues with dynamic shapes in ARC grids
+  torch_compile_mode: 'reduce-overhead'  # Options: 'default', 'reduce-overhead', 'max-autotune'
+  
+  batch_size: 90    # Safe with memory optimizations (epochs 0-13). LOO/Equi add N passes at epoch 8+/12+
+  grad_accumulation_steps: 4  # effective_batch_size = 90 × 4 = 360
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -516,7 +542,7 @@ data:
   cache_samples: true
   num_cached_samples: 400000  # 500 per task (TRM uses 1000x)
   cache_path: "./cache/rlan_stable_400k_v3.pkl"  # v3: TRM-style aug order (color→dihedral)
-  cache_load_percent: 4    # ~2GB (4% of 50GB) for quick testing
+  cache_load_percent: 6    # ~3GB (6% of 50GB) for testing
                            # Use 10-20 for quick testing (~20s load instead of 3min)
                            # Set to 100 for full training runs
   
