@@ -569,8 +569,23 @@ def create_train_loader(
             print(f"  cache_path: {cache_path}")
         print(f"{'='*60}\n")
     
-    # Support max_tasks for quick testing
+    # Support max_tasks for quick testing (stratified sampling for representativeness)
     max_tasks = data_cfg.get('max_tasks', None)
+    stratified_seed = data_cfg.get('stratified_seed', 42)
+    
+    # Warn about wasteful configurations
+    if max_tasks is not None and cache_samples and cache_load_percent < 100:
+        print(f"\n{'!'*60}")
+        print(f"WARNING: WASTEFUL CONFIGURATION DETECTED!")
+        print(f"  max_tasks={max_tasks} + cache_load_percent={cache_load_percent}%")
+        print(f"  This loads {cache_load_percent}% of cache, then filters to {max_tasks} tasks.")
+        print(f"  Most loaded samples will be discarded!")
+        print(f"")
+        print(f"  BETTER OPTIONS:")
+        print(f"  1. max_tasks={max_tasks}, cache_load_percent=100 (get all samples for {max_tasks} tasks)")
+        print(f"  2. max_tasks=null, cache_load_percent={cache_load_percent} (random sample from all tasks)")
+        print(f"  3. max_tasks={max_tasks}, cache_samples=false (on-the-fly augmentation)")
+        print(f"{'!'*60}\n")
     
     train_dataset = ARCDataset(
         data_cfg['train_path'],
@@ -586,7 +601,8 @@ def create_train_loader(
         num_cached_samples=num_cached_samples,  # Number of cached samples
         cache_path=cache_path,  # Optional path to save/load cache
         cache_load_percent=cache_load_percent,  # Percentage of cache to load (for quick testing)
-        max_tasks=max_tasks,  # Limit tasks for testing
+        max_tasks=max_tasks,  # Limit tasks for testing (stratified sampling)
+        stratified_seed=stratified_seed,  # Seed for reproducible stratified sampling
     )
     
     batch_size = train_cfg['batch_size']
@@ -608,13 +624,19 @@ def create_train_loader(
     
     collate_fn = partial(collate_sci_arc, max_grid_size=max_grid_size)
     
-    # BUCKETED BATCHING: Group samples by grid size for memory efficiency
-    # This prevents one large 30x30 grid from forcing all 70 samples to use 30x30 memory
-    use_bucketed_batching = data_cfg.get('bucketed_batching', True)  # Default ON for cached samples
+    # ==========================================================================
+    # BUCKETED BATCHING: ALWAYS ON (NON-NEGOTIABLE FOR MEMORY EFFICIENCY)
+    # ==========================================================================
+    # Groups samples by grid size to prevent memory waste from padding.
+    # Without this, one 30x30 grid forces all batch samples to 30x30 memory.
+    # This applies to ALL modes: cached, on-the-fly, full, or sampled.
+    # ==========================================================================
+    use_bucketed_batching = data_cfg.get('bucketed_batching', True)
     bucket_boundaries = data_cfg.get('bucket_boundaries', [10, 15, 20, 25])
     
-    if use_bucketed_batching and cache_samples:
+    if use_bucketed_batching:
         print(f"  Using BUCKETED BATCHING (groups samples by grid size)")
+        print(f"    Bucket boundaries: {bucket_boundaries} → {len(bucket_boundaries)+1} buckets")
         # Use hardware.seed for reproducibility (consistent with rest of training)
         global_seed = config.get('hardware', {}).get('seed', 42)
         batch_sampler = BucketedBatchSampler(
@@ -635,7 +657,8 @@ def create_train_loader(
             collate_fn=collate_fn,
         )
     else:
-        # Standard random sampling
+        # Standard random sampling (NOT RECOMMENDED - wastes memory!)
+        print(f"  WARNING: Bucketed batching DISABLED - memory inefficient!")
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,

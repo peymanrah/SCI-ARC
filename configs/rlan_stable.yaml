@@ -515,6 +515,69 @@ data:
   # CRITICAL: Ignore padding in loss
   ignore_padding_in_loss: true
   
+  # ==========================================================================
+  # DATA SAMPLING CONFIGURATION
+  # ==========================================================================
+  # 
+  # SIMPLE MENTAL MODEL:
+  # 1. max_tasks: How many TASKS to use (STRATIFIED sampling from 400)
+  # 2. cache_samples: Whether to use pre-cached augmentations
+  # 3. cache_load_percent: How much of cache to load into RAM
+  #
+  # BUCKETED BATCHING: ALWAYS ON (non-negotiable for memory efficiency)
+  # Groups same-sized grids together to minimize padding waste.
+  #
+  # ==========================================================================
+  # VALID CONFIGURATIONS (what actually works)
+  # ==========================================================================
+  #
+  # | Scenario           | max_tasks | cache_samples | cache_load_percent | Sampling           |
+  # |--------------------|-----------|---------------|--------------------|--------------------|
+  # | Full training      | null      | true          | 100                | All 400K samples   |
+  # | Memory-limited     | null      | true          | 6                  | RANDOM 6% (~24K)   |
+  # | Stratified test    | 50        | true          | 100                | STRATIFIED 50 tasks|
+  # | Quick smoke test   | 25        | false         | (ignored)          | STRATIFIED 25 tasks|
+  # | On-the-fly train   | null      | false         | (ignored)          | All 400, infinite  |
+  #
+  # WHAT'S STRATIFIED vs RANDOM:
+  # - max_tasks → STRATIFIED: Covers all 18 strata (grid sizes × shot counts × size changes)
+  # - cache_load_percent → RANDOM: Just loads first N% of shuffled chunks (fast but random)
+  #
+  # INVALID/WASTEFUL COMBINATIONS:
+  # - max_tasks=100 + cache_load_percent=6: Loads 24K samples, filters to ~6K → wasteful!
+  #   Better: Use max_tasks=100 + cache_load_percent=100 (gets all 100K samples for 100 tasks)
+  #
+  # RECOMMENDED CONFIGURATIONS:
+  # | Use Case          | Config                                      | Expected Samples |
+  # |-------------------|---------------------------------------------|------------------|
+  # | Quick smoke test  | max_tasks=25, cache_samples=false           | 25 tasks, fresh  |
+  # | Dev iteration     | max_tasks=50, cache_samples=true, pct=100   | ~50K samples     |
+  # | Full validation   | max_tasks=100, cache_samples=true, pct=100  | ~100K samples    |
+  # | Production train  | max_tasks=null, cache_samples=true, pct=100 | 400K samples     |
+  # | Memory-constrained| max_tasks=null, cache_samples=true, pct=10  | ~40K samples     |
+  #
+  # ==========================================================================
+  # CACHE AUTO-VALIDATION (Dec 2025)
+  # ==========================================================================
+  # The code automatically validates cached data before loading:
+  # - Checks cache version (must match current code version)
+  # - Checks augmentation settings (augment, color_perm, translational, max_size)
+  # - If mismatch detected: AUTOMATICALLY deletes old cache and regenerates!
+  #
+  # This means you DON'T need to manually delete caches when settings change.
+  # The code is smart enough to detect stale caches and regenerate them.
+  # ==========================================================================
+  
+  # ==========================================================================
+  # CURRENT MODE: DEV ITERATION (change for production)
+  # ==========================================================================
+  # For production training, change to:
+  #   max_tasks: null
+  #   cache_load_percent: 100
+  # ==========================================================================
+  max_tasks: 50  # DEV ITERATION: STRATIFIED 50 tasks (~50K samples)
+  stratified_seed: 42  # Seed for reproducible stratified sampling
+  
   # Data loading configuration
   # NOTE: When cache_samples=true, num_workers is automatically set to 0
   # to avoid duplicating the 400K cache across worker processes.
@@ -537,22 +600,38 @@ data:
   #   - color_permutation_prob: 1.0 = EVERY sample color-permuted (like TRM!)
   #   - This naturally balances class distribution over training
   #
-  # CRITICAL: If you change augmentation settings, DELETE the cache!
-  #   rm ./cache/rlan_stable_400k.pkl
+  # CACHE AUTO-VALIDATION: Code detects stale caches and auto-regenerates!
+  # No need to manually delete caches when changing augmentation settings.
   # ==========================================================================
   
   cache_samples: true
-  num_cached_samples: 400000  # 500 per task (TRM uses 1000x)
-  cache_path: "./cache/rlan_stable_400k_v3.pkl"  # v3: TRM-style aug order (color→dihedral)
-  cache_load_percent: 6    # ~3GB (6% of 50GB) for testing
-                           # Use 10-20 for quick testing (~20s load instead of 3min)
-                           # Set to 100 for full training runs
+  num_cached_samples: 400000  # 1000 per task × 400 tasks (TRM uses 1000x)
+  cache_path: "./cache/rlan_stable_400k_v4.pkl"  # v4: with auto-validation
   
-  # BUCKETED BATCHING: Group samples by grid size for memory efficiency
-  # Prevents one 30x30 grid from forcing all 70 samples to use 30x30 memory
-  # Batch ORDER is shuffled each epoch to avoid learning bias
-  bucketed_batching: true
-  bucket_boundaries: [10, 15, 20, 25]  # Creates 5 buckets: <=10, 11-15, 16-20, 21-25, >25
+  # See max_tasks vs cache_load_percent explanation above!
+  # This controls RAM usage by loading a random subset of cached samples.
+  # For representative testing, prefer max_tasks (stratified) over this (random).
+  cache_load_percent: 100  # DEV ITERATION: Load all samples for stratified tasks
+                           # Use 6-20 for quick testing (~20s load)
+                           # For production with max_tasks=null, use 100
+  
+  # ==========================================================================
+  # BUCKETED BATCHING - NON-NEGOTIABLE (ALWAYS ENABLED FOR MEMORY EFFICIENCY)
+  # ==========================================================================
+  # Groups samples by grid size to minimize padding waste.
+  # Without this: One 30x30 grid forces ALL 80 batch samples to 30x30 = 4x memory waste!
+  # With this: Each batch has similar-sized grids → minimal padding.
+  #
+  # This applies to ALL configurations:
+  # - Full training (400K samples)
+  # - Stratified testing (max_tasks=50)
+  # - On-the-fly augmentation (cache_samples=false)
+  # - Memory-limited runs (cache_load_percent < 100)
+  #
+  # Batch ORDER is shuffled each epoch to avoid learning bias.
+  # ==========================================================================
+  bucketed_batching: true  # WARNING: Setting to false wastes memory!
+  bucket_boundaries: [10, 15, 20, 25]  # Creates 5 buckets: ≤10, 11-15, 16-20, 21-25, >25
   
   augmentation:
     enabled: true

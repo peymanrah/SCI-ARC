@@ -417,6 +417,7 @@ class ARCDataset(Dataset):
         cache_path: str = None,  # NEW: Path to load/save cached samples
         cache_load_percent: float = 100.0,  # NEW: Percentage of cache to load (1-100)
         max_tasks: int = None,  # NEW: Limit number of tasks loaded (for testing)
+        stratified_seed: int = 42,  # NEW: Seed for deterministic stratified sampling
     ):
         """
         Initialize ARCDataset.
@@ -443,6 +444,7 @@ class ARCDataset(Dataset):
             cache_load_percent: Percentage of cache to load (1-100, default: 100)
                                Use 10-20% for quick testing without loading full cache
                                E.g., 10% of 50GB = 5GB, loads in ~20s instead of 3min
+            stratified_seed: Seed for deterministic stratified sampling (default: 42)
         """
         self.data_path = Path(data_path)
         self.max_size = max_size
@@ -458,9 +460,13 @@ class ARCDataset(Dataset):
         self.cache_path = Path(cache_path) if cache_path else None
         self.cache_load_percent = min(100.0, max(1.0, cache_load_percent))  # Clamp to 1-100%
         self.max_tasks = max_tasks
+        self.stratified_seed = stratified_seed
         
         # Cached sample storage
         self._cached_samples: List[Dict[str, Any]] = []
+        
+        # Store task_ids BEFORE any filtering for cache validation
+        self._all_task_ids: set = set()
         
         # Load tasks
         self.tasks = self._load_tasks()
@@ -468,16 +474,20 @@ class ARCDataset(Dataset):
         # Limit tasks if max_tasks specified (for testing)
         # Uses STRATIFIED sampling to ensure representative coverage
         if max_tasks is not None and max_tasks > 0:
+            # ARCDataset uses Dicts, so we use stratified_sample_tasks
             self.tasks = stratified_sample_tasks(
                 self.tasks,
                 n_samples=max_tasks,
-                seed=42,  # Fixed seed for deterministic, reproducible sampling
+                seed=stratified_seed,  # Configurable seed for reproducibility
                 verbose=True
             )
         
         # Apply curriculum filtering if enabled
         if curriculum_stage > 0:
             self.tasks = self._filter_by_difficulty(curriculum_stage)
+        
+        # Store active task_ids for cache filtering
+        self._active_task_ids = {t.get('task_id', str(i)) for i, t in enumerate(self.tasks)}
         
         print(f"Loaded {len(self.tasks)} tasks from {data_path}")
         
@@ -539,6 +549,7 @@ class ARCDataset(Dataset):
         2. If only monolithic pkl exists, auto-convert to chunks, then load
         3. cache_load_percent controls how many chunks to load
         4. Chunk filenames derive from source pkl name for tracking
+        5. VALIDATION: Checks if cache settings match current settings
         """
         import time
         
@@ -552,39 +563,52 @@ class ARCDataset(Dataset):
         chunked_cache_dir = Path(str(self.cache_path) + '.chunks')
         load_percent = self.cache_load_percent
         
-        # CASE 1: Chunked cache exists - load directly (fast partial loading)
+        # CASE 1: Chunked cache exists - VALIDATE then load
         if chunked_cache_dir.exists() and (chunked_cache_dir / 'meta.pkl').exists():
+            # Validate cache before loading
+            is_valid, reason = self._validate_cache(chunked_cache_dir)
+            if not is_valid:
+                print(f"\n{'!'*60}")
+                print(f"CACHE INVALIDATED: {reason}")
+                print(f"{'!'*60}")
+                print(f"  Cache path: {chunked_cache_dir}")
+                print(f"  Action: Regenerating cache with current settings...")
+                print(f"{'!'*60}\n")
+                
+                # Delete old cache
+                import shutil
+                shutil.rmtree(chunked_cache_dir)
+                if self.cache_path.exists():
+                    self.cache_path.unlink()
+                
+                # Generate new cache
+                self._generate_cache_in_memory()
+                if self.cache_path:
+                    self._save_cache_to_disk()
+                return
+            
             return self._load_chunked_cache(chunked_cache_dir, load_percent)
         
-        # CASE 2: Monolithic pkl exists but no chunks - auto-convert then load
+        # CASE 2: Monolithic pkl exists but no chunks
+        # Old pkl files don't have validation metadata, so we MUST regenerate
+        # to ensure cache matches current augmentation settings
         if self.cache_path.exists():
-            print(f"\n{'='*60}")
-            print(f"AUTO-CHUNKING CACHE FOR FAST PARTIAL LOADING")
-            print(f"{'='*60}")
-            print(f"  Source: {self.cache_path}")
-            print(f"  Target: {chunked_cache_dir}")
-            print(f"  This is a one-time operation...")
-            print(f"{'='*60}\n")
+            print(f"\n{'!'*60}")
+            print(f"CACHE INVALIDATED: Old monolithic cache without validation metadata")
+            print(f"{'!'*60}")
+            print(f"  Cache path: {self.cache_path}")
+            print(f"  Action: Deleting old cache and regenerating with current settings...")
+            print(f"{'!'*60}\n")
             
-            # Load full pickle
-            import pickle
-            start_time = time.time()
-            print(f"Loading full cache from {self.cache_path}...")
-            with open(self.cache_path, 'rb') as f:
-                all_samples = pickle.load(f)
-            load_time = time.time() - start_time
-            print(f"Loaded {len(all_samples):,} samples in {load_time:.1f}s")
+            # Delete old monolithic cache (no chunks to delete in this case)
+            import shutil
+            self.cache_path.unlink()
             
-            # Save as chunks
-            self._save_chunked_cache(all_samples, chunked_cache_dir)
-            
-            # Now load the requested percentage from chunks
-            # (this avoids keeping all_samples in memory if we only need partial)
-            del all_samples
-            import gc
-            gc.collect()
-            
-            return self._load_chunked_cache(chunked_cache_dir, load_percent)
+            # Generate new cache with validation metadata
+            self._generate_cache_in_memory()
+            if self.cache_path:
+                self._save_cache_to_disk()
+            return
         
         # CASE 3: No cache exists - generate from scratch
         self._generate_cache_in_memory()
@@ -592,6 +616,63 @@ class ARCDataset(Dataset):
         # Save both monolithic and chunked versions for future runs
         if self.cache_path:
             self._save_cache_to_disk()
+    
+    def _validate_cache(self, cache_dir: Path) -> tuple:
+        """
+        Validate that cached data matches current augmentation settings.
+        
+        Returns:
+            (is_valid: bool, reason: str)
+            
+        CRITICAL (Dec 2025): This prevents using stale caches that were
+        generated with different augmentation settings.
+        """
+        import pickle
+        
+        CURRENT_CACHE_VERSION = 4  # Must match version in _save_chunked_cache
+        
+        meta_path = cache_dir / 'meta.pkl'
+        if not meta_path.exists():
+            return False, "meta.pkl not found"
+        
+        try:
+            with open(meta_path, 'rb') as f:
+                meta = pickle.load(f)
+        except Exception as e:
+            return False, f"Failed to read meta.pkl: {e}"
+        
+        # Check cache version
+        cache_version = meta.get('cache_version', 0)
+        if cache_version < CURRENT_CACHE_VERSION:
+            return False, f"Cache version {cache_version} < current {CURRENT_CACHE_VERSION}"
+        
+        # Check augmentation settings (only if present in meta)
+        cached_aug = meta.get('augmentation_settings', {})
+        if cached_aug:
+            # Check critical settings that affect sample generation
+            mismatches = []
+            
+            if cached_aug.get('augment') != self.augment:
+                mismatches.append(f"augment: cached={cached_aug.get('augment')}, current={self.augment}")
+            
+            if cached_aug.get('color_permutation') != self.color_permutation:
+                mismatches.append(f"color_permutation: cached={cached_aug.get('color_permutation')}, current={self.color_permutation}")
+            
+            if cached_aug.get('color_permutation_prob') != self.color_permutation_prob:
+                mismatches.append(f"color_permutation_prob: cached={cached_aug.get('color_permutation_prob')}, current={self.color_permutation_prob}")
+            
+            if cached_aug.get('translational_augment') != self.translational_augment:
+                mismatches.append(f"translational_augment: cached={cached_aug.get('translational_augment')}, current={self.translational_augment}")
+            
+            if cached_aug.get('max_size') != self.max_size:
+                mismatches.append(f"max_size: cached={cached_aug.get('max_size')}, current={self.max_size}")
+            
+            if mismatches:
+                return False, f"Augmentation settings mismatch: {'; '.join(mismatches)}"
+        
+        # Cache is valid
+        print(f"  Cache validated: version={cache_version}, samples={meta.get('total_samples', 'unknown')}")
+        return True, "Cache is valid"
     
     def _generate_cache_in_memory(self):
         """Generate cache samples in memory."""
@@ -636,7 +717,12 @@ class ARCDataset(Dataset):
             print(f"Warning: Failed to save cache: {e}")
     
     def _load_chunked_cache(self, cache_dir: Path, load_percent: float) -> None:
-        """Load samples from chunked cache format (supports true partial loading)."""
+        """Load samples from chunked cache format (supports true partial loading).
+        
+        CRITICAL (Dec 2025): If max_tasks is set, we filter cached samples
+        to only include samples from active tasks. This ensures max_tasks
+        actually limits what the model sees, even when using a pre-built cache.
+        """
         import pickle
         import time
         
@@ -651,6 +737,9 @@ class ARCDataset(Dataset):
         chunk_size = meta['chunk_size']
         num_chunks = meta['num_chunks']
         
+        # Check if we need to filter by task_id (max_tasks is active)
+        filter_by_task = hasattr(self, '_active_task_ids') and self.max_tasks is not None
+        
         # Calculate how many samples to load
         num_to_load = max(1, int(total_samples * load_percent / 100))
         chunks_to_load = (num_to_load + chunk_size - 1) // chunk_size  # Ceiling division
@@ -660,19 +749,35 @@ class ARCDataset(Dataset):
         else:
             print(f"Loading chunked cache ({num_chunks} chunks)...")
         
+        if filter_by_task:
+            print(f"  Filtering to {len(self._active_task_ids)} active tasks (max_tasks={self.max_tasks})")
+        
         self._cached_samples = []
+        samples_before_filter = 0
+        
         for chunk_idx in range(min(chunks_to_load, num_chunks)):
             chunk_path = cache_dir / f'chunk_{chunk_idx:04d}.pkl'
             with open(chunk_path, 'rb') as f:
                 chunk_samples = pickle.load(f)
+            
+            if filter_by_task:
+                # Filter samples to only include active tasks
+                samples_before_filter += len(chunk_samples)
+                chunk_samples = [s for s in chunk_samples if s.get('task_id') in self._active_task_ids]
+            
             self._cached_samples.extend(chunk_samples)
         
-        # Trim to exact count
+        # Trim to exact count (after filtering)
         if len(self._cached_samples) > num_to_load:
             self._cached_samples = self._cached_samples[:num_to_load]
         
         elapsed = time.time() - start_time
-        print(f"Loaded {len(self._cached_samples):,} samples from chunked cache in {elapsed:.1f}s")
+        
+        if filter_by_task:
+            print(f"Loaded {len(self._cached_samples):,} samples from chunked cache in {elapsed:.1f}s")
+            print(f"  (filtered from {samples_before_filter:,} → {len(self._cached_samples):,} samples)")
+        else:
+            print(f"Loaded {len(self._cached_samples):,} samples from chunked cache in {elapsed:.1f}s")
     
     def _save_chunked_cache(self, samples: list, cache_dir: Path, chunk_size: int = 10000) -> None:
         """
@@ -709,19 +814,37 @@ class ARCDataset(Dataset):
             with open(chunk_path, 'wb') as f:
                 pickle.dump(chunk_samples, f)
         
-        # Save metadata (includes shuffle info)
+        # Save metadata (includes shuffle info and augmentation settings for validation)
         meta = {
             'total_samples': num_samples,
             'chunk_size': chunk_size,
             'num_chunks': num_chunks,
             'shuffled': True,  # Flag indicating representative distribution
             'shuffle_seed': 42,
+            # =====================================================
+            # CACHE VALIDATION FIELDS (Dec 2025)
+            # =====================================================
+            # These fields allow automatic detection of stale caches.
+            # If current settings don't match cached settings, the cache
+            # is invalid and should be regenerated.
+            # =====================================================
+            'cache_version': 4,  # Increment when cache format changes
+            'augmentation_settings': {
+                'augment': getattr(self, 'augment', True),
+                'color_permutation': getattr(self, 'color_permutation', False),
+                'color_permutation_prob': getattr(self, 'color_permutation_prob', 1.0),
+                'translational_augment': getattr(self, 'translational_augment', True),
+                'max_size': getattr(self, 'max_size', 30),
+            },
+            'num_tasks': len(getattr(self, 'tasks', [])),
+            'data_path': str(getattr(self, 'data_path', '')),
         }
         meta_path = cache_dir / 'meta.pkl'
         with open(meta_path, 'wb') as f:
             pickle.dump(meta, f)
         
         print(f"Chunked cache saved: {num_chunks} chunks of {chunk_size} samples each (SHUFFLED for representative sampling)")
+        print(f"  Cache version: {meta['cache_version']}, Tasks: {meta['num_tasks']}")
 
     def _generate_sample(self, task_idx: int) -> Dict[str, Any]:
         """Generate a single sample with current augmentation settings."""
@@ -1435,6 +1558,7 @@ class SCIARCDataset(Dataset):
         # Apply stratified sampling if max_tasks specified
         # This ensures representative coverage for meta-learning validation
         if max_tasks is not None and max_tasks > 0 and len(self.tasks) > max_tasks:
+            # SCIARCDataset uses ARCTask objects, so we use stratified_sample_arc_tasks
             self.tasks = stratified_sample_arc_tasks(
                 self.tasks,
                 n_samples=max_tasks,

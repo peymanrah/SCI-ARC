@@ -1,0 +1,399 @@
+﻿........................................................................ [ 15%]
+........................................................................ [ 31%]
+.................F
+================================== FAILURES ===================================
+__________ TestConfigPlumbing.test_cross_attention_context_plumbing ___________
+tests\test_config_plumbing.py:34: in setUp
+    self.config = yaml.safe_load(f)
+                  ^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\yaml\__init__.py:125: in safe_load
+    return load(stream, SafeLoader)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\yaml\__init__.py:79: in load
+    loader = Loader(stream)
+             ^^^^^^^^^^^^^^
+.venv\Lib\site-packages\yaml\loader.py:34: in __init__
+    Reader.__init__(self, stream)
+.venv\Lib\site-packages\yaml\reader.py:85: in __init__
+    self.determine_encoding()
+.venv\Lib\site-packages\yaml\reader.py:124: in determine_encoding
+    self.update_raw()
+.venv\Lib\site-packages\yaml\reader.py:178: in update_raw
+    data = self.stream.read(size)
+           ^^^^^^^^^^^^^^^^^^^^^^
+..\..\AppData\Local\anaconda3\Lib\encodings\cp1252.py:23: in decode
+    return codecs.charmap_decode(input,self.errors,decoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   UnicodeDecodeError: 'charmap' codec can't decode byte 0x8f in position 1866: character maps to <undefined>
+=================================== PASSES ====================================
+________ test_predict_with_acw_color_perm_handles_ignore_index_targets ________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+___ test_arcdataset_loads_real_training_dir_and_has_expected_keys_and_types ___
+---------------------------- Captured stdout call -----------------------------
+  Limited to 5 random tasks (max_tasks=5)
+Loaded 5 tasks from data\arc-agi\data\training
+_______ test_arcdataset_padding_uses_ignore_index_minus_100_for_targets _______
+---------------------------- Captured stdout call -----------------------------
+  Limited to 25 random tasks (max_tasks=25)
+Loaded 25 tasks from data\arc-agi\data\training
+_____________ test_arcdataset_input_dtype_consistent_with_targets _____________
+---------------------------- Captured stdout call -----------------------------
+  Limited to 5 random tasks (max_tasks=5)
+Loaded 5 tasks from data\arc-agi\data\training
+____________________________ test_pooling_methods _____________________________
+---------------------------- Captured stdout call -----------------------------
+============================================================
+HyperLoRA Pooling Strategy Comparison
+============================================================
+
+1. Creating RLAN model...
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+   Found 10 tasks to test
+
+2. Processing tasks...
+   Processed 5/10 tasks
+   Processed 10/10 tasks
+
+3. Results for 10 valid tasks:
+------------------------------------------------------------
+
+Context Discriminability (higher = better task separation):
+  AvgPool: 0.0669
+  MaxPool: 0.0429
+  Winner:  AvgPool (+0.0240)
+
+LoRA Delta Norms (signal strength):
+  AvgPool: 60.8805
+  MaxPool: 56.2191
+  Winner:  AvgPool (stronger signal)
+
+Context Vector Magnitude:
+  AvgPool: 7.9939
+  MaxPool: 15.6774
+
+============================================================
+RECOMMENDATION:
+  AvgPool is better - current implementation is optimal.
+============================================================
+_________________________ test_rlan_returns_z_struct __________________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+______________________ test_rlan_returns_z_struct_demos _______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_________________________ test_rlan_returns_z_content _________________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____ TestHyperLoRAConnection.test_hyperlora_called_in_forward_with_context ____
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+_______ TestHyperLoRAConnection.test_hyperlora_deltas_passed_to_solver ________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+_____ TestHyperLoRAConnection.test_hyperlora_disabled_backward_compatible _____
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+_ TestHyperLoRAConnection.test_hyperlora_without_context_backward_compatible __
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+___________ TestEquivarianceLossFix.test_equivariance_loss_uses_mse ___________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+[HyperLoRA] Training enabled with:
+  - LOO loss weight: 0.5
+  - Equivariance loss weight: 0.1
+  - Min pairs for LOO: 2
+___ TestBackwardCompatibility.test_rlan_forward_without_hyperlora_unchanged ___
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+_________ TestBackwardCompatibility.test_predict_with_acw_still_works _________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+_______________ TestGradientFlow.test_hyperlora_gradients_flow ________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+_______ TestLOOTrainingLossInterfaceFix.test_loo_training_loss_callable _______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+____ TestDatasetExpandTestPairsFix.test_expand_test_pairs_increases_length ____
+---------------------------- Captured stdout call -----------------------------
+Loaded 400 tasks from training
+Expanded to 416 (task, test_idx) pairs from 400 tasks
+___ TestDatasetExpandTestPairsFix.test_expand_test_pairs_includes_test_idx ____
+---------------------------- Captured stdout call -----------------------------
+Expanded to 416 (task, test_idx) pairs from 400 tasks
+_________________ TestTensorDimensions.test_solver_dimensions _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+_______________ TestTensorDimensions.test_full_rlan_dimensions ________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+__________________ TestGradientFlow.test_gradient_flow_basic __________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+_____________ TestGradientFlow.test_gradient_flow_solver_context ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+___________________ TestGradientFlow.test_gradient_flow_dsc ___________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____________ TestCheckpointCompatibility.test_checkpoint_roundtrip ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_________ TestCheckpointCompatibility.test_checkpoint_with_extra_data _________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_________ TestHyperLoRAIntegration.test_hyperlora_disabled_by_default _________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_______________ TestHyperLoRAIntegration.test_hyperlora_enabled _______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+_______________ TestHyperLoRAIntegration.test_hyperlora_forward _______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+_____________ TestConfigAlignment.test_production_config_creation _____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____________________ TestEdgeCases.test_single_pixel_grid _____________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+______________________ TestEdgeCases.test_max_size_grid _______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_____________________ TestEdgeCases.test_non_square_grid ______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+______________________ TestEdgeCases.test_batch_size_one ______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+___________________ TestEdgeCases.test_all_same_color_grid ____________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+=========================== short test summary info ===========================
+PASSED tests/test_acw_color_permutation_ignore_index_bug.py::test_predict_with_acw_color_perm_handles_ignore_index_targets
+PASSED tests/test_arc_dataset_real_data.py::test_arcdataset_loads_real_training_dir_and_has_expected_keys_and_types
+PASSED tests/test_arc_dataset_real_data.py::test_arcdataset_padding_uses_ignore_index_minus_100_for_targets
+PASSED tests/test_arc_dataset_real_data.py::test_arcdataset_input_dtype_consistent_with_targets
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-identity-0]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-rotate_90-1]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-rotate_180-2]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-rotate_270-3]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-flip_h-4]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-flip_v-5]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-transpose-6]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-transpose_neg-7]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-identity-0]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-rotate_90-1]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-rotate_180-2]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-rotate_270-3]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-flip_h-4]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-flip_v-5]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-transpose-6]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-transpose_neg-7]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-identity-0]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-rotate_90-1]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-rotate_180-2]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-rotate_270-3]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-flip_h-4]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-flip_v-5]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-transpose-6]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-transpose_neg-7]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-identity]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-rotate_90]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-rotate_180]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-rotate_270]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-flip_h]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-flip_v]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-transpose]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-transpose_neg]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-identity]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-rotate_90]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-rotate_180]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-rotate_270]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-flip_h]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-flip_v]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-transpose]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-transpose_neg]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-identity]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-rotate_90]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-rotate_180]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-rotate_270]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-flip_h]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-flip_v]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-transpose]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-transpose_neg]
+PASSED tests/test_augmentation_group_invariants.py::test_color_permutation_inverse_is_identity_for_random_perm
+PASSED tests/test_avgpool_vs_maxpool.py::test_pooling_methods
+PASSED tests/test_bug_001_loo_training_not_integrated.py::test_loo_training_integrated_into_trainer
+PASSED tests/test_bug_001_loo_training_not_integrated.py::test_training_config_has_loo_fields
+PASSED tests/test_bug_001_loo_training_not_integrated.py::test_loo_training_loss_exists
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_rlan_returns_z_struct
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_rlan_returns_z_struct_demos
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_rlan_returns_z_content
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_scl_weight_nonzero_and_used
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_ortho_weight_nonzero_and_used
+PASSED tests/test_bug_fixes_dec2025.py::TestHyperLoRAConnection::test_hyperlora_called_in_forward_with_context
+PASSED tests/test_bug_fixes_dec2025.py::TestHyperLoRAConnection::test_hyperlora_deltas_passed_to_solver
+PASSED tests/test_bug_fixes_dec2025.py::TestHyperLoRAConnection::test_hyperlora_disabled_backward_compatible
+PASSED tests/test_bug_fixes_dec2025.py::TestHyperLoRAConnection::test_hyperlora_without_context_backward_compatible
+PASSED tests/test_bug_fixes_dec2025.py::TestEquivarianceLossFix::test_equivariance_loss_uses_mse
+PASSED tests/test_bug_fixes_dec2025.py::TestEquivarianceLossFix::test_equivariance_loss_detects_different_weights_same_norm
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_compute_hashes_batched
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_compute_hashes_empty_list
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_compute_hashes_identical_predictions
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_compute_hashes_different_predictions
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_batched_vs_individual_gives_same_result
+PASSED tests/test_bug_fixes_dec2025.py::TestBackwardCompatibility::test_rlan_forward_without_hyperlora_unchanged
+PASSED tests/test_bug_fixes_dec2025.py::TestBackwardCompatibility::test_predict_with_acw_still_works
+PASSED tests/test_bug_fixes_dec2025.py::TestGradientFlow::test_hyperlora_gradients_flow
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_task_accuracy_ignores_padding
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_task_accuracy_legacy_mode
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_pixel_accuracy_ignores_padding
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_pixel_accuracy_strict_shape_mode
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_pixel_accuracy_backward_compat_overlap
+PASSED tests/test_bug_fixes_verification.py::TestTRMVotingRankFix::test_voting_prefers_frequent_consensus
+PASSED tests/test_bug_fixes_verification.py::TestHyperLoRAInitScaleFix::test_init_scale_affects_predictor_weights
+PASSED tests/test_bug_fixes_verification.py::TestLOOTrainingLossInterfaceFix::test_loo_training_loss_callable
+PASSED tests/test_bug_fixes_verification.py::TestDatasetExpandTestPairsFix::test_expand_test_pairs_increases_length
+PASSED tests/test_bug_fixes_verification.py::TestDatasetExpandTestPairsFix::test_expand_test_pairs_includes_test_idx
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_grid_encoder_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_dsc_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_msre_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_lcr_dimensions_per_clue
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_lcr_dimensions_global
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_sph_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_solver_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_context_encoder_spatial
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_context_encoder_compressed
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_full_rlan_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestGradientFlow::test_gradient_flow_basic
+PASSED tests/test_comprehensive_rlan.py::TestGradientFlow::test_gradient_flow_solver_context
+PASSED tests/test_comprehensive_rlan.py::TestGradientFlow::test_gradient_flow_dsc
+PASSED tests/test_comprehensive_rlan.py::TestNumericalStability::test_attention_stability
+PASSED tests/test_comprehensive_rlan.py::TestNumericalStability::test_attention_extreme_features
+PASSED tests/test_comprehensive_rlan.py::TestNumericalStability::test_loss_ignore_index
+PASSED tests/test_comprehensive_rlan.py::TestNumericalStability::test_entropy_computation_stability
+PASSED tests/test_comprehensive_rlan.py::TestPaddingSemantics::test_pad_color_is_10
+PASSED tests/test_comprehensive_rlan.py::TestPaddingSemantics::test_target_padding_is_minus_100
+PASSED tests/test_comprehensive_rlan.py::TestPaddingSemantics::test_valid_mask_excludes_padding
+PASSED tests/test_comprehensive_rlan.py::TestLossComponents::test_cross_entropy_basic
+PASSED tests/test_comprehensive_rlan.py::TestLossComponents::test_loss_with_class_weights
+PASSED tests/test_comprehensive_rlan.py::TestLossComponents::test_loss_reduction_modes
+PASSED tests/test_comprehensive_rlan.py::TestCheckpointCompatibility::test_checkpoint_roundtrip
+PASSED tests/test_comprehensive_rlan.py::TestCheckpointCompatibility::test_checkpoint_with_extra_data
+PASSED tests/test_comprehensive_rlan.py::TestHyperLoRAIntegration::test_hyperlora_disabled_by_default
+PASSED tests/test_comprehensive_rlan.py::TestHyperLoRAIntegration::test_hyperlora_enabled
+PASSED tests/test_comprehensive_rlan.py::TestHyperLoRAIntegration::test_hyperlora_forward
+PASSED tests/test_comprehensive_rlan.py::TestConfigAlignment::test_stable_config_defaults
+PASSED tests/test_comprehensive_rlan.py::TestConfigAlignment::test_production_config_creation
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_single_pixel_grid
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_max_size_grid
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_non_square_grid
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_batch_size_one
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_all_same_color_grid
+FAILED tests/test_config_plumbing.py::TestConfigPlumbing::test_cross_attention_context_plumbing
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 161 passed in 10.01s

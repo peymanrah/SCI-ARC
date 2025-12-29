@@ -1,0 +1,1488 @@
+﻿........................................................................ [ 16%]
+........................................................................ [ 32%]
+.............................................x....x..................... [ 48%]
+...........................ss........................................... [ 64%]
+..........ssssss.ssss................................................x.. [ 81%]
+.....................s.................................................. [ 97%]
+............                                                             [100%]
+=================================== PASSES ====================================
+________ test_predict_with_acw_color_perm_handles_ignore_index_targets ________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+___ test_arcdataset_loads_real_training_dir_and_has_expected_keys_and_types ___
+---------------------------- Captured stdout call -----------------------------
+  Limited to 5 random tasks (max_tasks=5)
+Loaded 5 tasks from data\arc-agi\data\training
+_______ test_arcdataset_padding_uses_ignore_index_minus_100_for_targets _______
+---------------------------- Captured stdout call -----------------------------
+  Limited to 25 random tasks (max_tasks=25)
+Loaded 25 tasks from data\arc-agi\data\training
+_____________ test_arcdataset_input_dtype_consistent_with_targets _____________
+---------------------------- Captured stdout call -----------------------------
+  Limited to 5 random tasks (max_tasks=5)
+Loaded 5 tasks from data\arc-agi\data\training
+____________________________ test_pooling_methods _____________________________
+---------------------------- Captured stdout call -----------------------------
+============================================================
+HyperLoRA Pooling Strategy Comparison
+============================================================
+
+1. Creating RLAN model...
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+   Found 10 tasks to test
+
+2. Processing tasks...
+   Processed 5/10 tasks
+   Processed 10/10 tasks
+
+3. Results for 10 valid tasks:
+------------------------------------------------------------
+
+Context Discriminability (higher = better task separation):
+  AvgPool: 0.0669
+  MaxPool: 0.0429
+  Winner:  AvgPool (+0.0240)
+
+LoRA Delta Norms (signal strength):
+  AvgPool: 60.8805
+  MaxPool: 56.2191
+  Winner:  AvgPool (stronger signal)
+
+Context Vector Magnitude:
+  AvgPool: 7.9939
+  MaxPool: 15.6774
+
+============================================================
+RECOMMENDATION:
+  AvgPool is better - current implementation is optimal.
+============================================================
+_________________________ test_rlan_returns_z_struct __________________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+______________________ test_rlan_returns_z_struct_demos _______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_________________________ test_rlan_returns_z_content _________________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____ TestHyperLoRAConnection.test_hyperlora_called_in_forward_with_context ____
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+_______ TestHyperLoRAConnection.test_hyperlora_deltas_passed_to_solver ________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+_____ TestHyperLoRAConnection.test_hyperlora_disabled_backward_compatible _____
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+_ TestHyperLoRAConnection.test_hyperlora_without_context_backward_compatible __
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+___________ TestEquivarianceLossFix.test_equivariance_loss_uses_mse ___________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+[HyperLoRA] Training enabled with:
+  - LOO loss weight: 0.5
+  - Equivariance loss weight: 0.1
+  - Min pairs for LOO: 2
+___ TestBackwardCompatibility.test_rlan_forward_without_hyperlora_unchanged ___
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+_________ TestBackwardCompatibility.test_predict_with_acw_still_works _________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+_______________ TestGradientFlow.test_hyperlora_gradients_flow ________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+_______ TestLOOTrainingLossInterfaceFix.test_loo_training_loss_callable _______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+____ TestDatasetExpandTestPairsFix.test_expand_test_pairs_increases_length ____
+---------------------------- Captured stdout call -----------------------------
+Loaded 400 tasks from training
+Expanded to 416 (task, test_idx) pairs from 400 tasks
+___ TestDatasetExpandTestPairsFix.test_expand_test_pairs_includes_test_idx ____
+---------------------------- Captured stdout call -----------------------------
+Expanded to 416 (task, test_idx) pairs from 400 tasks
+_________________ TestTensorDimensions.test_solver_dimensions _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+_______________ TestTensorDimensions.test_full_rlan_dimensions ________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+__________________ TestGradientFlow.test_gradient_flow_basic __________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+_____________ TestGradientFlow.test_gradient_flow_solver_context ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+___________________ TestGradientFlow.test_gradient_flow_dsc ___________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____________ TestCheckpointCompatibility.test_checkpoint_roundtrip ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_________ TestCheckpointCompatibility.test_checkpoint_with_extra_data _________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_________ TestHyperLoRAIntegration.test_hyperlora_disabled_by_default _________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_______________ TestHyperLoRAIntegration.test_hyperlora_enabled _______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+_______________ TestHyperLoRAIntegration.test_hyperlora_forward _______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+_____________ TestConfigAlignment.test_production_config_creation _____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____________________ TestEdgeCases.test_single_pixel_grid _____________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+______________________ TestEdgeCases.test_max_size_grid _______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_____________________ TestEdgeCases.test_non_square_grid ______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+______________________ TestEdgeCases.test_batch_size_one ______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+___________________ TestEdgeCases.test_all_same_color_grid ____________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____________ test_cpu_forward_smoke_on_real_arc_batch_with_context ____________
+---------------------------- Captured stdout call -----------------------------
+Loaded 400 tasks from training
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+__________ test_collate_sci_arc_pads_target_grids_with_ignore_index ___________
+---------------------------- Captured stdout call -----------------------------
+Loaded 400 tasks from training
+_______ test_evaluate_with_trm_style_contract_mismatch_with_rlan_model ________
+---------------------------- Captured stdout call -----------------------------
+Loaded 400 tasks from training
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+_______________________ TestSCIARCDataset.test_loading ________________________
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+___________________ TestSCIARCDataset.test_sample_structure ___________________
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+______________________ TestSCIARCDataset.test_grid_types ______________________
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+_____________________ TestSCIARCDataset.test_augmentation _____________________
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+__________________ TestCollateFunction.test_batch_structure ___________________
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+____________________ TestCollateFunction.test_batch_shapes ____________________
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+_______________ TestColorPermutation.test_preserves_background ________________
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+__________________ TestDataLoader.test_dataloader_iteration ___________________
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+_ test_create_dataloader_seed_reproducible_for_shuffle_when_augment_disabled __
+---------------------------- Captured stdout call -----------------------------
+Loaded 400 tasks from training
+Loaded 400 tasks from training
+____ TestDatasetConfigBugs.test_color_permutation_prob_zero_no_permutation ____
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from tests/data/dummy_task.json
+Permuted count with prob=0.0: 0/30
+____ TestDatasetConfigBugs.test_color_permutation_prob_one_always_permutes ____
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from tests/data/dummy_task.json
+Permuted count with prob=1.0: 30/30
+_ TestDatasetConfigBugs.test_translational_augment_disabled_preserves_position _
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from tests/data/dummy_task.json
+__ TestDatasetConfigBugs.test_translational_augment_enabled_varies_position ___
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from tests/data/dummy_task.json
+All grids same with translational_augment=True: False
+____________ TestHierarchicalPrimitiveMemory.test_hpm_single_bank _____________
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 1 banks:\n      Static: ['COMPOSITIONAL']\n      Dynamic: None\n      Top-K routing: k=1\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+__________ TestHierarchicalPrimitiveMemory.test_hpm_all_static_banks __________
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 4 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL', 'CONCEPT']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+_____ TestHierarchicalPrimitiveMemory.test_hpm_gated_residual_starts_zero _____
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+___________ TestHierarchicalPrimitiveMemory.test_hpm_sparse_routing ___________
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 4 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL', 'CONCEPT']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+_________ TestHierarchicalPrimitiveMemory.test_hpm_load_balance_loss __________
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+_________ TestHierarchicalPrimitiveMemory.test_hpm_reset_epoch_stats __________
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+_ TestHierarchicalPrimitiveMemory.test_hpm_backward_compatibility_none_input __
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+________ TestHierarchicalPrimitiveMemory.test_hpm_with_dynamic_buffers ________
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+___________ TestHierarchicalPrimitiveMemory.test_hpm_gradient_flow ____________
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+______ TestHierarchicalPrimitiveMemory.test_hpm_freeze_stable_primitives ______
+---------------------------- Captured stdout call -----------------------------
+[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)
+________________ TestRLANHPMIntegration.test_rlan_without_hpm _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+______________ TestRLANHPMIntegration.test_rlan_with_hpm_enabled ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_____________ TestRLANHPMIntegration.test_hpm_gate_starts_at_zero _____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+__________ TestRLANHPMIntegration.test_hpm_balance_loss_in_training ___________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+______________ TestRLANHPMIntegration.test_hpm_backward_callback ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+____________________ TestRLANHPMIntegration.test_hpm_stats ____________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 3 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: None\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_____________ TestRLANHPMIntegration.test_hpm_with_dynamic_banks ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_______________ TestRLANHPMIntegration.test_hpm_task_completion _______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 4 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+______________ TestRLANHPMIntegration.test_hpm_buffer_save_load _______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 4 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_____________ TestHPMConfiguration.test_hpm_model_initialization ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+______________ TestHPMConfiguration.test_hpm_disabled_by_default ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_________________ TestHPMForwardPass.test_forward_single_task _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_______________ TestHPMForwardPass.test_forward_multiple_tasks ________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+________________ TestHPMGateEvolution.test_gate_starts_at_zero ________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+__________________ TestHPMGateEvolution.test_gate_can_learn ___________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_______________ TestBankRoutingDiversity.test_routing_is_sparse _______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+____________ TestBankRoutingDiversity.test_load_balance_loss_works ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+___________ TestDynamicBankPopulation.test_procedural_buffer_grows ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+____________ TestDynamicBankPopulation.test_instance_buffer_grows _____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_____ TestMemoryQuality.test_similar_embeddings_retrieve_similar_memories _____
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+________ TestMemoryQuality.test_model_forward_produces_varying_outputs ________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+___________ TestHPMTrainingIntegration.test_training_step_with_hpm ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+____________ TestHPMEvaluationIntegration.test_evaluation_uses_hpm ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_________ TestHPMEvaluationIntegration.test_hpm_retrieval_during_eval _________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+______ TestContinualLearning.test_dynamic_banks_update_during_inference _______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+_______ TestContinualLearning.test_static_banks_frozen_during_inference _______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+______________ TestHPMHealthMetrics.test_stats_include_all_banks ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+______________ TestHPMHealthMetrics.test_stats_updated_per_epoch ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n[HPM] Initialized with 5 banks:\n      Static: ['COMPOSITIONAL', 'PATTERN', 'RELATIONAL']\n      Dynamic: ['PROCEDURAL', 'INSTANCE']\n      Top-K routing: k=2\n      Gated residual: \u03b1=0 (starts at 0 contribution)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HPM], Disabled=[LCR, SPH, ACT, HyperLoRA]
+______ test_loo_training_loss_hyperlora_interface_is_callable_end_to_end ______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]
+____________________________ test_hyperlora_module ____________________________
+---------------------------- Captured stdout call -----------------------------
+Testing HyperLoRA module...\n  \u2713 HyperLoRA module works correctly
+_______________________ test_recursive_solver_with_lora _______________________
+---------------------------- Captured stdout call -----------------------------
+Testing RecursiveSolver with LoRA...\n[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n  \u2713 RecursiveSolver accepts LoRA deltas correctly
+__________________________ test_rlan_with_hyperlora ___________________________
+---------------------------- Captured stdout call -----------------------------
+Testing RLAN with HyperLoRA...\n[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\nRLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]\n  \u2713 RLAN with HyperLoRA works correctly
+___________________________ test_hyperlora_trainer ____________________________
+---------------------------- Captured stdout call -----------------------------
+Testing HyperLoRATrainer...\n[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\nRLAN Module Config: Enabled=[ContextEncoder, SolverContext, HyperLoRA], Disabled=[DSC, MSRE, LCR, SPH, ACT, HPM]\n[HyperLoRA] Training enabled with:\n  - LOO loss weight: 0.5\n  - Equivariance loss weight: 0.1\n  - Min pairs for LOO: 2\n  \u2713 HyperLoRATrainer works correctly
+_______________________________ test_acw_voting _______________________________
+---------------------------- Captured stdout call -----------------------------
+Testing ACW voting...\n  \u2713 ACW voting works correctly
+_____________________________ test_health_metrics _____________________________
+---------------------------- Captured stdout call -----------------------------
+Testing health metrics...\n  \u2713 Health metrics work correctly
+_________________________ test_backward_compatibility _________________________
+---------------------------- Captured stdout call -----------------------------
+Testing backward compatibility...\n[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]\n  \u2713 Backward compatibility maintained
+_______ TestInferenceConsistency.test_hyperlora_active_during_inference _______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+Loaded 400 tasks from training
+LoRA Delta gru_reset norm: 19.449058532714844
+LoRA Delta gru_update norm: 15.009876251220703
+LoRA Delta gru_candidate norm: 12.516756057739258
+LoRA Delta output_head norm: 18.147855758666992
+LoRA Delta context norm: 7.998021125793457
+___________ TestInferenceConsistency.test_gradient_flow_bottlenecks ___________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+Loaded 400 tasks from training
+
+Gradient Norms:
+ContextEncoder avg grad: 1.020162
+HyperLoRA avg grad:      0.377967
+Solver avg grad:         0.482738
+Ratio CE/Solver:         2.1133
+______________________ test_loo_uses_remaining_features _______________________
+---------------------------- Captured stdout call -----------------------------
+============================================================
+TEST: LOO Training Uses Remaining Features (No Data Leakage)
+============================================================
+[OK]   Call 1: Received 2 pairs (remaining only)
+[OK]   Call 2: Received 2 pairs (remaining only)
+[OK]   Call 3: Received 2 pairs (remaining only)
+
+[PASS] LOO training correctly uses remaining_features (N-1 = 2 pairs)
+       No data leakage - held-out output is hidden from cross-attention
+___________________ test_cross_attention_handles_variable_n ___________________
+---------------------------- Captured stdout call -----------------------------
+
+============================================================
+TEST: CrossAttentionInjector Handles Variable Sequence Length
+============================================================
+[OK]   N=2: CrossAttentionInjector output shape torch.Size([2, 256, 5, 5])
+[OK]   N=3: CrossAttentionInjector output shape torch.Size([2, 256, 5, 5])
+[OK]   N=4: CrossAttentionInjector output shape torch.Size([2, 256, 5, 5])
+[OK]   N=5: CrossAttentionInjector output shape torch.Size([2, 256, 5, 5])
+
+[PASS] CrossAttentionInjector handles variable N correctly
+______________________ TestLossLogger.test_epoch_summary ______________________
+---------------------------- Captured stdout call -----------------------------
+\n============================================================\nEpoch 1 Loss Summary\n============================================================\n  total               : mean=1.550000, min=1.100000, max=2.000000, EMA=1.651322\n  task                : mean=1.140000, min=0.780000, max=1.500000, EMA=1.221057\n  deep                : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  entropy             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sparsity            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  predicate           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  curriculum          : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  act                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  scl                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  ortho               : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_consist        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_content_inv    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_variance       : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  equivariance        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  hyperlora_total     : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo_accuracy        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo_skipped_ratio   : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_reset: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_update: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_candidate: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_output_head: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_diversity      : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  equiv_delta_norm    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_magnitude       : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_std             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_color_diversity : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_mean            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_std             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_activation_ratio: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_norm           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_max            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_min            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_has_nan        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_has_inf        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_mean          : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_std           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_max           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_min           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  accuracy            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  bg_accuracy         : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  fg_accuracy         : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  confidence_mean     : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  pred_entropy        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  attention_entropy   : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  num_active_clues    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  stop_prob_mean      : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n\n--- Health Checks ---\n[!] deep: 100.0% zero values (possible collapse)\n[!] entropy: 100.0% zero values (possible collapse)\n[!] sparsity: 100.0% zero values (possible collapse)\n[!] predicate: 100.0% zero values (possible collapse)\n[!] curriculum: 100.0% zero values (possible collapse)\n[!] act: 100.0% zero values (possible collapse)\n[!] scl: 100.0% zero values (possible collapse)\n[!] ortho: 100.0% zero values (possible collapse)\n[!] cisl_consist: 100.0% zero values (possible collapse)\n[!] cisl_content_inv: 100.0% zero values (possible collapse)\n[!] cisl_variance: 100.0% zero values (possible collapse)\n[!] loo: 100.0% zero values (possible collapse)\n[!] equivariance: 100.0% zero values (possible collapse)\n[!] hyperlora_total: 100.0% zero values (possible collapse)\n[!] loo_accuracy: 100.0% zero values (possible collapse)\n[!] loo_skipped_ratio: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_reset: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_update: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_candidate: 100.0% zero values (possible collapse)\n[!] lora_magnitude_output_head: 100.0% zero values (possible collapse)\n[!] lora_diversity: 100.0% zero values (possible collapse)\n[!] equiv_delta_norm: 100.0% zero values (possible collapse)\n[!] lcr_magnitude: 100.0% zero values (possible collapse)\n[!] lcr_std: 100.0% zero values (possible collapse)\n[!] lcr_color_diversity: 100.0% zero values (possible collapse)\n[!] sph_mean: 100.0% zero values (possible collapse)\n[!] sph_std: 100.0% zero values (possible collapse)\n[!] sph_activation_ratio: 100.0% zero values (possible collapse)\n[!] grad_norm: 100.0% zero values (possible collapse)\n[!] grad_max: 100.0% zero values (possible collapse)\n[!] grad_min: 100.0% zero values (possible collapse)\n[!] grad_has_nan: 100.0% zero values (possible collapse)\n[!] grad_has_inf: 100.0% zero values (possible collapse)\n[!] logit_mean: 100.0% zero values (possible collapse)\n[!] logit_std: 100.0% zero values (possible collapse)\n[!] logit_max: 100.0% zero values (possible collapse)\n[!] logit_min: 100.0% zero values (possible collapse)\n[!] accuracy: 100.0% zero values (possible collapse)\n[!] bg_accuracy: 100.0% zero values (possible collapse)\n[!] fg_accuracy: 100.0% zero values (possible collapse)\n[!] confidence_mean: 100.0% zero values (possible collapse)\n[!] pred_entropy: 100.0% zero values (possible collapse)\n[!] attention_entropy: 100.0% zero values (possible collapse)\n[!] num_active_clues: 100.0% zero values (possible collapse)\n[!] stop_prob_mean: 100.0% zero values (possible collapse)\n\n--- Meta-Learning Health ---\n  [!] LOO accuracy: 0.0% (CRITICAL: < 30%)\n  [OK] LOO skipped ratio: 0.0%\n  [!] lora_magnitude_gru_reset: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_gru_update: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_gru_candidate: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_output_head: 0.000000 (COLLAPSED)\n  [!] LoRA diversity: 0.000000 (NO META-LEARNING)\n  [OK] Equiv delta norm: 0.0000\n\n--- LCR/SPH Health ---\n  [!] LCR magnitude collapsed: 0.000000\n  [!] SPH activation ratio extreme: 0.0%\n\n[Trend] Total loss within epoch: \u2193 decreasing (-27.8%)\n============================================================\n
+___________ TestLossLoggerIntegration.test_full_training_simulation ___________
+---------------------------- Captured stdout call -----------------------------
+\n============================================================\nEpoch 1 Loss Summary\n============================================================\n  total               : mean=4.810000, min=4.620000, max=5.000000, EMA=4.775685\n  task                : mean=2.886000, min=2.772000, max=3.000000, EMA=2.865411\n  deep                : mean=0.962000, min=0.924000, max=1.000000, EMA=0.955137\n  entropy             : mean=0.481000, min=0.462000, max=0.500000, EMA=0.477568\n  sparsity            : mean=0.481000, min=0.462000, max=0.500000, EMA=0.477568\n  predicate           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  curriculum          : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  act                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  scl                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  ortho               : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_consist        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_content_inv    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_variance       : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  equivariance        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  hyperlora_total     : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo_accuracy        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo_skipped_ratio   : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_reset: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_update: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_candidate: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_output_head: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_diversity      : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  equiv_delta_norm    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_magnitude       : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_std             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_color_diversity : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_mean            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_std             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_activation_ratio: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_norm           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_max            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_min            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_has_nan        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_has_inf        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_mean          : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_std           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_max           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_min           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  accuracy            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  bg_accuracy         : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  fg_accuracy         : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  confidence_mean     : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  pred_entropy        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  attention_entropy   : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  num_active_clues    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  stop_prob_mean      : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n\n--- Health Checks ---\n[!] predicate: 100.0% zero values (possible collapse)\n[!] curriculum: 100.0% zero values (possible collapse)\n[!] act: 100.0% zero values (possible collapse)\n[!] scl: 100.0% zero values (possible collapse)\n[!] ortho: 100.0% zero values (possible collapse)\n[!] cisl_consist: 100.0% zero values (possible collapse)\n[!] cisl_content_inv: 100.0% zero values (possible collapse)\n[!] cisl_variance: 100.0% zero values (possible collapse)\n[!] loo: 100.0% zero values (possible collapse)\n[!] equivariance: 100.0% zero values (possible collapse)\n[!] hyperlora_total: 100.0% zero values (possible collapse)\n[!] loo_accuracy: 100.0% zero values (possible collapse)\n[!] loo_skipped_ratio: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_reset: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_update: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_candidate: 100.0% zero values (possible collapse)\n[!] lora_magnitude_output_head: 100.0% zero values (possible collapse)\n[!] lora_diversity: 100.0% zero values (possible collapse)\n[!] equiv_delta_norm: 100.0% zero values (possible collapse)\n[!] lcr_magnitude: 100.0% zero values (possible collapse)\n[!] lcr_std: 100.0% zero values (possible collapse)\n[!] lcr_color_diversity: 100.0% zero values (possible collapse)\n[!] sph_mean: 100.0% zero values (possible collapse)\n[!] sph_std: 100.0% zero values (possible collapse)\n[!] sph_activation_ratio: 100.0% zero values (possible collapse)\n[!] grad_norm: 100.0% zero values (possible collapse)\n[!] grad_max: 100.0% zero values (possible collapse)\n[!] grad_min: 100.0% zero values (possible collapse)\n[!] grad_has_nan: 100.0% zero values (possible collapse)\n[!] grad_has_inf: 100.0% zero values (possible collapse)\n[!] logit_mean: 100.0% zero values (possible collapse)\n[!] logit_std: 100.0% zero values (possible collapse)\n[!] logit_max: 100.0% zero values (possible collapse)\n[!] logit_min: 100.0% zero values (possible collapse)\n[!] accuracy: 100.0% zero values (possible collapse)\n[!] bg_accuracy: 100.0% zero values (possible collapse)\n[!] fg_accuracy: 100.0% zero values (possible collapse)\n[!] confidence_mean: 100.0% zero values (possible collapse)\n[!] pred_entropy: 100.0% zero values (possible collapse)\n[!] attention_entropy: 100.0% zero values (possible collapse)\n[!] num_active_clues: 100.0% zero values (possible collapse)\n[!] stop_prob_mean: 100.0% zero values (possible collapse)\n\n--- Meta-Learning Health ---\n  [!] LOO accuracy: 0.0% (CRITICAL: < 30%)\n  [OK] LOO skipped ratio: 0.0%\n  [!] lora_magnitude_gru_reset: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_gru_update: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_gru_candidate: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_output_head: 0.000000 (COLLAPSED)\n  [!] LoRA diversity: 0.000000 (NO META-LEARNING)\n  [OK] Equiv delta norm: 0.0000\n\n--- LCR/SPH Health ---\n  [!] LCR magnitude collapsed: 0.000000\n  [!] SPH activation ratio extreme: 0.0%\n\n[Trend] Total loss within epoch: \u2192 stable (-4.1%)\n============================================================\n\n\n============================================================\nEpoch 2 Loss Summary\n============================================================\n  total               : mean=3.810000, min=3.620000, max=4.000000, EMA=3.869990\n  task                : mean=2.286000, min=2.172000, max=2.400000, EMA=2.321994\n  deep                : mean=0.762000, min=0.724000, max=0.800000, EMA=0.773998\n  entropy             : mean=0.381000, min=0.362000, max=0.400000, EMA=0.386999\n  sparsity            : mean=0.381000, min=0.362000, max=0.400000, EMA=0.386999\n  predicate           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  curriculum          : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  act                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  scl                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  ortho               : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_consist        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_content_inv    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_variance       : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  equivariance        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  hyperlora_total     : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo_accuracy        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo_skipped_ratio   : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_reset: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_update: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_candidate: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_output_head: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_diversity      : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  equiv_delta_norm    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_magnitude       : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_std             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_color_diversity : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_mean            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_std             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_activation_ratio: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_norm           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_max            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_min            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_has_nan        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_has_inf        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_mean          : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_std           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_max           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_min           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  accuracy            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  bg_accuracy         : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  fg_accuracy         : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  confidence_mean     : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  pred_entropy        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  attention_entropy   : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  num_active_clues    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  stop_prob_mean      : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n\n--- Health Checks ---\n[!] predicate: 100.0% zero values (possible collapse)\n[!] curriculum: 100.0% zero values (possible collapse)\n[!] act: 100.0% zero values (possible collapse)\n[!] scl: 100.0% zero values (possible collapse)\n[!] ortho: 100.0% zero values (possible collapse)\n[!] cisl_consist: 100.0% zero values (possible collapse)\n[!] cisl_content_inv: 100.0% zero values (possible collapse)\n[!] cisl_variance: 100.0% zero values (possible collapse)\n[!] loo: 100.0% zero values (possible collapse)\n[!] equivariance: 100.0% zero values (possible collapse)\n[!] hyperlora_total: 100.0% zero values (possible collapse)\n[!] loo_accuracy: 100.0% zero values (possible collapse)\n[!] loo_skipped_ratio: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_reset: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_update: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_candidate: 100.0% zero values (possible collapse)\n[!] lora_magnitude_output_head: 100.0% zero values (possible collapse)\n[!] lora_diversity: 100.0% zero values (possible collapse)\n[!] equiv_delta_norm: 100.0% zero values (possible collapse)\n[!] lcr_magnitude: 100.0% zero values (possible collapse)\n[!] lcr_std: 100.0% zero values (possible collapse)\n[!] lcr_color_diversity: 100.0% zero values (possible collapse)\n[!] sph_mean: 100.0% zero values (possible collapse)\n[!] sph_std: 100.0% zero values (possible collapse)\n[!] sph_activation_ratio: 100.0% zero values (possible collapse)\n[!] grad_norm: 100.0% zero values (possible collapse)\n[!] grad_max: 100.0% zero values (possible collapse)\n[!] grad_min: 100.0% zero values (possible collapse)\n[!] grad_has_nan: 100.0% zero values (possible collapse)\n[!] grad_has_inf: 100.0% zero values (possible collapse)\n[!] logit_mean: 100.0% zero values (possible collapse)\n[!] logit_std: 100.0% zero values (possible collapse)\n[!] logit_max: 100.0% zero values (possible collapse)\n[!] logit_min: 100.0% zero values (possible collapse)\n[!] accuracy: 100.0% zero values (possible collapse)\n[!] bg_accuracy: 100.0% zero values (possible collapse)\n[!] fg_accuracy: 100.0% zero values (possible collapse)\n[!] confidence_mean: 100.0% zero values (possible collapse)\n[!] pred_entropy: 100.0% zero values (possible collapse)\n[!] attention_entropy: 100.0% zero values (possible collapse)\n[!] num_active_clues: 100.0% zero values (possible collapse)\n[!] stop_prob_mean: 100.0% zero values (possible collapse)\n\n--- Meta-Learning Health ---\n  [!] LOO accuracy: 0.0% (CRITICAL: < 30%)\n  [OK] LOO skipped ratio: 0.0%\n  [!] lora_magnitude_gru_reset: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_gru_update: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_gru_candidate: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_output_head: 0.000000 (COLLAPSED)\n  [!] LoRA diversity: 0.000000 (NO META-LEARNING)\n  [OK] Equiv delta norm: 0.0000\n\n--- LCR/SPH Health ---\n  [!] LCR magnitude collapsed: 0.000000\n  [!] SPH activation ratio extreme: 0.0%\n\n[Trend] Total loss within epoch: \u2193 decreasing (-5.1%)\n============================================================\n\n\n============================================================\nEpoch 3 Loss Summary\n============================================================\n  total               : mean=2.810000, min=2.620000, max=3.000000, EMA=2.881455\n  task                : mean=1.686000, min=1.572000, max=1.800000, EMA=1.728873\n  deep                : mean=0.562000, min=0.524000, max=0.600000, EMA=0.576291\n  entropy             : mean=0.281000, min=0.262000, max=0.300000, EMA=0.288146\n  sparsity            : mean=0.281000, min=0.262000, max=0.300000, EMA=0.288146\n  predicate           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  curriculum          : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  act                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  scl                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  ortho               : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_consist        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_content_inv    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  cisl_variance       : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo                 : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  equivariance        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  hyperlora_total     : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo_accuracy        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  loo_skipped_ratio   : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_reset: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_update: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_gru_candidate: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_magnitude_output_head: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lora_diversity      : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  equiv_delta_norm    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_magnitude       : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_std             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  lcr_color_diversity : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_mean            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_std             : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  sph_activation_ratio: mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_norm           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_max            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_min            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_has_nan        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  grad_has_inf        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_mean          : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_std           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_max           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  logit_min           : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  accuracy            : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  bg_accuracy         : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  fg_accuracy         : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  confidence_mean     : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  pred_entropy        : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  attention_entropy   : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  num_active_clues    : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n  stop_prob_mean      : mean=0.000000, min=0.000000, max=0.000000, EMA=0.000000\n\n--- Health Checks ---\n[!] predicate: 100.0% zero values (possible collapse)\n[!] curriculum: 100.0% zero values (possible collapse)\n[!] act: 100.0% zero values (possible collapse)\n[!] scl: 100.0% zero values (possible collapse)\n[!] ortho: 100.0% zero values (possible collapse)\n[!] cisl_consist: 100.0% zero values (possible collapse)\n[!] cisl_content_inv: 100.0% zero values (possible collapse)\n[!] cisl_variance: 100.0% zero values (possible collapse)\n[!] loo: 100.0% zero values (possible collapse)\n[!] equivariance: 100.0% zero values (possible collapse)\n[!] hyperlora_total: 100.0% zero values (possible collapse)\n[!] loo_accuracy: 100.0% zero values (possible collapse)\n[!] loo_skipped_ratio: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_reset: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_update: 100.0% zero values (possible collapse)\n[!] lora_magnitude_gru_candidate: 100.0% zero values (possible collapse)\n[!] lora_magnitude_output_head: 100.0% zero values (possible collapse)\n[!] lora_diversity: 100.0% zero values (possible collapse)\n[!] equiv_delta_norm: 100.0% zero values (possible collapse)\n[!] lcr_magnitude: 100.0% zero values (possible collapse)\n[!] lcr_std: 100.0% zero values (possible collapse)\n[!] lcr_color_diversity: 100.0% zero values (possible collapse)\n[!] sph_mean: 100.0% zero values (possible collapse)\n[!] sph_std: 100.0% zero values (possible collapse)\n[!] sph_activation_ratio: 100.0% zero values (possible collapse)\n[!] grad_norm: 100.0% zero values (possible collapse)\n[!] grad_max: 100.0% zero values (possible collapse)\n[!] grad_min: 100.0% zero values (possible collapse)\n[!] grad_has_nan: 100.0% zero values (possible collapse)\n[!] grad_has_inf: 100.0% zero values (possible collapse)\n[!] logit_mean: 100.0% zero values (possible collapse)\n[!] logit_std: 100.0% zero values (possible collapse)\n[!] logit_max: 100.0% zero values (possible collapse)\n[!] logit_min: 100.0% zero values (possible collapse)\n[!] accuracy: 100.0% zero values (possible collapse)\n[!] bg_accuracy: 100.0% zero values (possible collapse)\n[!] fg_accuracy: 100.0% zero values (possible collapse)\n[!] confidence_mean: 100.0% zero values (possible collapse)\n[!] pred_entropy: 100.0% zero values (possible collapse)\n[!] attention_entropy: 100.0% zero values (possible collapse)\n[!] num_active_clues: 100.0% zero values (possible collapse)\n[!] stop_prob_mean: 100.0% zero values (possible collapse)\n\n--- Meta-Learning Health ---\n  [!] LOO accuracy: 0.0% (CRITICAL: < 30%)\n  [OK] LOO skipped ratio: 0.0%\n  [!] lora_magnitude_gru_reset: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_gru_update: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_gru_candidate: 0.000000 (COLLAPSED)\n  [!] lora_magnitude_output_head: 0.000000 (COLLAPSED)\n  [!] LoRA diversity: 0.000000 (NO META-LEARNING)\n  [OK] Equiv delta norm: 0.0000\n\n--- LCR/SPH Health ---\n  [!] LCR magnitude collapsed: 0.000000\n  [!] SPH activation ratio extreme: 0.0%\n\n[Trend] Total loss within epoch: \u2193 decreasing (-6.9%)\n============================================================\n
+________________ TestLOOTraining.test_loo_produces_valid_loss _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+_________ TestBackwardCompatibility.test_rlan_works_without_hyperlora _________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+______ TestBackwardCompatibility.test_training_works_without_meta_losses ______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+________________________ test_hyperlora_lr_multiplier _________________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\nRLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]\n[Optimizer] HyperLoRA params: 38 tensors @ 10.0x LR\n\nNumber of param groups: 3\nGroup 0: LR=0.000300, params=55\nGroup 1: LR=0.000300, params=62\nGroup 2: LR=0.003000, params=38\n  -> HyperLoRA group detected! LR = 10.0x base\n\n\u2713 HyperLoRA LR fix verified: meta-learner gets 10x learning rate
+____________ TestPhase2Integration.test_rlan_with_cross_attention _____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+______ TestPhase2Integration.test_gradient_flow_through_cross_attention _______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____________ TestPhase2Integration.test_variable_support_set_sizes ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_________________ TestPhase2Integration.test_without_context __________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_______________ TestPhase2Integration.test_intermediates_output _______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+_____ TestPhase25SolverCrossAttention.test_solver_cross_attention_enabled _____
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+____ TestPhase25SolverCrossAttention.test_solver_cross_attention_disabled _____
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+_ TestPhase25SolverCrossAttention.test_gradient_flow_through_solver_cross_attention _
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+  [GRAD] solver_cross_attn.cross_attn.in_proj_weight: 12.0911
+___________ test_sciarcdataset_split_loads_only_expected_directory ____________
+---------------------------- Captured stdout call -----------------------------
+Loaded 400 tasks from training
+Loaded 400 tasks from evaluation
+_ test_tiny_cpu_experiment_reproducible_when_seeds_fixed_and_augment_disabled _
+---------------------------- Captured stdout call -----------------------------
+  Limited to 3 random tasks (max_tasks=3)
+Loaded 3 tasks from data\arc-agi\data\training
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+  Limited to 3 random tasks (max_tasks=3)
+Loaded 3 tasks from data\arc-agi\data\training
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, SolverContext], Disabled=[DSC, MSRE, LCR, SPH, ACT, HyperLoRA, HPM]
+___________________________ test_hyperlora_loo_flow ___________________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+[HyperLoRA] Training enabled with:
+  - LOO loss weight: 0.5
+  - Equivariance loss weight: 0.1
+  - Min pairs for LOO: 2
+LOO Loss: 2.3883144855499268
+LOO Metrics: {'loo_loss': 2.3883144855499268, 'loo_accuracy': 0.10333333333333333, 'loo_num_holdouts': 3, 'loo_skipped': False}
+___________________________ test_equivariance_loss ____________________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+[HyperLoRA] Training enabled with:
+  - LOO loss weight: 0.5
+  - Equivariance loss weight: 0.1
+  - Min pairs for LOO: 2
+Equivariance Loss: 2.564057405100433e-16
+_______________________ test_double_addition_regression _______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+PASS: _apply_lora_spatial returns delta only (Fixed)
+___________________________ test_loo_uses_stablemax ___________________________
+---------------------------- Captured stdout call -----------------------------
+Stablemax loss: 4.034242
+Softmax loss: 87.339851
+___________________________ test_nan_inf_detection ____________________________
+---------------------------- Captured stdout call -----------------------------
+NaN/Inf detection works correctly
+___________________ TestRLANIntegration.test_forward_basic ____________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+_____________ TestRLANIntegration.test_forward_with_intermediates _____________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+________________ TestRLANIntegration.test_variable_grid_sizes _________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+____________________ TestRLANIntegration.test_batch_sizes _____________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+______________ TestRLANIntegration.test_gradient_flow_all_params ______________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+_______________ TestRLANIntegration.test_temperature_parameter ________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+___________________ TestRLANIntegration.test_predict_method ___________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+__________________ TestRLANIntegration.test_count_parameters __________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+_________________ TestRLANIntegration.test_deterministic_eval _________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+____________________ TestRLANIntegration.test_from_config _____________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+________________ TestRLANIntegration.test_save_load_checkpoint ________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE], Disabled=[LCR, SPH, ACT, SolverContext, HyperLoRA, HPM]
+__________________ TestRLANEdgeCases.test_single_pixel_grid ___________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+__________________ TestRLANEdgeCases.test_uniform_color_grid __________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+_________________ TestRLANEdgeCases.test_all_different_colors _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+___________________ TestRLANEdgeCases.test_rectangular_grid ___________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+_________________ TestRLANMemory.test_no_memory_leak_training _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+_____________________ TestRLANLearning.test_identity_task _____________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+_________________ TestRLANLearning.test_constant_output_task __________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+_________________ TestRLANLearning.test_color_inversion_task __________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+____________________ TestRLANLearning.test_loss_decreases _____________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+_______________ TestRLANLearning.test_overfitting_single_sample _______________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, LCR, SPH, SolverContext], Disabled=[ACT, HyperLoRA, HPM]
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+__________ TestRLANLossComponents.test_all_loss_components_computed ___________
+---------------------------- Captured stdout setup ----------------------------
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+____________ TestRLANLossComponents.test_focal_loss_class_balance _____________
+---------------------------- Captured stdout setup ----------------------------
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+___________ TestRLANLossComponents.test_curriculum_penalty_schedule ___________
+---------------------------- Captured stdout setup ----------------------------
+  Loss Mode: FOCAL_STABLEMAX (gamma=2.0, alpha=0.25)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+____________________ TestRecursiveSolver.test_output_shape ____________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+__________________ TestRecursiveSolver.test_all_steps_output __________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+________________ TestRecursiveSolver.test_with_attention_maps _________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+_______________ TestRecursiveSolver.test_deep_supervision_loss ________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+___________________ TestRecursiveSolver.test_gradient_flow ____________________
+---------------------------- Captured stdout setup ----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+_______ TestScientificValidity.test_hyperlora_adaptation_effectiveness ________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+Loaded 400 tasks from training
+
+Loss without adaptation: 2.4220
+Loss with adaptation:    2.4132
+_____________ TestScientificValidity.test_gradient_flow_magnitude _____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+Loaded 400 tasks from training
+
+Avg HyperLoRA grad norm: 0.474508
+Avg Main grad norm:      0.416973
+_____________ TestSmartCheckpointing.test_checkpointing_with_lora _____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Gradient checkpointing ENABLED (memory optimization)\n[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n\n[Test] Smart Checkpointing WITH LoRA...\n  Checking gradients on LoRA deltas...\n    gru_reset: grad_norm=0.001343\n    gru_update: grad_norm=0.014419\n    gru_candidate: grad_norm=0.042972\n  \u2705 Success: Gradients flowed through checkpoint!
+___________ TestSmartCheckpointing.test_checkpointing_without_lora ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Gradient checkpointing ENABLED (memory optimization)\n[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0\n[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)\n\n[Test] Smart Checkpointing WITHOUT LoRA...\n  \u2705 Success: Forward/Backward ran without error
+______________________ test_rlan_forward_training_smoke _______________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+RLAN forward_training smoke test passed!
+___________________________ test_rlan_predict_smoke ___________________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+RLAN predict smoke test passed!
+______________ TestStagedModules.test_staging_flags_epoch_0_to_2 ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+  [OK] Epoch 0: All new modules correctly DISABLED
+  [OK] Epoch 1: All new modules correctly DISABLED
+  [OK] Epoch 2: All new modules correctly DISABLED
+______________ TestStagedModules.test_staging_flags_epoch_3_plus ______________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+  [OK] Epoch 3: All new modules correctly ENABLED
+  [OK] Epoch 4: All new modules correctly ENABLED
+  [OK] Epoch 5: All new modules correctly ENABLED
+_________________ TestStagedModules.test_forward_pass_staged __________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+  [OK] Forward pass (staged): FG ratio = 0.875
+_________________ TestStagedModules.test_forward_pass_active __________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+  [OK] Forward pass (active): FG ratio = 0.877
+_________________ TestStagedModules.test_backward_pass_staged _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+  [OK] Backward pass (staged): Loss = 2.4701, No NaN/Inf gradients
+_________________ TestStagedModules.test_backward_pass_active _________________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+    HyperLoRA has 38 params with gradients
+  [OK] Backward pass (active): Loss = 2.4278, No NaN/Inf gradients
+____________ TestStagedModules.test_film_fallback_used_when_staged ____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+  [OK] FiLM fallback injector exists for staged training
+___________ TestStagedModules.test_training_transition_no_collapse ____________
+---------------------------- Captured stdout call -----------------------------
+
+============================================================
+SIMULATING TRAINING TRANSITION (epochs 0-4)
+============================================================
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+  Epoch 0 [STAGED]: FG ratio = 0.939, Loss = 2.2496
+  Epoch 1 [STAGED]: FG ratio = 0.935, Loss = 1.8644
+  Epoch 2 [STAGED]: FG ratio = 0.892, Loss = 1.5508
+
+  *** TRANSITION TO ACTIVE MODULES ***
+  Epoch 3 [ACTIVE]: FG ratio = 0.951, Loss = 2.3534
+  Epoch 4 [ACTIVE]: FG ratio = 0.968, Loss = 2.1104
+
+  --- Collapse Detection ---
+  Pre-transition FG ratio (epochs 0-2):  0.922
+  Post-transition FG ratio (epochs 3-4): 0.960
+  FG ratio change: -4.1%
+  Pre-transition loss:  1.8883
+  Post-transition loss: 2.2319
+  Loss change: 18.2%
+
+  [OK] NO BG COLLAPSE at transition!
+============================================================
+__________________ TestStagedModules.test_with_real_arc_data __________________
+---------------------------- Captured stdout call -----------------------------
+
+  Testing with REAL ARC data from: arc-agi_training_challenges.json
+  [!] Real ARC test failed: ARCDataset.__init__() got an unexpected keyword argument 'max_grid_size'
+____________ TestStagedModules.test_module_outputs_differ_by_mode _____________
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+  Logits difference (staged vs active): 0.623133
+  [OK] Staging flags correctly change model behavior
+_______ test_scitrc_trainer_requires_forward_training_but_rlan_lacks_it _______
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+________ TestDSCGradientFlow.test_gradient_path_mathematical_analysis _________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: DSC Gradient Flow Mathematical Analysis
+======================================================================
+
+  Input shapes: B=2, K=6, H=10, W=10
+  Centroids shape: torch.Size([2, 6, 2])
+
+  Gradient path analysis:
+    d(abs_row)/d(centroid) = -1
+    d(norm_row)/d(centroid) = -1/H = -0.1000
+    d(sin(f*x))/d(x) = f*cos(f*x), oscillates for high f
+    MLP weights scale: ~0.1 (Xavier init)
+
+  Gradient magnitude:
+    Centroid gradient norm: 9.905053
+
+  [OK] Gradient DOES flow to centroids
+    But magnitude is small due to normalization and Fourier encoding
+    FIX: Apply 10x learning rate to DSC/MSRE modules
+____________ TestDSCGradientFlow.test_lr_multiplier_effectiveness _____________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: Learning Rate Multiplier Effectiveness
+======================================================================
+
+  Gradient magnitudes (from training logs):
+    Solver gradient norm: 1.0000
+    DSC gradient norm: 0.0200
+    Ratio: 50.0x
+
+  Parameter update magnitudes with base_lr=1e-04:
+    Solver update: 0.000100
+    DSC update (1x LR): 0.000002
+    DSC update (10x LR): 0.000020
+
+  Update ratio:
+    Without fix: Solver/DSC = 50.0x
+    With 10x LR: Solver/DSC = 5.0x
+
+  [OK] 10x LR multiplier brings DSC learning to same order as Solver
+_____________ TestDSCGradientFlow.test_actual_model_gradient_flow _____________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: Actual RLAN Model Gradient Flow
+======================================================================
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+
+  Gradient norms by module:
+    dsc: 74.570294
+    msre: 273.013784
+    solver: 9992.797697
+    encoder: 118.533165
+
+  Solver/DSC gradient ratio: 134.0x
+  This explains why DSC needs 134x higher learning rate!
+
+  [OK] All modules receive gradients
+___________ TestPerSampleClueLoss.test_sparsity_per_sample_penalty ____________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: Per-Sample Clue Penalty Computation
+======================================================================
+
+  Stop logits shape: torch.Size([4, 6])
+  Per-sample penalty shape: torch.Size([4])
+
+  Per-sample analysis:
+    Sample 0: expected_clues=2.55, penalty=0.4526
+    Sample 1: expected_clues=2.55, penalty=0.4526
+    Sample 2: expected_clues=3.00, penalty=0.0000
+    Sample 3: expected_clues=5.72, penalty=0.0000
+
+  Gradient per sample (first clue):
+    Sample 0: grad=0.045177
+    Sample 1: grad=0.104994
+    Sample 2: grad=0.000000
+    Sample 3: grad=0.000000
+
+  [OK] Per-sample clue penalty works correctly
+    Each sample gets its own clue count gradient
+    Complex tasks (more clues) learn different stopping than simple tasks
+_________ TestPerSampleClueLoss.test_rlan_loss_per_sample_integration _________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: RLANLoss Per-Sample Integration
+======================================================================
+  Loss Mode: STABLEMAX (pure cross-entropy)
+  Clue Regularization: min_clues=3.0, min_clue_weight=1.0, ponder_weight=0.01, entropy_weight=0.02
+
+  Loss components:
+    total_loss: 2.5853
+    task_loss: 2.5681
+    sparsity_loss: 0.1720
+    per_sample_clue_penalty_mean: 0.0730
+
+  Stop logits gradients (first clue per sample):
+    Sample 0: grad=0.004587
+    Sample 1: grad=0.002261
+    Sample 2: grad=0.005699
+    Sample 3: grad=0.005179
+
+  Gradient std across samples: 0.001517
+
+  [OK] Per-sample clue penalty integrates correctly with RLANLoss
+______________ TestWeightedStablemaxLoss.test_weight_assignment _______________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: 10-Class Weight Assignment
+======================================================================
+
+  10-Class Encoding Weight Assignments:
+    Class 0 (black): BG weight cap = 1.0
+    Classes 1-9 (colors): FG weight cap = 10.0
+
+  Loss value: 4.2427
+
+  [OK] 10-class encoding correctly weights BG vs FG
+    This prevents over-prediction of black/class-0
+__________ TestWeightedStablemaxLoss.test_class_weight_gradient_flow __________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: Class Weight Gradient Flow
+======================================================================
+
+  Gradient magnitudes by class type:
+    BG (class 0) avg gradient: 0.047917
+    FG (class 1+) avg gradient: 0.047917
+    Ratio FG/BG: 1.00x
+
+  [OK] FG classes receive stronger gradients than BG
+    This pushes model to predict foreground correctly
+___________ TestLossComputation.test_stablemax_numerical_stability ____________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: Stablemax Numerical Stability
+======================================================================
+
+  Input values: [-100.0, -10.0, 0.0, 10.0, 100.0]
+  Stablemax output: [0.009900989942252636, 0.09090909361839294, 1.0, 11.0, 101.0]
+
+  Log stablemax on random logits:
+    Min log prob: -4.1044
+    Max log prob: -1.1438
+
+  [OK] Stablemax is numerically stable
+______________ TestLossComputation.test_loss_gradient_magnitude _______________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: Loss Gradient Magnitude
+======================================================================
+  Loss Mode: WEIGHTED_STABLEMAX (inverse frequency, bg_cap=1.0, fg_cap=10.0)
+  Clue Regularization: min_clues=2.5, min_clue_weight=5.0, ponder_weight=0.02, entropy_weight=0.02
+
+  Random predictions (high loss):
+    Loss: 8.9066
+    Gradient norm: 0.1661
+
+  Near-perfect predictions (low loss):
+    Loss: 2.2135
+    Gradient norm: 0.0419
+
+  [OK] Loss produces reasonable gradients
+    Higher loss -> larger gradients (learning signal)
+____________ TestOptimizerParamGroups.test_param_group_separation _____________
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+TEST: Optimizer Param Group Separation
+======================================================================
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext], Disabled=[LCR, SPH, ACT, HyperLoRA, HPM]
+
+  Model parameter counts:
+    DSC: 40,097
+    MSRE: 15,072
+    Solver: 518,858
+    Encoder: 4,640
+
+  DSC parameter names (sample): ['dsc.clue_queries', 'dsc.query_proj.weight', 'dsc.query_proj.bias']
+  MSRE parameter names (sample): ['msre.coord_encoder.0.weight', 'msre.coord_encoder.0.bias', 'msre.coord_encoder.2.weight']
+
+  [OK] DSC and MSRE parameters can be identified for separate LR groups
+=========================== short test summary info ===========================
+PASSED tests/test_acw_color_permutation_ignore_index_bug.py::test_predict_with_acw_color_perm_handles_ignore_index_targets
+PASSED tests/test_arc_dataset_real_data.py::test_arcdataset_loads_real_training_dir_and_has_expected_keys_and_types
+PASSED tests/test_arc_dataset_real_data.py::test_arcdataset_padding_uses_ignore_index_minus_100_for_targets
+PASSED tests/test_arc_dataset_real_data.py::test_arcdataset_input_dtype_consistent_with_targets
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[0-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[1-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[2-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[3-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[4-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[5-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[6-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-1-1]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-2-3]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-3-2]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-5-5]
+PASSED tests/test_augmentation_group_invariants.py::test_trm_dihedral_inverse_is_identity[7-7-4]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-identity-0]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-rotate_90-1]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-rotate_180-2]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-rotate_270-3]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-flip_h-4]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-flip_v-5]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-transpose-6]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape0-transpose_neg-7]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-identity-0]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-rotate_90-1]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-rotate_180-2]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-rotate_270-3]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-flip_h-4]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-flip_v-5]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-transpose-6]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape1-transpose_neg-7]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-identity-0]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-rotate_90-1]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-rotate_180-2]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-rotate_270-3]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-flip_h-4]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-flip_v-5]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-transpose-6]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_and_trm_dihedral_match_on_numpy_equivalent[shape2-transpose_neg-7]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-identity]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-rotate_90]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-rotate_180]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-rotate_270]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-flip_h]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-flip_v]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-transpose]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[2-transpose_neg]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-identity]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-rotate_90]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-rotate_180]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-rotate_270]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-flip_h]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-flip_v]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-transpose]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[3-transpose_neg]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-identity]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-rotate_90]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-rotate_180]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-rotate_270]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-flip_h]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-flip_v]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-transpose]
+PASSED tests/test_augmentation_group_invariants.py::test_acw_apply_then_inverse_restores_tensor[4-transpose_neg]
+PASSED tests/test_augmentation_group_invariants.py::test_color_permutation_inverse_is_identity_for_random_perm
+PASSED tests/test_avgpool_vs_maxpool.py::test_pooling_methods
+PASSED tests/test_bug_001_loo_training_not_integrated.py::test_loo_training_integrated_into_trainer
+PASSED tests/test_bug_001_loo_training_not_integrated.py::test_training_config_has_loo_fields
+PASSED tests/test_bug_001_loo_training_not_integrated.py::test_loo_training_loss_exists
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_rlan_returns_z_struct
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_rlan_returns_z_struct_demos
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_rlan_returns_z_content
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_scl_weight_nonzero_and_used
+PASSED tests/test_bug_002_z_struct_not_returned.py::test_ortho_weight_nonzero_and_used
+PASSED tests/test_bug_fixes_dec2025.py::TestHyperLoRAConnection::test_hyperlora_called_in_forward_with_context
+PASSED tests/test_bug_fixes_dec2025.py::TestHyperLoRAConnection::test_hyperlora_deltas_passed_to_solver
+PASSED tests/test_bug_fixes_dec2025.py::TestHyperLoRAConnection::test_hyperlora_disabled_backward_compatible
+PASSED tests/test_bug_fixes_dec2025.py::TestHyperLoRAConnection::test_hyperlora_without_context_backward_compatible
+PASSED tests/test_bug_fixes_dec2025.py::TestEquivarianceLossFix::test_equivariance_loss_uses_mse
+PASSED tests/test_bug_fixes_dec2025.py::TestEquivarianceLossFix::test_equivariance_loss_detects_different_weights_same_norm
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_compute_hashes_batched
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_compute_hashes_empty_list
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_compute_hashes_identical_predictions
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_compute_hashes_different_predictions
+PASSED tests/test_bug_fixes_dec2025.py::TestACWBatchedHashing::test_batched_vs_individual_gives_same_result
+PASSED tests/test_bug_fixes_dec2025.py::TestBackwardCompatibility::test_rlan_forward_without_hyperlora_unchanged
+PASSED tests/test_bug_fixes_dec2025.py::TestBackwardCompatibility::test_predict_with_acw_still_works
+PASSED tests/test_bug_fixes_dec2025.py::TestGradientFlow::test_hyperlora_gradients_flow
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_task_accuracy_ignores_padding
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_task_accuracy_legacy_mode
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_pixel_accuracy_ignores_padding
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_pixel_accuracy_strict_shape_mode
+PASSED tests/test_bug_fixes_verification.py::TestMetricsPaddingAwareness::test_pixel_accuracy_backward_compat_overlap
+PASSED tests/test_bug_fixes_verification.py::TestTRMVotingRankFix::test_voting_prefers_frequent_consensus
+PASSED tests/test_bug_fixes_verification.py::TestHyperLoRAInitScaleFix::test_init_scale_affects_predictor_weights
+PASSED tests/test_bug_fixes_verification.py::TestLOOTrainingLossInterfaceFix::test_loo_training_loss_callable
+PASSED tests/test_bug_fixes_verification.py::TestDatasetExpandTestPairsFix::test_expand_test_pairs_increases_length
+PASSED tests/test_bug_fixes_verification.py::TestDatasetExpandTestPairsFix::test_expand_test_pairs_includes_test_idx
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_grid_encoder_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_dsc_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_msre_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_lcr_dimensions_per_clue
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_lcr_dimensions_global
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_sph_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_solver_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_context_encoder_spatial
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_context_encoder_compressed
+PASSED tests/test_comprehensive_rlan.py::TestTensorDimensions::test_full_rlan_dimensions
+PASSED tests/test_comprehensive_rlan.py::TestGradientFlow::test_gradient_flow_basic
+PASSED tests/test_comprehensive_rlan.py::TestGradientFlow::test_gradient_flow_solver_context
+PASSED tests/test_comprehensive_rlan.py::TestGradientFlow::test_gradient_flow_dsc
+PASSED tests/test_comprehensive_rlan.py::TestNumericalStability::test_attention_stability
+PASSED tests/test_comprehensive_rlan.py::TestNumericalStability::test_attention_extreme_features
+PASSED tests/test_comprehensive_rlan.py::TestNumericalStability::test_loss_ignore_index
+PASSED tests/test_comprehensive_rlan.py::TestNumericalStability::test_entropy_computation_stability
+PASSED tests/test_comprehensive_rlan.py::TestPaddingSemantics::test_pad_color_is_10
+PASSED tests/test_comprehensive_rlan.py::TestPaddingSemantics::test_target_padding_is_minus_100
+PASSED tests/test_comprehensive_rlan.py::TestPaddingSemantics::test_valid_mask_excludes_padding
+PASSED tests/test_comprehensive_rlan.py::TestLossComponents::test_cross_entropy_basic
+PASSED tests/test_comprehensive_rlan.py::TestLossComponents::test_loss_with_class_weights
+PASSED tests/test_comprehensive_rlan.py::TestLossComponents::test_loss_reduction_modes
+PASSED tests/test_comprehensive_rlan.py::TestCheckpointCompatibility::test_checkpoint_roundtrip
+PASSED tests/test_comprehensive_rlan.py::TestCheckpointCompatibility::test_checkpoint_with_extra_data
+PASSED tests/test_comprehensive_rlan.py::TestHyperLoRAIntegration::test_hyperlora_disabled_by_default
+PASSED tests/test_comprehensive_rlan.py::TestHyperLoRAIntegration::test_hyperlora_enabled
+PASSED tests/test_comprehensive_rlan.py::TestHyperLoRAIntegration::test_hyperlora_forward
+PASSED tests/test_comprehensive_rlan.py::TestConfigAlignment::test_stable_config_defaults
+PASSED tests/test_comprehensive_rlan.py::TestConfigAlignment::test_production_config_creation
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_single_pixel_grid
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_max_size_grid
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_non_square_grid
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_batch_size_one
+PASSED tests/test_comprehensive_rlan.py::TestEdgeCases::test_all_same_color_grid
+PASSED tests/test_cpu_e2e_smoke_real_data.py::test_cpu_forward_smoke_on_real_arc_batch_with_context
+PASSED tests/test_cpu_e2e_smoke_real_data.py::test_collate_sci_arc_pads_target_grids_with_ignore_index
+PASSED tests/test_cpu_e2e_smoke_real_data.py::test_evaluate_with_trm_style_contract_mismatch_with_rlan_model
+PASSED tests/test_cross_attention_injector.py::TestCrossAttentionInjector::test_initialization
+PASSED tests/test_cross_attention_injector.py::TestCrossAttentionInjector::test_forward_pass_shape
+PASSED tests/test_cross_attention_injector.py::TestCrossAttentionInjector::test_residual_connection
+PASSED tests/test_cross_attention_injector.py::TestCrossAttentionInjector::test_multiple_support_pairs
+PASSED tests/test_cross_attention_injector.py::TestCrossAttentionInjector::test_gradient_flow
+PASSED tests/test_cross_attention_injector.py::TestCrossAttentionInjector::test_attention_computation
+PASSED tests/test_cross_attention_injector.py::TestCrossAttentionInjector::test_batch_independence
+PASSED tests/test_cross_attention_injector.py::TestCrossAttentionInjector::test_different_spatial_sizes
+PASSED tests/test_data.py::TestSCIARCDataset::test_loading
+PASSED tests/test_data.py::TestSCIARCDataset::test_sample_structure
+PASSED tests/test_data.py::TestSCIARCDataset::test_grid_types
+PASSED tests/test_data.py::TestSCIARCDataset::test_augmentation
+PASSED tests/test_data.py::TestCollateFunction::test_batch_structure
+PASSED tests/test_data.py::TestCollateFunction::test_batch_shapes
+PASSED tests/test_data.py::TestPadGrid::test_padding_smaller_grid
+PASSED tests/test_data.py::TestPadGrid::test_padding_equal_grid
+PASSED tests/test_data.py::TestPadGrid::test_padding_larger_grid
+PASSED tests/test_data.py::TestTransformFamilies::test_transform_families_exist
+PASSED tests/test_data.py::TestTransformFamilies::test_get_transform_family
+PASSED tests/test_data.py::TestTransformFamilies::test_infer_rotation
+PASSED tests/test_data.py::TestTransformFamilies::test_infer_flip
+PASSED tests/test_data.py::TestTransformFamilies::test_infer_identity
+PASSED tests/test_data.py::TestColorPermutation::test_preserves_background
+PASSED tests/test_data.py::TestDataLoader::test_dataloader_iteration
+PASSED tests/test_dataloader_seed_reproducibility.py::test_create_dataloader_seed_reproducible_for_shuffle_when_augment_disabled
+PASSED tests/test_dataset_config_bugs.py::TestDatasetConfigBugs::test_color_permutation_prob_zero_no_permutation
+PASSED tests/test_dataset_config_bugs.py::TestDatasetConfigBugs::test_color_permutation_prob_one_always_permutes
+PASSED tests/test_dataset_config_bugs.py::TestDatasetConfigBugs::test_translational_augment_disabled_preserves_position
+PASSED tests/test_dataset_config_bugs.py::TestDatasetConfigBugs::test_translational_augment_enabled_varies_position
+PASSED tests/test_equivariance_loss_integration.py::TestEquivarianceLossIntegration::test_hyperlora_compute_delta_w
+PASSED tests/test_equivariance_loss_integration.py::TestEquivarianceLossIntegration::test_equivariance_loss_forward
+PASSED tests/test_equivariance_loss_integration.py::TestEquivarianceLossIntegration::test_equivariance_loss_gradient_flow
+PASSED tests/test_equivariance_loss_integration.py::TestEquivarianceLossIntegration::test_apply_augmentation
+PASSED tests/test_equivariance_loss_integration.py::TestEquivarianceLossIntegration::test_equivariance_similar_contexts_lower_loss
+PASSED tests/test_hpm.py::TestMemoryBank::test_bank_initialization
+PASSED tests/test_hpm.py::TestMemoryBank::test_bank_forward
+PASSED tests/test_hpm.py::TestMemoryBank::test_bank_forward_no_attention
+PASSED tests/test_hpm.py::TestMemoryBank::test_bank_usage_tracking
+PASSED tests/test_hpm.py::TestMemoryBank::test_bank_freeze_mechanism
+PASSED tests/test_hpm.py::TestMemoryRouter::test_router_initialization
+PASSED tests/test_hpm.py::TestMemoryRouter::test_router_sparse_output
+PASSED tests/test_hpm.py::TestMemoryRouter::test_router_weights_sum_to_one
+PASSED tests/test_hpm.py::TestMemoryRouter::test_router_load_balance_loss
+PASSED tests/test_hpm.py::TestMemoryRouter::test_router_reset_statistics
+PASSED tests/test_hpm.py::TestCrossBankAggregator::test_aggregator_weighted_sum
+PASSED tests/test_hpm.py::TestCrossBankAggregator::test_aggregator_with_cross_attention
+PASSED tests/test_hpm.py::TestHPMConfig::test_config_from_dict
+PASSED tests/test_hpm.py::TestHPMConfig::test_config_enabled_banks
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_single_bank
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_all_static_banks
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_gated_residual_starts_zero
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_sparse_routing
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_load_balance_loss
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_reset_epoch_stats
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_backward_compatibility_none_input
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_with_dynamic_buffers
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_gradient_flow
+PASSED tests/test_hpm.py::TestHierarchicalPrimitiveMemory::test_hpm_freeze_stable_primitives
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_initialization
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_add_single
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_add_batch
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_retrieve
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_retrieve_empty
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_fifo_eviction
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_clear
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_save_load
+PASSED tests/test_hpm.py::TestDynamicMemoryBuffer::test_buffer_stats
+PASSED tests/test_hpm.py::TestHPMIntegration::test_hpm_disable_no_break
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_rlan_without_hpm
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_rlan_with_hpm_enabled
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_hpm_gate_starts_at_zero
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_hpm_balance_loss_in_training
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_hpm_backward_callback
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_hpm_stats
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_hpm_with_dynamic_banks
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_hpm_task_completion
+PASSED tests/test_hpm_integration.py::TestRLANHPMIntegration::test_hpm_buffer_save_load
+PASSED tests/test_hpm_integration.py::TestHPMYAMLConfig::test_load_yaml_config
+PASSED tests/test_hpm_integration.py::TestHPMYAMLConfig::test_hpm_disabled_by_default
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMConfiguration::test_hpm_config_from_rlan_config
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMConfiguration::test_hpm_model_initialization
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMConfiguration::test_hpm_disabled_by_default
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMForwardPass::test_forward_single_task
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMForwardPass::test_forward_multiple_tasks
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMGateEvolution::test_gate_starts_at_zero
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMGateEvolution::test_gate_can_learn
+PASSED tests/test_hpm_smoke_real_data.py::TestBankRoutingDiversity::test_routing_is_sparse
+PASSED tests/test_hpm_smoke_real_data.py::TestBankRoutingDiversity::test_load_balance_loss_works
+PASSED tests/test_hpm_smoke_real_data.py::TestDynamicBankPopulation::test_procedural_buffer_grows
+PASSED tests/test_hpm_smoke_real_data.py::TestDynamicBankPopulation::test_instance_buffer_grows
+PASSED tests/test_hpm_smoke_real_data.py::TestMemoryQuality::test_similar_embeddings_retrieve_similar_memories
+PASSED tests/test_hpm_smoke_real_data.py::TestMemoryQuality::test_model_forward_produces_varying_outputs
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMTrainingIntegration::test_training_step_with_hpm
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMEvaluationIntegration::test_evaluation_uses_hpm
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMEvaluationIntegration::test_hpm_retrieval_during_eval
+PASSED tests/test_hpm_smoke_real_data.py::TestContinualLearning::test_dynamic_banks_update_during_inference
+PASSED tests/test_hpm_smoke_real_data.py::TestContinualLearning::test_static_banks_frozen_during_inference
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMHealthMetrics::test_stats_include_all_banks
+PASSED tests/test_hpm_smoke_real_data.py::TestHPMHealthMetrics::test_stats_updated_per_epoch
+PASSED tests/test_hyperlora_and_loo_additional_bugs.py::test_hyperlora_init_scale_is_respected_by_predictors
+PASSED tests/test_hyperlora_and_loo_additional_bugs.py::test_loo_training_loss_hyperlora_interface_is_callable_end_to_end
+PASSED tests/test_hyperlora_integration.py::test_hyperlora_module
+PASSED tests/test_hyperlora_integration.py::test_recursive_solver_with_lora
+PASSED tests/test_hyperlora_integration.py::test_rlan_with_hyperlora
+PASSED tests/test_hyperlora_integration.py::test_hyperlora_trainer
+PASSED tests/test_hyperlora_integration.py::test_acw_voting
+PASSED tests/test_hyperlora_integration.py::test_health_metrics
+PASSED tests/test_hyperlora_integration.py::test_backward_compatibility
+PASSED tests/test_inference_consistency.py::TestInferenceConsistency::test_hyperlora_active_during_inference
+PASSED tests/test_inference_consistency.py::TestInferenceConsistency::test_tta_consistency
+PASSED tests/test_inference_consistency.py::TestInferenceConsistency::test_gradient_flow_bottlenecks
+PASSED tests/test_loo_no_leakage.py::test_loo_uses_remaining_features
+PASSED tests/test_loo_no_leakage.py::test_cross_attention_handles_variable_n
+PASSED tests/test_loss_logger.py::TestLossStats::test_initial_state
+PASSED tests/test_loss_logger.py::TestLossStats::test_single_update
+PASSED tests/test_loss_logger.py::TestLossStats::test_multiple_updates
+PASSED tests/test_loss_logger.py::TestLossStats::test_zero_detection
+PASSED tests/test_loss_logger.py::TestLossStats::test_nan_detection
+PASSED tests/test_loss_logger.py::TestLossStats::test_ema_update
+PASSED tests/test_loss_logger.py::TestLossStats::test_to_dict
+PASSED tests/test_loss_logger.py::TestLossLogger::test_initialization
+PASSED tests/test_loss_logger.py::TestLossLogger::test_log_step
+PASSED tests/test_loss_logger.py::TestLossLogger::test_log_step_with_tensors
+PASSED tests/test_loss_logger.py::TestLossLogger::test_epoch_summary
+PASSED tests/test_loss_logger.py::TestLossLogger::test_file_logging
+PASSED tests/test_loss_logger.py::TestLossLogger::test_health_check
+PASSED tests/test_loss_logger.py::TestLossLogger::test_trend_detection
+PASSED tests/test_loss_logger.py::TestLossLogger::test_get_stats_dict
+PASSED tests/test_loss_logger.py::TestLossLoggerIntegration::test_full_training_simulation
+PASSED tests/test_memory_optimizations.py::Test8BitOptimizer::test_8bit_import_fallback
+PASSED tests/test_memory_optimizations.py::TestFlashAttention::test_sdpa_available
+PASSED tests/test_meta_learning_comprehensive.py::TestConfigIntegration::test_loo_training_config_exists
+PASSED tests/test_meta_learning_comprehensive.py::TestConfigIntegration::test_equivariance_config_exists
+PASSED tests/test_meta_learning_comprehensive.py::TestConfigIntegration::test_hyperlora_config_exists
+PASSED tests/test_meta_learning_comprehensive.py::TestConfigIntegration::test_meta_learning_enabled_by_default
+PASSED tests/test_meta_learning_comprehensive.py::TestConfigIntegration::test_hyperlora_lr_multiplier_exists
+PASSED tests/test_meta_learning_comprehensive.py::TestLossBalancing::test_loss_weights_are_reasonable
+PASSED tests/test_meta_learning_comprehensive.py::TestLossBalancing::test_loss_magnitudes_are_comparable
+PASSED tests/test_meta_learning_comprehensive.py::TestHyperLoRALearning::test_hyperlora_weights_change_with_gradient
+PASSED tests/test_meta_learning_comprehensive.py::TestHyperLoRALearning::test_different_contexts_produce_different_deltas
+PASSED tests/test_meta_learning_comprehensive.py::TestLOOTraining::test_loo_skips_when_not_enough_pairs
+PASSED tests/test_meta_learning_comprehensive.py::TestLOOTraining::test_loo_produces_valid_loss
+PASSED tests/test_meta_learning_comprehensive.py::TestEquivarianceLoss::test_identical_contexts_produce_low_loss
+PASSED tests/test_meta_learning_comprehensive.py::TestEquivarianceLoss::test_gradients_flow_through_equivariance
+PASSED tests/test_meta_learning_comprehensive.py::TestBackwardCompatibility::test_rlan_works_without_hyperlora
+PASSED tests/test_meta_learning_comprehensive.py::TestBackwardCompatibility::test_training_works_without_meta_losses
+PASSED tests/test_meta_learning_comprehensive.py::TestMathematicalCorrectness::test_loo_uses_cross_entropy
+PASSED tests/test_meta_learning_comprehensive.py::TestMathematicalCorrectness::test_equivariance_uses_l2_norm
+PASSED tests/test_meta_learning_comprehensive.py::TestEndToEndMetaLearning::test_meta_learning_improves_generalization
+PASSED tests/test_meta_learning_comprehensive.py::TestEndToEndMetaLearning::test_all_losses_are_finite
+PASSED tests/test_meta_learning_impact.py::TestHyperLoRAConfiguration::test_hyperlora_params_in_rlan_stable_yaml
+PASSED tests/test_meta_learning_impact.py::TestHyperLoRAConfiguration::test_hyperlora_lr_multiplier_in_yaml
+PASSED tests/test_meta_learning_impact.py::TestHyperLoRAModule::test_hyperlora_can_be_instantiated
+PASSED tests/test_meta_learning_impact.py::TestHyperLoRAModule::test_hyperlora_predicts_lora_deltas
+PASSED tests/test_meta_learning_impact.py::TestHyperLoRAModule::test_hyperlora_different_contexts_different_weights
+PASSED tests/test_meta_learning_impact.py::TestLOOTrainingLoss::test_loo_loss_module_exists
+PASSED tests/test_meta_learning_impact.py::TestLOOTrainingLoss::test_loo_loss_skips_when_not_enough_pairs
+PASSED tests/test_meta_learning_impact.py::TestLOOTrainingLoss::test_loo_interface_accepts_model_param
+PASSED tests/test_meta_learning_impact.py::TestMetaLearningGradientFlow::test_hyperlora_receives_gradients
+PASSED tests/test_meta_learning_impact.py::TestOptimizerParamGroups::test_train_rlan_creates_hyperlora_param_group
+PASSED tests/test_meta_learning_impact.py::TestMetaLearningMetrics::test_epoch_diagnostics_has_loo_metrics
+PASSED tests/test_metric_definition_consistency.py::test_metrics_should_ignore_padding_like_trainer_validate
+PASSED tests/test_metric_definition_consistency.py::test_pixel_accuracy_shape_mismatch_should_not_use_overlap_by_default
+PASSED tests/test_optimizer_fix.py::test_hyperlora_lr_multiplier
+PASSED tests/test_packaging_entrypoints.py::test_setup_py_console_entrypoints_are_importable_modules
+PASSED tests/test_phase2_integration.py::TestPhase2Integration::test_rlan_with_cross_attention
+PASSED tests/test_phase2_integration.py::TestPhase2Integration::test_gradient_flow_through_cross_attention
+PASSED tests/test_phase2_integration.py::TestPhase2Integration::test_variable_support_set_sizes
+PASSED tests/test_phase2_integration.py::TestPhase2Integration::test_without_context
+PASSED tests/test_phase2_integration.py::TestPhase2Integration::test_intermediates_output
+PASSED tests/test_phase2_integration.py::TestPhase25SolverCrossAttention::test_solver_cross_attention_enabled
+PASSED tests/test_phase2_integration.py::TestPhase25SolverCrossAttention::test_solver_cross_attention_disabled
+PASSED tests/test_phase2_integration.py::TestPhase25SolverCrossAttention::test_gradient_flow_through_solver_cross_attention
+PASSED tests/test_phase2_integration.py::TestPhase25SolverCrossAttention::test_solver_cross_attention_shapes
+PASSED tests/test_phase2_integration.py::TestPhase25SolverCrossAttention::test_solver_cross_attention_gating
+PASSED tests/test_real_data_integrity.py::test_arc_agi_train_eval_task_id_sets_do_not_overlap
+PASSED tests/test_real_data_integrity.py::test_arc_agi_schema_and_value_ranges_on_small_sample[training]
+PASSED tests/test_real_data_integrity.py::test_arc_agi_schema_and_value_ranges_on_small_sample[evaluation]
+PASSED tests/test_real_data_split_loading_leakage.py::test_sciarcdataset_split_loads_only_expected_directory
+PASSED tests/test_reproducibility_tiny_experiment_cpu.py::test_tiny_cpu_experiment_reproducible_when_seeds_fixed_and_augment_disabled
+PASSED tests/test_rlan_comprehensive_review.py::test_hyperlora_loo_flow
+PASSED tests/test_rlan_comprehensive_review.py::test_equivariance_loss
+PASSED tests/test_rlan_comprehensive_review.py::test_acw_voting
+PASSED tests/test_rlan_comprehensive_review.py::test_double_addition_regression
+PASSED tests/test_rlan_comprehensive_review.py::test_loo_uses_stablemax
+PASSED tests/test_rlan_comprehensive_review.py::test_nan_inf_detection
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_forward_basic
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_forward_with_intermediates
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_variable_grid_sizes
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_batch_sizes
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_gradient_flow_all_params
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_temperature_parameter
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_predict_method
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_count_parameters
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_deterministic_eval
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_from_config
+PASSED tests/test_rlan_integration.py::TestRLANIntegration::test_save_load_checkpoint
+PASSED tests/test_rlan_integration.py::TestRLANEdgeCases::test_single_pixel_grid
+PASSED tests/test_rlan_integration.py::TestRLANEdgeCases::test_uniform_color_grid
+PASSED tests/test_rlan_integration.py::TestRLANEdgeCases::test_all_different_colors
+PASSED tests/test_rlan_integration.py::TestRLANEdgeCases::test_rectangular_grid
+PASSED tests/test_rlan_integration.py::TestRLANMemory::test_no_memory_leak_training
+PASSED tests/test_rlan_learning.py::TestRLANLearning::test_identity_task
+PASSED tests/test_rlan_learning.py::TestRLANLearning::test_constant_output_task
+PASSED tests/test_rlan_learning.py::TestRLANLearning::test_color_inversion_task
+PASSED tests/test_rlan_learning.py::TestRLANLearning::test_loss_decreases
+PASSED tests/test_rlan_learning.py::TestRLANLearning::test_overfitting_single_sample
+PASSED tests/test_rlan_learning.py::TestRLANLossComponents::test_all_loss_components_computed
+PASSED tests/test_rlan_learning.py::TestRLANLossComponents::test_focal_loss_class_balance
+PASSED tests/test_rlan_learning.py::TestRLANLossComponents::test_curriculum_penalty_schedule
+PASSED tests/test_rlan_modules.py::TestDynamicSaliencyController::test_output_shapes
+PASSED tests/test_rlan_modules.py::TestDynamicSaliencyController::test_attention_sums_to_one
+PASSED tests/test_rlan_modules.py::TestDynamicSaliencyController::test_temperature_effect
+PASSED tests/test_rlan_modules.py::TestDynamicSaliencyController::test_centroid_in_valid_range
+PASSED tests/test_rlan_modules.py::TestDynamicSaliencyController::test_gradient_flow
+PASSED tests/test_rlan_modules.py::TestMultiScaleRelativeEncoding::test_output_shape
+PASSED tests/test_rlan_modules.py::TestMultiScaleRelativeEncoding::test_encoding_varies_with_centroid
+PASSED tests/test_rlan_modules.py::TestMultiScaleRelativeEncoding::test_gradient_flow
+PASSED tests/test_rlan_modules.py::TestLatentCountingRegisters::test_output_shape
+PASSED tests/test_rlan_modules.py::TestLatentCountingRegisters::test_count_sensitivity
+PASSED tests/test_rlan_modules.py::TestLatentCountingRegisters::test_get_count_probs
+PASSED tests/test_rlan_modules.py::TestLatentCountingRegisters::test_gradient_flow
+PASSED tests/test_rlan_modules.py::TestSymbolicPredicateHeads::test_output_shape
+PASSED tests/test_rlan_modules.py::TestSymbolicPredicateHeads::test_output_range
+PASSED tests/test_rlan_modules.py::TestSymbolicPredicateHeads::test_temperature_effect
+PASSED tests/test_rlan_modules.py::TestSymbolicPredicateHeads::test_diversity_loss
+PASSED tests/test_rlan_modules.py::TestSymbolicPredicateHeads::test_gradient_flow
+PASSED tests/test_rlan_modules.py::TestRecursiveSolver::test_output_shape
+PASSED tests/test_rlan_modules.py::TestRecursiveSolver::test_all_steps_output
+PASSED tests/test_rlan_modules.py::TestRecursiveSolver::test_with_attention_maps
+PASSED tests/test_rlan_modules.py::TestRecursiveSolver::test_deep_supervision_loss
+PASSED tests/test_rlan_modules.py::TestRecursiveSolver::test_gradient_flow
+PASSED tests/test_scientific_validity.py::TestScientificValidity::test_hyperlora_adaptation_effectiveness
+PASSED tests/test_scientific_validity.py::TestScientificValidity::test_gradient_flow_magnitude
+PASSED tests/test_scientific_validity.py::TestScientificValidity::test_acw_voting_logic
+PASSED tests/test_scripts_train_eval_smoke_cpu.py::test_train_rlan_script_help_runs_on_cpu
+PASSED tests/test_scripts_train_eval_smoke_cpu.py::test_evaluate_rlan_script_help_runs_on_cpu
+PASSED tests/test_scripts_train_eval_smoke_cpu.py::test_train_rlan_script_checkpoint_helpers_roundtrip_cpu
+PASSED tests/test_smart_checkpointing.py::TestSmartCheckpointing::test_checkpointing_with_lora
+PASSED tests/test_smart_checkpointing.py::TestSmartCheckpointing::test_checkpointing_without_lora
+PASSED tests/test_smoke_rlan.py::test_rlan_forward_training_smoke
+PASSED tests/test_smoke_rlan.py::test_rlan_predict_smoke
+PASSED tests/test_staged_modules.py::TestStagedModules::test_staging_flags_epoch_0_to_2
+PASSED tests/test_staged_modules.py::TestStagedModules::test_staging_flags_epoch_3_plus
+PASSED tests/test_staged_modules.py::TestStagedModules::test_forward_pass_staged
+PASSED tests/test_staged_modules.py::TestStagedModules::test_forward_pass_active
+PASSED tests/test_staged_modules.py::TestStagedModules::test_backward_pass_staged
+PASSED tests/test_staged_modules.py::TestStagedModules::test_backward_pass_active
+PASSED tests/test_staged_modules.py::TestStagedModules::test_film_fallback_used_when_staged
+PASSED tests/test_staged_modules.py::TestStagedModules::test_training_transition_no_collapse
+PASSED tests/test_staged_modules.py::TestStagedModules::test_with_real_arc_data
+PASSED tests/test_staged_modules.py::TestStagedModules::test_module_outputs_differ_by_mode
+PASSED tests/test_trainer_model_api_mismatch.py::test_scitrc_trainer_requires_forward_training_but_rlan_lacks_it
+PASSED tests/test_training_issues.py::TestDSCGradientFlow::test_gradient_path_mathematical_analysis
+PASSED tests/test_training_issues.py::TestDSCGradientFlow::test_lr_multiplier_effectiveness
+PASSED tests/test_training_issues.py::TestDSCGradientFlow::test_actual_model_gradient_flow
+PASSED tests/test_training_issues.py::TestPerSampleClueLoss::test_sparsity_per_sample_penalty
+PASSED tests/test_training_issues.py::TestPerSampleClueLoss::test_rlan_loss_per_sample_integration
+PASSED tests/test_training_issues.py::TestWeightedStablemaxLoss::test_weight_assignment
+PASSED tests/test_training_issues.py::TestWeightedStablemaxLoss::test_class_weight_gradient_flow
+PASSED tests/test_training_issues.py::TestLossComputation::test_stablemax_numerical_stability
+PASSED tests/test_training_issues.py::TestLossComputation::test_loss_gradient_magnitude
+PASSED tests/test_training_issues.py::TestOptimizerParamGroups::test_param_group_separation
+PASSED tests/test_trm_evaluator_voting_rank.py::test_trm_style_voting_should_account_for_vote_count_not_only_avg_confidence
+SKIPPED [1] tests\test_hpm_integration.py:254: CUDA not available
+SKIPPED [1] tests\test_hpm_integration.py:291: CUDA not available
+SKIPPED [1] tests\test_memory_optimizations.py:127: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:169: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:236: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:278: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:325: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:354: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:404: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:421: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:456: CUDA required
+SKIPPED [1] tests\test_memory_optimizations.py:511: CUDA required
+SKIPPED [1] tests\test_rlan_integration.py:286: CUDA not available
+XFAIL tests/test_dataloader_seed_reproducibility.py::test_create_dataloader_seed_insufficient_for_deterministic_augmentations_when_num_workers_zero - Deterministic augmentations require seeding at iteration time, not just at dataloader creation; RNG state consumed during dataset init breaks reproducibility
+XFAIL tests/test_dataset_multi_test_cases.py::test_dataset_should_represent_all_test_items_not_just_first - SCIARCDataset indexes by task, not by (task,test_idx). For tasks with multiple ARC test items, the dataset provides only a single sample per task and selects a random test pair, so an evaluation pass cannot deterministically cover all official test items.
+XFAIL tests/test_real_data_split_loading_leakage.py::test_sciarcdataset_should_not_silently_fallback_when_split_missing - SCIARCDataset._load_tasks silently falls back to data_dir when split subdir is missing; passing data_dir=<.../training> with split='evaluation' leaks training tasks into evaluation. This should raise or produce empty dataset to prevent accidental leakage.
+428 passed, 13 skipped, 8 deselected, 3 xfailed in 100.13s (0:01:40)
+EXITCODE=0
