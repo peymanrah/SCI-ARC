@@ -265,10 +265,11 @@ def test_staged_activation_order():
     else:
         test_failed("hyperlora_warmup_start_scale parameter is used", "Not found in code")
     
-    if "init_scale" in content and "hyper_lora" in content:
-        test_passed("HyperLoRA init_scale is set dynamically")
+    # Patch 1: Check for delta_scale usage (not init_scale) - this actually affects forward
+    if "delta_scale" in content and "hyper_lora" in content:
+        test_passed("HyperLoRA delta_scale is set dynamically (Patch 1)")
     else:
-        test_failed("HyperLoRA init_scale is set dynamically", "Pattern not found")
+        test_failed("HyperLoRA delta_scale is set dynamically", "Pattern not found")
 
 
 def test_gradient_explosion_backoff():
@@ -436,6 +437,165 @@ def test_phase_order():
                    f"Warmup ends at {warmup_end}, Equiv at {equiv_epoch}")
 
 
+def test_hyperlora_delta_scale_behavior():
+    """Test 6: Verify HyperLoRA delta_scale actually affects output magnitudes (Patch 5)."""
+    print("\n" + "=" * 60)
+    print("TEST 6: HyperLoRA delta_scale Behavior (Patch 5)")
+    print("=" * 60)
+    
+    try:
+        from sci_arc.models.rlan_modules.hyper_lora import HyperLoRA, HyperLoRAConfig
+        
+        # Create HyperLoRA on CPU
+        config = HyperLoRAConfig(
+            hidden_dim=64,
+            context_dim=64,
+            rank=4,
+            scaling=0.1,
+            init_scale=0.1,
+        )
+        hyper_lora = HyperLoRA(config=config)
+        hyper_lora.eval()
+        
+        # Create deterministic fake support features
+        torch.manual_seed(42)
+        support_features = torch.randn(2, 3, 64, 8, 8)  # (B, N, D, H, W)
+        
+        # Test with delta_scale = 1.0
+        hyper_lora.delta_scale = 1.0
+        with torch.no_grad():
+            deltas_full = hyper_lora(support_features)
+        norm_full = deltas_full['gru_reset'].norm().item()
+        
+        # Test with delta_scale = 0.1
+        hyper_lora.delta_scale = 0.1
+        with torch.no_grad():
+            deltas_scaled = hyper_lora(support_features)
+        norm_scaled = deltas_scaled['gru_reset'].norm().item()
+        
+        # The scaled norm should be ~10x smaller
+        ratio = norm_full / (norm_scaled + 1e-10)
+        if 8.0 < ratio < 12.0:  # Allow some tolerance
+            test_passed(f"delta_scale affects output: ratio={ratio:.2f} (expected ~10)")
+        else:
+            test_failed(f"delta_scale affects output", f"ratio={ratio:.2f}, expected ~10")
+        
+        # Verify delta_scale attribute exists
+        if hasattr(hyper_lora, 'delta_scale'):
+            test_passed("HyperLoRA has delta_scale attribute")
+        else:
+            test_failed("HyperLoRA has delta_scale attribute", "Attribute not found")
+            
+    except ImportError as e:
+        test_failed("Import HyperLoRA", str(e))
+    except Exception as e:
+        test_failed("HyperLoRA delta_scale test", str(e))
+
+
+def test_lr_composability():
+    """Test 7: Verify LR factors are composable (Patch 5)."""
+    print("\n" + "=" * 60)
+    print("TEST 7: LR Composability Check (Patch 5)")
+    print("=" * 60)
+    
+    train_script = project_root / "scripts" / "train_rlan.py"
+    
+    with open(train_script, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Check for composable LR factor tracking
+    if "'base_lrs'" in content:
+        test_passed("base_lrs tracked for composable restoration")
+    else:
+        test_failed("base_lrs tracked", "Not found in train_rlan.py")
+    
+    if "'activation_factor'" in content:
+        test_passed("activation_factor tracked for composable LR")
+    else:
+        test_failed("activation_factor tracked", "Not found")
+    
+    if "'explosion_factor'" in content:
+        test_passed("explosion_factor tracked for composable LR")
+    else:
+        test_failed("explosion_factor tracked", "Not found")
+    
+    # Check that LR is computed from base * factors, not divided
+    if "base_lr * total_factor" in content:
+        test_passed("LR computed as base_lr * total_factor")
+    else:
+        test_failed("LR computed as base_lr * total_factor", "Pattern not found")
+
+
+def test_max_grad_norm_tracking():
+    """Test 8: Verify max grad norm is tracked across epoch (Patch 5)."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Max Grad Norm Tracking (Patch 5)")
+    print("=" * 60)
+    
+    train_script = project_root / "scripts" / "train_rlan.py"
+    
+    with open(train_script, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Check for max_grad_norm_before_clip initialization
+    if "'max_grad_norm_before_clip': 0.0" in content:
+        test_passed("max_grad_norm_before_clip initialized in diagnostics")
+    else:
+        test_failed("max_grad_norm_before_clip initialized", "Not found")
+    
+    # Check for max tracking logic
+    if "max(epoch_diagnostics.get('max_grad_norm_before_clip'" in content or \
+       "max_grad_norm_before_clip'] = max(" in content:
+        test_passed("max grad norm updated with max()")
+    else:
+        test_failed("max grad norm updated with max()", "Pattern not found")
+
+
+def test_nan_backoff_implementation():
+    """Test 9: Verify NaN-driven meta-loss backoff is implemented (Patch 5)."""
+    print("\n" + "=" * 60)
+    print("TEST 9: NaN Backoff Implementation (Patch 5)")
+    print("=" * 60)
+    
+    train_script = project_root / "scripts" / "train_rlan.py"
+    
+    with open(train_script, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Check for nan_backoff_state initialization
+    if "nan_backoff_state" in content:
+        test_passed("nan_backoff_state is defined")
+    else:
+        test_failed("nan_backoff_state is defined", "Not found")
+    
+    if "'equiv_weight_factor'" in content:
+        test_passed("equiv_weight_factor tracked for backoff")
+    else:
+        test_failed("equiv_weight_factor tracked", "Not found")
+    
+    if "'loo_weight_factor'" in content:
+        test_passed("loo_weight_factor tracked for backoff")
+    else:
+        test_failed("loo_weight_factor tracked", "Not found")
+    
+    if "NaN BACKOFF TRIGGERED" in content:
+        test_passed("NaN backoff trigger message exists")
+    else:
+        test_failed("NaN backoff trigger message", "Not found")
+    
+    # Verify true consecutive NaN detection (not just total count)
+    if "max_consecutive_nan_streak" in content:
+        test_passed("max_consecutive_nan_streak tracked (true consecutive detection)")
+    else:
+        test_failed("max_consecutive_nan_streak tracked", "Not found - backoff may use total count instead of consecutive")
+    
+    # Verify backoff trigger uses consecutive streak
+    if "consecutive_nan_streak = train_losses.get('max_consecutive_nan_streak'" in content:
+        test_passed("Backoff trigger uses consecutive streak (not total nan_batches)")
+    else:
+        test_failed("Backoff uses consecutive streak", "Trigger may use total count instead of consecutive")
+
+
 def run_all_tests():
     """Run all tests and print summary."""
     print("\n" + "=" * 60)
@@ -451,6 +611,12 @@ def run_all_tests():
     test_lr_management()
     test_backward_compatibility()
     test_phase_order()
+    
+    # Patch 5: New behavioral tests
+    test_hyperlora_delta_scale_behavior()
+    test_lr_composability()
+    test_max_grad_norm_tracking()
+    test_nan_backoff_implementation()
     
     # Print summary
     print("\n" + "=" * 60)

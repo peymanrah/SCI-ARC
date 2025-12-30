@@ -1261,6 +1261,8 @@ def train_epoch(
     num_classes = 10  # Colors 0-9
     epoch_diagnostics = {
         # Gradient flow (are gradients reaching each module?)
+        # Patch 2 (Dec 2025): Track max grad norm across entire epoch
+        'max_grad_norm_before_clip': 0.0,  # Max grad norm seen this epoch (for backoff)
         'dsc_grad_norm_sum': 0.0,           # Gradient norm flowing to DSC
         'stop_predictor_grad_norm_sum': 0.0, # Gradient norm to stop_predictor specifically
         'encoder_grad_norm_sum': 0.0,        # Gradient norm to encoder
@@ -1378,6 +1380,7 @@ def train_epoch(
     optimizer.zero_grad()
     nan_batches = 0  # Track NaN occurrences for diagnostics
     consecutive_nan = 0  # Track consecutive NaN for detecting model corruption
+    max_consecutive_nan_streak = 0  # Track peak consecutive NaN streak for backoff (Patch 4 fix)
     max_consecutive_nan = 10  # Abort if this many consecutive NaN (model is corrupted)
     
     # Wrap dataloader with CUDA prefetcher for async data transfer
@@ -1599,6 +1602,7 @@ def train_epoch(
                 optimizer.zero_grad()  # Clear any partial gradients
                 nan_batches += 1
                 consecutive_nan += 1
+                max_consecutive_nan_streak = max(max_consecutive_nan_streak, consecutive_nan)  # Track peak streak
                 if consecutive_nan >= max_consecutive_nan:
                     print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
                     print(f"[ERROR] Aborting epoch to prevent further corruption.")
@@ -1648,6 +1652,7 @@ def train_epoch(
                     # Skip this batch
                     nan_batches += 1
                     consecutive_nan += 1
+                    max_consecutive_nan_streak = max(max_consecutive_nan_streak, consecutive_nan)  # Track peak streak
                     if consecutive_nan >= max_consecutive_nan:
                         print(f"[ERROR] {max_consecutive_nan} consecutive CUDA errors - cannot recover!")
                         raise
@@ -1687,6 +1692,13 @@ def train_epoch(
                         epoch_diagnostics['grad_norm_before_clip'] = total_grad_norm_before
                         epoch_diagnostics['grad_was_clipped'] = total_grad_norm_before > gradient_clip
                     
+                    # Patch 2 (Dec 2025): Track max grad norm across entire epoch
+                    # This ensures we catch explosions even if they happen later in epoch
+                    epoch_diagnostics['max_grad_norm_before_clip'] = max(
+                        epoch_diagnostics.get('max_grad_norm_before_clip', 0.0),
+                        total_grad_norm_before
+                    )
+                    
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
                 
                 # Check for NaN/Inf gradients AFTER unscaling but BEFORE optimizer step
@@ -1705,6 +1717,7 @@ def train_epoch(
                     scaler.update()
                     nan_batches += 1
                     consecutive_nan += 1
+                    max_consecutive_nan_streak = max(max_consecutive_nan_streak, consecutive_nan)  # Track peak streak
                     if consecutive_nan >= max_consecutive_nan:
                         print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
                         print(f"[ERROR] Aborting epoch to prevent further corruption.")
@@ -1792,6 +1805,7 @@ def train_epoch(
                 optimizer.zero_grad()  # Clear any partial gradients
                 nan_batches += 1
                 consecutive_nan += 1
+                max_consecutive_nan_streak = max(max_consecutive_nan_streak, consecutive_nan)  # Track peak streak
                 if consecutive_nan >= max_consecutive_nan:
                     print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
                     print(f"[ERROR] Aborting epoch to prevent further corruption.")
@@ -1822,6 +1836,12 @@ def train_epoch(
                     epoch_diagnostics['grad_norm_before_clip'] = total_grad_norm_before
                     epoch_diagnostics['grad_was_clipped'] = gradient_clip > 0 and total_grad_norm_before > gradient_clip
                 
+                # Patch 2 (Dec 2025): Track max grad norm across entire epoch
+                epoch_diagnostics['max_grad_norm_before_clip'] = max(
+                    epoch_diagnostics.get('max_grad_norm_before_clip', 0.0),
+                    total_grad_norm_before
+                )
+                
                 if gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
                 
@@ -1837,6 +1857,7 @@ def train_epoch(
                     optimizer.zero_grad()
                     nan_batches += 1
                     consecutive_nan += 1
+                    max_consecutive_nan_streak = max(max_consecutive_nan_streak, consecutive_nan)  # Track peak streak
                     if consecutive_nan >= max_consecutive_nan:
                         print(f"[ERROR] {max_consecutive_nan} consecutive NaN batches - model weights likely corrupted!")
                         print(f"[ERROR] Aborting epoch to prevent further corruption.")
@@ -2490,6 +2511,7 @@ def train_epoch(
     total_losses['total_samples'] = total_samples
     total_losses['num_batches'] = num_batches
     total_losses['nan_batches'] = nan_batches  # Track NaN occurrences
+    total_losses['max_consecutive_nan_streak'] = max_consecutive_nan_streak  # Peak consecutive NaN (for backoff)
     
     # Log NaN batches if any occurred
     if nan_batches > 0:
@@ -3773,12 +3795,31 @@ Config Overrides:
     grad_explosion_cooldown_epochs = config.get('training', {}).get('grad_explosion_cooldown_epochs', 2)
     
     # Track activation state for LR management
+    # Patch 3 (Dec 2025): Composable LR factors - avoids over-restore bugs
+    # We track base LR and multiplicative factors separately, then compute
+    # actual LR as: base_lr * activation_factor * explosion_factor
+    # This prevents double-undo when multiple reductions overlap.
     activation_lr_state = {
         'reduced': False,
         'reduction_epoch': -1,
         'original_lr': config['training']['learning_rate'],
         'grad_explosion_cooldown': 0,  # Countdown epochs after gradient explosion
+        # Patch 3: Per-param-group base LRs for composable restoration
+        'base_lrs': [pg.get('lr', config['training']['learning_rate']) for pg in optimizer.param_groups],
+        'activation_factor': 1.0,  # Multiplier for activation reduction
+        'explosion_factor': 1.0,   # Multiplier for grad explosion reduction
     }
+    
+    # Patch 4 (Dec 2025): NaN-driven meta-loss backoff state
+    # When consecutive NaNs occur, we reduce meta-loss weights to stabilize.
+    # This implements the documented "3 consecutive NaN → halve newest meta-loss" rule.
+    nan_backoff_state = {
+        'equiv_weight_factor': 1.0,   # Current multiplier for equiv loss
+        'loo_weight_factor': 1.0,     # Current multiplier for LOO loss
+        'nan_backoff_active': False,  # Whether backoff is currently in effect
+        'nan_backoff_epochs': 0,      # Cooldown epochs remaining
+    }
+    nan_backoff_threshold = 3  # Consecutive NaN batches to trigger backoff
     
     if use_loo or use_equivariance:
         print(f"\n{'='*60}")
@@ -3945,33 +3986,44 @@ Config Overrides:
         )
         
         if is_activation_epoch and not activation_lr_state['reduced']:
-            # Apply LR reduction
-            original_lr = activation_lr_state['original_lr']
-            reduced_lr = original_lr * activation_lr_reduction
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = param_group['lr'] * activation_lr_reduction
+            # Apply LR reduction using composable factor (Patch 3)
+            activation_lr_state['activation_factor'] = activation_lr_reduction
+            # Recompute all LRs from base
+            for i, param_group in enumerate(optimizer.param_groups):
+                base_lr = activation_lr_state['base_lrs'][i]
+                total_factor = activation_lr_state['activation_factor'] * activation_lr_state['explosion_factor']
+                param_group['lr'] = base_lr * total_factor
             activation_lr_state['reduced'] = True
             activation_lr_state['reduction_epoch'] = epoch
-            print(f"  [LR] Reduced to {reduced_lr:.2e} (×{activation_lr_reduction}) for stability")
+            effective_lr = activation_lr_state['original_lr'] * activation_lr_state['activation_factor']
+            print(f"  [LR] Reduced to {effective_lr:.2e} (×{activation_lr_reduction}) for stability")
         
-        # Recover LR after recovery period
+        # Recover LR after recovery period (Patch 3: use composable factors)
         if activation_lr_state['reduced']:
             epochs_since_reduction = epoch - activation_lr_state['reduction_epoch']
             if epochs_since_reduction >= activation_lr_recovery_epochs:
-                original_lr = activation_lr_state['original_lr']
-                for param_group in optimizer.param_groups:
-                    # Restore proportionally (handles per-module multipliers)
-                    param_group['lr'] = param_group['lr'] / activation_lr_reduction
+                # Restore activation factor to 1.0
+                activation_lr_state['activation_factor'] = 1.0
+                # Recompute all LRs from base
+                for i, param_group in enumerate(optimizer.param_groups):
+                    base_lr = activation_lr_state['base_lrs'][i]
+                    total_factor = activation_lr_state['activation_factor'] * activation_lr_state['explosion_factor']
+                    param_group['lr'] = base_lr * total_factor
                 activation_lr_state['reduced'] = False
                 print(f"  [LR] Restored to original after {activation_lr_recovery_epochs} epochs recovery")
         
-        # Gradient explosion cooldown countdown
+        # Gradient explosion cooldown countdown (Patch 3: use composable factors)
         if activation_lr_state['grad_explosion_cooldown'] > 0:
             activation_lr_state['grad_explosion_cooldown'] -= 1
             if activation_lr_state['grad_explosion_cooldown'] == 0:
                 print(f"  [LR] Gradient explosion cooldown ended, restoring LR")
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = param_group['lr'] / grad_explosion_lr_reduction
+                # Restore explosion factor to 1.0
+                activation_lr_state['explosion_factor'] = 1.0
+                # Recompute all LRs from base
+                for i, param_group in enumerate(optimizer.param_groups):
+                    base_lr = activation_lr_state['base_lrs'][i]
+                    total_factor = activation_lr_state['activation_factor'] * activation_lr_state['explosion_factor']
+                    param_group['lr'] = base_lr * total_factor
         
         # ================================================================
         # PHASE 2: Activate Context Path (SolverContext + CrossAttn)
@@ -4010,10 +4062,10 @@ Config Overrides:
             print(f"PHASE 3: HYPERLORA ACTIVATED (epoch {epoch + 1})")
             print(f"{'='*60}")
             model.hyperlora_active = True
-            # Set initial warmup scale
+            # Set initial warmup scale (Patch 1: use delta_scale which affects forward)
             if hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
-                model.hyper_lora.init_scale = hyperlora_warmup_start_scale
-                print(f"  HyperLoRA: Starting with init_scale={hyperlora_warmup_start_scale}")
+                model.hyper_lora.delta_scale = hyperlora_warmup_start_scale
+                print(f"  HyperLoRA: Starting with delta_scale={hyperlora_warmup_start_scale}")
                 print(f"  Warmup: {hyperlora_warmup_start_scale} → {hyperlora_warmup_end_scale} over {hyperlora_warmup_epochs} epochs")
             else:
                 print(f"  HyperLoRA: LoRA deltas NOW CONTRIBUTING to forward pass")
@@ -4024,17 +4076,17 @@ Config Overrides:
                 print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
             print(f"{'='*60}\n")
         
-        # HyperLoRA warmup: linearly ramp init_scale
+        # HyperLoRA warmup: linearly ramp delta_scale (Patch 1: use delta_scale)
         if use_hyperlora and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
             if epoch >= meta_learning_start_epoch and epoch < meta_learning_start_epoch + hyperlora_warmup_epochs:
                 warmup_progress = (epoch - meta_learning_start_epoch) / max(hyperlora_warmup_epochs, 1)
                 current_scale = hyperlora_warmup_start_scale + warmup_progress * (hyperlora_warmup_end_scale - hyperlora_warmup_start_scale)
-                model.hyper_lora.init_scale = current_scale
+                model.hyper_lora.delta_scale = current_scale
                 if epoch == meta_learning_start_epoch or (epoch - meta_learning_start_epoch) % 2 == 0:
-                    print(f"  [HyperLoRA Warmup] epoch {epoch + 1}: init_scale = {current_scale:.4f}")
+                    print(f"  [HyperLoRA Warmup] epoch {epoch + 1}: delta_scale = {current_scale:.4f}")
             elif epoch == meta_learning_start_epoch + hyperlora_warmup_epochs:
-                model.hyper_lora.init_scale = hyperlora_warmup_end_scale
-                print(f"  [HyperLoRA Warmup Complete] init_scale = {hyperlora_warmup_end_scale}")
+                model.hyper_lora.delta_scale = hyperlora_warmup_end_scale
+                print(f"  [HyperLoRA Warmup Complete] delta_scale = {hyperlora_warmup_end_scale}")
         
         # STAGED EQUIVARIANCE LOSS: Activate at equiv_start_epoch
         if use_equivariance and epoch == equiv_start_epoch:
@@ -4137,6 +4189,55 @@ Config Overrides:
             loo_start_epoch=loo_start_epoch, equiv_start_epoch=equiv_start_epoch,
         )
         
+        # ================================================================
+        # PATCH 4: NaN-Driven Meta-Loss Backoff (Dec 2025)
+        # ================================================================
+        # If consecutive NaN streak exceeded threshold, reduce meta-loss weights.
+        # This implements the documented "3 consecutive NaN → halve newest meta-loss" rule.
+        # We use max_consecutive_nan_streak (true consecutive detection) not total nan_batches.
+        # Priority: reduce equivariance first (less critical), then LOO.
+        consecutive_nan_streak = train_losses.get('max_consecutive_nan_streak', 0)
+        if consecutive_nan_streak >= nan_backoff_threshold and not nan_backoff_state['nan_backoff_active']:
+            print(f"\n  ⚠️  NaN BACKOFF TRIGGERED!")
+            print(f"      {consecutive_nan_streak} consecutive NaN batches (threshold={nan_backoff_threshold})")
+            
+            # Reduce newest meta-loss first (equivariance), then LOO if already reduced
+            if nan_backoff_state['equiv_weight_factor'] > 0.25:
+                nan_backoff_state['equiv_weight_factor'] *= 0.5
+                print(f"      Reducing equivariance weight factor: {nan_backoff_state['equiv_weight_factor']:.2f}")
+            elif nan_backoff_state['loo_weight_factor'] > 0.25:
+                nan_backoff_state['loo_weight_factor'] *= 0.5
+                print(f"      Reducing LOO weight factor: {nan_backoff_state['loo_weight_factor']:.2f}")
+            else:
+                print(f"      Meta-loss weights already minimal, cannot reduce further")
+            
+            nan_backoff_state['nan_backoff_active'] = True
+            nan_backoff_state['nan_backoff_epochs'] = 3  # Cooldown before restoring
+            
+            # Update the actual loss function weights if they exist
+            if effective_equiv_fn is not None and hasattr(effective_equiv_fn, 'config'):
+                effective_equiv_fn.config.loss_weight = equiv_weight * nan_backoff_state['equiv_weight_factor']
+            if effective_loo_fn is not None and hasattr(effective_loo_fn, 'config'):
+                effective_loo_fn.config.loss_weight = loo_weight * nan_backoff_state['loo_weight_factor']
+        
+        # Restore meta-loss weights after cooldown if NaNs stopped
+        if nan_backoff_state['nan_backoff_active']:
+            if epoch_nan_batches == 0:
+                nan_backoff_state['nan_backoff_epochs'] -= 1
+                if nan_backoff_state['nan_backoff_epochs'] <= 0:
+                    # Gradually restore weights
+                    old_equiv = nan_backoff_state['equiv_weight_factor']
+                    old_loo = nan_backoff_state['loo_weight_factor']
+                    nan_backoff_state['equiv_weight_factor'] = min(1.0, old_equiv * 1.5)
+                    nan_backoff_state['loo_weight_factor'] = min(1.0, old_loo * 1.5)
+                    
+                    if nan_backoff_state['equiv_weight_factor'] >= 1.0 and nan_backoff_state['loo_weight_factor'] >= 1.0:
+                        nan_backoff_state['nan_backoff_active'] = False
+                        print(f"  [NaN Backoff] Weights fully restored")
+                    else:
+                        nan_backoff_state['nan_backoff_epochs'] = 2  # More cooldown
+                        print(f"  [NaN Backoff] Partial restore: equiv={nan_backoff_state['equiv_weight_factor']:.2f}, loo={nan_backoff_state['loo_weight_factor']:.2f}")
+        
         # Log epoch peak memory and compare to previous epochs
         if device.type == 'cuda':
             torch.cuda.synchronize()
@@ -4189,20 +4290,27 @@ Config Overrides:
         # ================================================================
         # GRADIENT EXPLOSION BACKOFF (Safety mechanism)
         # ================================================================
-        # If grad_norm > threshold * clip, reduce LR to prevent instability
+        # Patch 2 (Dec 2025): Use max_grad_norm_before_clip (whole epoch max)
+        # instead of single-step snapshot to catch late-epoch explosions
         diagnostics = train_losses.get('diagnostics', {})
-        grad_norm_before = diagnostics.get('grad_norm_before_clip', 0.0)
+        grad_norm_before = diagnostics.get('max_grad_norm_before_clip', 
+                                            diagnostics.get('grad_norm_before_clip', 0.0))
         grad_clip = config['training']['gradient_clip']
         
         if grad_norm_before > grad_explosion_threshold * grad_clip:
-            # Trigger gradient explosion backoff
+            # Trigger gradient explosion backoff (Patch 3: use composable factors)
             if activation_lr_state['grad_explosion_cooldown'] == 0:
                 print(f"\n  ⚠️  GRADIENT EXPLOSION DETECTED!")
-                print(f"      Grad norm: {grad_norm_before:.1f} > {grad_explosion_threshold}x clip ({grad_explosion_threshold * grad_clip:.1f})")
+                print(f"      Max grad norm: {grad_norm_before:.1f} > {grad_explosion_threshold}x clip ({grad_explosion_threshold * grad_clip:.1f})")
                 print(f"      Applying LR reduction: ×{grad_explosion_lr_reduction}")
                 
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = param_group['lr'] * grad_explosion_lr_reduction
+                # Apply explosion factor
+                activation_lr_state['explosion_factor'] = grad_explosion_lr_reduction
+                # Recompute all LRs from base
+                for i, param_group in enumerate(optimizer.param_groups):
+                    base_lr = activation_lr_state['base_lrs'][i]
+                    total_factor = activation_lr_state['activation_factor'] * activation_lr_state['explosion_factor']
+                    param_group['lr'] = base_lr * total_factor
                 
                 activation_lr_state['grad_explosion_cooldown'] = grad_explosion_cooldown_epochs
                 print(f"      Cooldown: {grad_explosion_cooldown_epochs} epochs before LR restoration")

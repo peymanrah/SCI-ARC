@@ -203,6 +203,13 @@ class HyperLoRA(nn.Module):
         self.rank = rank
         self.scaling = scaling
         
+        # Runtime delta scaling for warmup (Patch 1: Dec 2025)
+        # This allows training to gradually ramp up HyperLoRA influence
+        # without changing model initialization. Setting delta_scale < 1.0
+        # attenuates all predicted weight deltas proportionally.
+        # Memory-neutral: single float, no extra VRAM.
+        self.delta_scale = 1.0  # Default: no attenuation (backward compatible)
+        
         # Context pooling: (B, N, D, H, W) → (B, D)
         self.context_pool = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),  # Will be applied per-pair
@@ -327,11 +334,14 @@ class HyperLoRA(nn.Module):
         context = self.dropout(context)
         
         # Predict LoRA deltas for each target
+        # Apply delta_scale for warmup (Patch 1: Dec 2025)
+        # This multiplicatively attenuates deltas during early training
+        scale = self.delta_scale
         deltas = {
-            'gru_reset': self.gru_reset_lora.compute_delta_w(context),
-            'gru_update': self.gru_update_lora.compute_delta_w(context),
-            'gru_candidate': self.gru_candidate_lora.compute_delta_w(context),
-            'output_head': self.output_head_lora.compute_delta_w(context),
+            'gru_reset': scale * self.gru_reset_lora.compute_delta_w(context),
+            'gru_update': scale * self.gru_update_lora.compute_delta_w(context),
+            'gru_candidate': scale * self.gru_candidate_lora.compute_delta_w(context),
+            'output_head': scale * self.output_head_lora.compute_delta_w(context),
             'context': context,  # Keep for other uses
         }
         
@@ -353,11 +363,13 @@ class HyperLoRA(nn.Module):
         context = self.dropout(context)
         
         # Predict LoRA deltas for each target
+        # Apply delta_scale for warmup (Patch 1: Dec 2025)
+        scale = self.delta_scale
         deltas = {
-            'gru_reset': self.gru_reset_lora.compute_delta_w(context),
-            'gru_update': self.gru_update_lora.compute_delta_w(context),
-            'gru_candidate': self.gru_candidate_lora.compute_delta_w(context),
-            'output_head': self.output_head_lora.compute_delta_w(context),
+            'gru_reset': scale * self.gru_reset_lora.compute_delta_w(context),
+            'gru_update': scale * self.gru_update_lora.compute_delta_w(context),
+            'gru_candidate': scale * self.gru_candidate_lora.compute_delta_w(context),
+            'output_head': scale * self.output_head_lora.compute_delta_w(context),
         }
         
         return deltas
