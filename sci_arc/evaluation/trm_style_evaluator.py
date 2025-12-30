@@ -86,6 +86,59 @@ def inverse_color_permutation(arr: np.ndarray, color_perm: np.ndarray) -> np.nda
     return inv_perm[arr]
 
 
+def inverse_translation(arr: np.ndarray, offset_r: int, offset_c: int) -> np.ndarray:
+    """
+    Undo translational augmentation by shifting content back.
+    
+    During augmentation, content was placed at (offset_r, offset_c) within a larger canvas.
+    To invert, we extract just the content region (removing the offset).
+    
+    Note: This assumes arr has already been cropped to remove padding.
+    The cropping step implicitly handles most translation inversion,
+    but if we want to reconstruct the original position, we'd need
+    the original grid dimensions. In practice, cropping is sufficient
+    for grid comparison/hashing since we only care about content equality.
+    
+    Args:
+        arr: The cropped prediction array
+        offset_r: Row offset that was applied during augmentation
+        offset_c: Column offset that was applied during augmentation
+        
+    Returns:
+        The array (unchanged after cropping, but this documents the inversion)
+    """
+    # After crop_prediction(), the content is already extracted.
+    # Translation inversion is effectively done by cropping.
+    # This function exists for API completeness and documentation.
+    return arr
+
+
+def get_translation_offset(aug_info: Dict[str, Any]) -> Tuple[int, int]:
+    """
+    Extract translation offset from aug_info, supporting both key formats.
+    
+    FIXED: Supports both:
+    - 'translational_offset': (r, c) tuple
+    - 'offset_r', 'offset_c': separate int keys
+    
+    Args:
+        aug_info: Augmentation info dictionary
+        
+    Returns:
+        (offset_r, offset_c) tuple
+    """
+    # Try tuple format first
+    if 'translational_offset' in aug_info:
+        offset = aug_info['translational_offset']
+        if isinstance(offset, (tuple, list)) and len(offset) == 2:
+            return (offset[0], offset[1])
+    
+    # Try separate keys format
+    offset_r = aug_info.get('offset_r', 0)
+    offset_c = aug_info.get('offset_c', 0)
+    return (offset_r, offset_c)
+
+
 def grid_hash(grid: np.ndarray) -> str:
     """Compute unique hash for a grid (for voting)."""
     assert grid.ndim == 2
@@ -381,22 +434,28 @@ def evaluate_with_trm_style(
     model,
     eval_loader,
     device: str = 'cuda',
-    num_augmented_views: int = 8,  # Number of augmented predictions per task
+    num_augmented_views: int = 1,  # Currently single-view; set >1 for future multi-view
 ) -> Dict[str, float]:
     """
-    Evaluate RLAN model using TRM-style aggregated voting.
+    Evaluate RLAN model using TRM-style evaluation with inverse augmentation.
     
     This function:
-    1. Generates multiple predictions per task using different augmentations
+    1. Processes each batch from eval_loader (which may already contain augmented views)
     2. Applies inverse augmentation to bring predictions to canonical space
-    3. Uses voting to select best predictions
+    3. Uses voting to aggregate predictions per task (if multiple views per task)
     4. Computes Pass@K metrics
+    
+    NOTE: Multi-view augmentation is expected to be handled by the eval_loader.
+    If you want TRM-style 8-view voting, create an eval_loader that yields
+    8 augmented versions of each task. The evaluator will aggregate them
+    via the voting mechanism in TRMStyleEvaluator.
     
     Args:
         model: RLAN model
-        eval_loader: Evaluation data loader
+        eval_loader: Evaluation data loader (must provide 'test_inputs', 'input_grids', 
+                     'output_grids', 'test_outputs', 'grid_masks', 'task_ids', 'aug_info')
         device: Device to run on
-        num_augmented_views: Number of augmented predictions per task
+        num_augmented_views: Reserved for future use (loader should provide views)
         
     Returns:
         Dict with Pass@K metrics
@@ -406,13 +465,71 @@ def evaluate_with_trm_style(
     
     with torch.no_grad():
         for batch in eval_loader:
-            # Get model prediction
-            inputs = batch['input'].to(device)
-            targets = batch['target'].to(device)
-            task_ids = batch['task_id']
-            aug_infos = batch['aug_info']
+            # FIXED: Support both old key names and new RLAN key names
+            # Old format: 'input', 'target', 'demos'
+            # New format: 'test_inputs', 'test_outputs', 'input_grids', 'output_grids'
             
-            outputs = model(inputs, batch.get('demos', None))
+            # Get test inputs (the grid to predict)
+            if 'test_inputs' in batch:
+                inputs = batch['test_inputs'].to(device)
+            elif 'input' in batch:
+                inputs = batch['input'].to(device)
+            else:
+                raise KeyError("Batch must contain 'test_inputs' or 'input' key")
+            
+            # Get ground truth targets
+            if 'test_outputs' in batch:
+                targets = batch['test_outputs'].to(device)
+            elif 'target' in batch:
+                targets = batch['target'].to(device)
+            else:
+                raise KeyError("Batch must contain 'test_outputs' or 'target' key")
+            
+            # Get task IDs
+            if 'task_ids' in batch:
+                task_ids = batch['task_ids']
+            elif 'task_id' in batch:
+                task_ids = batch['task_id']
+            else:
+                task_ids = [f"task_{i}" for i in range(inputs.shape[0])]
+            
+            # Get augmentation info
+            aug_infos = batch.get('aug_info', batch.get('aug_infos', [{'dihedral_id': 0}] * inputs.shape[0]))
+            
+            # FIXED: Extract support set (train pairs) for context-aware prediction
+            train_inputs = None
+            train_outputs = None
+            pair_mask = None
+            
+            if 'input_grids' in batch:
+                train_inputs = batch['input_grids'].to(device)
+            elif 'demos' in batch and isinstance(batch['demos'], dict):
+                train_inputs = batch['demos'].get('input_grids')
+                if train_inputs is not None:
+                    train_inputs = train_inputs.to(device)
+            
+            if 'output_grids' in batch:
+                train_outputs = batch['output_grids'].to(device)
+            elif 'demos' in batch and isinstance(batch['demos'], dict):
+                train_outputs = batch['demos'].get('output_grids')
+                if train_outputs is not None:
+                    train_outputs = train_outputs.to(device)
+            
+            if 'grid_masks' in batch:
+                pair_mask = batch['grid_masks'].to(device)
+            elif 'demos' in batch and isinstance(batch['demos'], dict):
+                pair_mask = batch['demos'].get('grid_masks')
+                if pair_mask is not None:
+                    pair_mask = pair_mask.to(device)
+            
+            # FIXED: Call RLAN with proper keyword arguments for context
+            # This ensures the model uses the support set for prediction
+            outputs = model(
+                input_grid=inputs,
+                train_inputs=train_inputs,
+                train_outputs=train_outputs,
+                pair_mask=pair_mask,
+            )
             
             # Handle both tensor outputs (RLAN) and dict outputs (legacy models)
             if isinstance(outputs, torch.Tensor):

@@ -1,15 +1,7 @@
-# RLAN STABLE DEV Configuration
-# ==============================
-# Development/iteration configuration for quick testing
-# Uses 50 stratified tasks with 50K samples (~625 iters/epoch)
-#
-# USE THIS CONFIG FOR:
-# - Quick iteration and debugging
-# - Testing code changes
-# - Stratified representative testing
-#
-# For production training (400K samples), use: rlan_stable_prod.yaml
-#
+# RLAN STABLE Configuration
+# ==========================
+# Production-ready configuration validated by ablation testing
+# 
 # HARDWARE TARGET: RTX 3090 (24GB VRAM), 48 virtual CPUs, 128GB RAM
 #
 # USE THIS CONFIG WHEN:
@@ -199,20 +191,15 @@ model:
   # Phase 2: Activate HPM (gate learns to open gradually)
   # Phase 3: Fine-tune with HPM retrieval enabled
   #
-  # STAGED HPM: Delayed to epoch 14 for stable staggered activation
-  # Module activation schedule:
-  #   Epoch 3: HyperLoRA
-  #   Epoch 5: SolverCrossAttention
-  #   Epoch 7: CrossAttentionInjector
-  #   Epoch 8: Equivariance loss
-  #   Epoch 12: LOO loss
-  #   Epoch 14: HPM (gives 2 epochs after LOO for stabilization)
+  # STAGED HPM: Aligned with meta_learning_start_epoch for stability
+  # HPM stays OFF during early training, then activates with meta-learning.
+  # This ensures the base model learns FG/BG distinction first.
   #
   # WARNING (Dec 2025): HPM adds significant memory (~1-2GB).
   # DISABLED temporarily to isolate memory issues from other modules.
   # =============================================================
   use_hpm: false                      # DISABLED: Testing memory without HPM first
-  hpm_start_epoch: 14                 # Activate HPM after epoch 14 (staggered, 2 epochs after LOO)
+  hpm_start_epoch: 3                  # Activate HPM after epoch 3 (aligns with meta_learning_start_epoch)
   
   # Sparse MoE Routing Configuration
   hpm_top_k: 2                        # Number of banks to route to per sample
@@ -412,29 +399,22 @@ training:
   ema_decay: 0.999  # Not used when use_ema=false
   
   # =============================================================
-  # STAGED META-LEARNING (Dec 2025 - Memory + Stability Fix)
+  # STAGED META-LEARNING (Dec 2025 - BG Collapse Fix)
   # =============================================================
-  # PROBLEM 1: Enabling LOO + Equivariance from epoch 1 destabilizes
+  # PROBLEM: Enabling LOO + Equivariance from epoch 1 destabilizes
   # early learning, causing the model to collapse to all-background.
   #
-  # PROBLEM 2: Activating HyperLoRA + SolverCrossAttention + 
-  # CrossAttentionInjector ALL AT ONCE at epoch 3 caused 12GB+ memory
-  # overflow (from 22GB to 32GB peak), crashing training at batch 367.
+  # SOLUTION: Train base model first (pure task loss), then activate
+  # meta-learning losses after the model learns basic FG/BG distinction.
   #
-  # SOLUTION: STAGGER module activation across multiple epochs:
-  # - Epoch 3: HyperLoRA only (smallest memory impact)
-  # - Epoch 5: SolverCrossAttention (2 epochs later)
-  # - Epoch 7: CrossAttentionInjector (2 more epochs later)
-  # - Epoch 8: Equivariance loss
-  # - Epoch 12: LOO loss
-  # - Epoch 14: HPM (if enabled)
+  # This parameter controls when LOO and Equivariance losses activate.
+  # The model architecture (HyperLoRA) is always present, but the
+  # auxiliary meta-learning losses are delayed.
   #
-  # This gives the memory manager time to adapt and prevents the
-  # catastrophic memory spike that caused the epoch 4 crash.
+  # NOTE: HPM also uses hpm_start_epoch (model section) for alignment.
+  # Both should typically be set to the same value for stable training.
   # =============================================================
-  meta_learning_start_epoch: 3  # HyperLoRA activates here
-  solver_context_start_epoch: 5  # SolverCrossAttention (2 epochs after HyperLoRA)
-  cross_attention_start_epoch: 7  # CrossAttentionInjector (2 epochs after SolverContext)
+  meta_learning_start_epoch: 3  # Activate HyperLoRA/SolverContext contributions
   
   # =============================================================
   # STAGED LOSS ACTIVATION (Dec 2025)
@@ -594,12 +574,7 @@ data:
   #   max_tasks: null
   #   cache_load_percent: 100
   # ==========================================================================
-  # UPDATED (Dec 2025): Use ALL 400 tasks with 50 samples each = 20K total
-  # This improves generalization (more task diversity) while keeping training fast.
-  # Previous config: 50 tasks x 1000 = 50K (caused 3% TTA consensus, 50x eval entropy gap)
-  # New config: 400 tasks x 50 = 20K (better task diversity for generalization)
-  max_tasks: null  # ALL 400 TASKS for better generalization
-  samples_per_task: 50  # 50 samples per task (was 1000) for faster iteration
+  max_tasks: 50  # DEV ITERATION: STRATIFIED 50 tasks (~50K samples)
   stratified_seed: 42  # Seed for reproducible stratified sampling
   
   # Data loading configuration
@@ -632,11 +607,12 @@ data:
   cache_samples: true
   
   # num_cached_samples is the TOTAL samples, not per-task!
-  # With 400 tasks × 50 samples = 20,000 total (250 iters/epoch @ batch 80)
-  # This is faster than 50K while providing much better task diversity.
-  num_cached_samples: 20000  # 400 tasks × 50 = 20K (250 iters/epoch @ batch 80)
+  # With max_tasks=50, you get: 50,000 / 50 = 1000 samples per task (like TRM)
+  # With max_tasks=null (production), use 400,000 for full training
+  num_cached_samples: 50000  # DEV: 50 tasks × 1000 = 50K (625 iters/epoch)
+                             # PROD: Set to 400000 with max_tasks=null
   
-  cache_path: "./cache/rlan_stable_20k_400tasks.pkl"  # DEV: 20K samples across 400 tasks
+  cache_path: "./cache/rlan_stable.pkl"  # Version tracked internally (v4+)
   
   # See max_tasks vs cache_load_percent explanation above!
   # This controls RAM usage by loading a random subset of cached samples.

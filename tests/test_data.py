@@ -129,11 +129,12 @@ class TestCollateFunction:
         assert 'grid_masks' in batch
     
     def test_batch_shapes(self, temp_arc_dir):
-        """Test batch tensor shapes."""
+        """Test batch tensor shapes with dynamic padding disabled (fixed size)."""
         dataset = SCIARCDataset(temp_arc_dir, split='training', augment=False)
         
         samples = [dataset[0], dataset[0]]
-        batch = collate_sci_arc(samples, max_size=10)
+        # FIXED: Use dynamic_padding=False to get fixed 10x10 output
+        batch = collate_sci_arc(samples, max_size=10, dynamic_padding=False)
         
         B = 2
         max_pairs = batch['num_pairs'].max().item()
@@ -142,6 +143,25 @@ class TestCollateFunction:
         assert batch['output_grids'].shape == (B, max_pairs, 10, 10)
         assert batch['test_inputs'].shape == (B, 10, 10)
         assert batch['test_outputs'].shape == (B, 10, 10)
+        assert batch['grid_masks'].shape == (B, max_pairs)
+    
+    def test_batch_shapes_dynamic_padding(self, temp_arc_dir):
+        """Test batch tensor shapes with dynamic padding enabled (memory efficient)."""
+        dataset = SCIARCDataset(temp_arc_dir, split='training', augment=False)
+        
+        samples = [dataset[0], dataset[0]]
+        # With dynamic_padding=True (default), output size matches batch content
+        batch = collate_sci_arc(samples, max_size=30, dynamic_padding=True)
+        
+        B = 2
+        max_pairs = batch['num_pairs'].max().item()
+        # Dynamic padding: actual size is min(batch_max_size, max_size)
+        effective_size = batch['batch_max_size']
+        
+        assert batch['input_grids'].shape == (B, max_pairs, effective_size, effective_size)
+        assert batch['output_grids'].shape == (B, max_pairs, effective_size, effective_size)
+        assert batch['test_inputs'].shape == (B, effective_size, effective_size)
+        assert batch['test_outputs'].shape == (B, effective_size, effective_size)
         assert batch['grid_masks'].shape == (B, max_pairs)
 
 

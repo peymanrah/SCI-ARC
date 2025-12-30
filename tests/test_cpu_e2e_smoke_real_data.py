@@ -73,7 +73,10 @@ def test_collate_sci_arc_pads_target_grids_with_ignore_index():
             break
     assert sample is not None, "Could not find a small grid needing padding in first 100 tasks"
 
-    batch = collate_sci_arc([sample], max_grid_size=30)
+    # Force fixed 30x30 padding to ensure padding regions exist.
+    # With dynamic padding enabled, effective_max can shrink to the sample size,
+    # and then there will be no padded region (so no -100 to assert on).
+    batch = collate_sci_arc([sample], max_grid_size=30, dynamic_padding=False)
     targets = batch["test_outputs"]
     assert (targets == -100).any().item(), "Expected -100 in padded target regions"
 

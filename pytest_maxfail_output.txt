@@ -1,0 +1,100 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.5, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Users\perahmat\Downloads\SCI-ARC
+configfile: pytest.ini
+testpaths: tests
+plugins: cov-7.0.0
+collected 521 items
+
+tests\test_acw_color_permutation_ignore_index_bug.py .                   [  0%]
+tests\test_arc_dataset_real_data.py ...                                  [  0%]
+tests\test_augmentation_group_invariants.py ............................ [  6%]
+.............................................................            [ 17%]
+tests\test_avgpool_vs_maxpool.py .                                       [ 18%]
+tests\test_bug_001_loo_training_not_integrated.py ...                    [ 18%]
+tests\test_bug_002_z_struct_not_returned.py .....                        [ 19%]
+tests\test_bug_003_bucketed_sampler_calls_getitem.py .                   [ 19%]
+tests\test_bug_004_memory_manager_not_integrated_train_loop.py .         [ 19%]
+tests\test_bug_005_aug_info_translation_key_mismatch.py .                [ 20%]
+tests\test_bug_fixes_dec2025.py ..............                           [ 22%]
+tests\test_bug_fixes_verification.py ..........                          [ 24%]
+tests\test_bug_fixes_verification_v2.py .............                    [ 27%]
+tests\test_comprehensive_rlan.py ...................................     [ 33%]
+tests\test_config_plumbing.py .......                                    [ 35%]
+tests\test_cpu_e2e_smoke_real_data.py ...                                [ 35%]
+tests\test_cross_attention_injector.py ........                          [ 37%]
+tests\test_data.py .....F..........                                      [ 40%]
+tests\test_dataloader_seed_reproducibility.py ..                         [ 40%]
+tests\test_dataset_config_bugs.py ....                                   [ 41%]
+tests\test_dataset_multi_test_cases.py ..                                [ 42%]
+tests\test_dynamic_padding.py ..........                                 [ 43%]
+tests\test_dynamic_padding_translational.py .............                [ 46%]
+tests\test_end_to_end_dynamic_padding.py .....                           [ 47%]
+tests\test_equivariance_loss_integration.py .....                        [ 48%]
+tests\test_hpm.py ..................................                     [ 54%]
+tests\test_hpm_integration.py .........ss..                              [ 57%]
+tests\test_hpm_smoke_real_data.py ....................                   [ 61%]
+tests\test_hyperlora_and_loo_additional_bugs.py ..                       [ 61%]
+tests\test_hyperlora_integration.py .......                              [ 62%]
+tests\test_inference_consistency.py ...                                  [ 63%]
+tests\test_loo_no_leakage.py ..                                          [ 63%]
+tests\test_loss_logger.py ................                               [ 66%]
+tests\test_memory_optimizations.py .ssssss.ssss                          [ 69%]
+tests\test_meta_learning_comprehensive.py ...................            [ 72%]
+tests\test_meta_learning_impact.py ............                          [ 75%]
+tests\test_metric_definition_consistency.py ..                           [ 75%]
+tests\test_optimizer_fix.py .                                            [ 75%]
+tests\test_packaging_entrypoints.py .                                    [ 76%]
+tests\test_phase2_integration.py ..........                              [ 77%]
+tests\test_real_data_integrity.py ...                                    [ 78%]
+tests\test_real_data_split_loading_leakage.py ..                         [ 78%]
+tests\test_reproducibility_tiny_experiment_cpu.py .                      [ 79%]
+tests\test_rlan_comprehensive_review.py ......                           [ 80%]
+tests\test_rlan_integration.py ................s                         [ 83%]
+tests\test_rlan_learning.py ........                                     [ 85%]
+tests\test_rlan_modules.py ......................                        [ 89%]
+tests\test_scientific_validity.py ...                                    [ 89%]
+tests\test_scripts_train_eval_smoke_cpu.py ...                           [ 90%]
+tests\test_smart_checkpointing.py ..                                     [ 90%]
+tests\test_smoke_rlan.py ..                                              [ 91%]
+tests\test_staged_modules.py ..........                                  [ 93%]
+tests\test_staggered_activation.py .........FF                           [ 95%]
+tests\test_stratified_sampling.py ..                                     [ 95%]
+tests\test_trainer_model_api_mismatch.py .                               [ 95%]
+tests\test_training_issues.py ..........                                 [ 97%]
+tests\test_translational_dynamic_padding.py ...........                  [ 99%]
+tests\test_trm_evaluator_voting_rank.py .                                [100%]
+
+================================== FAILURES ===================================
+____________________ TestCollateFunction.test_batch_shapes ____________________
+tests\test_data.py:141: in test_batch_shapes
+    assert batch['input_grids'].shape == (B, max_pairs, 10, 10)
+E   assert torch.Size([2, 2, 2, 2]) == (2, 2, 10, 10)
+E     
+E     At index 2 diff: 2 != 10
+E     Use -v to get more diff
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+______ TestMemoryEstimation.test_staggered_schedule_from_memory_manager _______
+tests\test_staggered_activation.py:314: in test_staggered_schedule_from_memory_manager
+    assert 'hyperlora' in schedule
+E   AssertionError: assert 'hyperlora' in {3: ['hyperlora_active'], 5: ['solver_context_active'], 7: ['cross_attention_active'], 8: ['equivariance_active'], ...}
+________ TestBackwardCompatibility.test_model_without_staggered_flags _________
+tests\test_staggered_activation.py:372: in test_model_without_staggered_flags
+    assert 'logits' in outputs
+           ^^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\torch\_tensor.py:1242: in __contains__
+    raise RuntimeError(
+E   RuntimeError: Tensor.__contains__ only supports Tensor or scalar, but you passed in a <class 'str'>.
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+=========================== short test summary info ===========================
+FAILED tests/test_data.py::TestCollateFunction::test_batch_shapes - assert to...
+FAILED tests/test_staggered_activation.py::TestMemoryEstimation::test_staggered_schedule_from_memory_manager
+FAILED tests/test_staggered_activation.py::TestBackwardCompatibility::test_model_without_staggered_flags
+============ 3 failed, 505 passed, 13 skipped in 71.65s (0:01:11) =============
+
+Cleaning up memory...
+Memory cleanup complete.

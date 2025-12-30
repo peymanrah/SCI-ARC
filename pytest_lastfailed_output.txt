@@ -1,0 +1,45 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.5, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\perahmat\Downloads\SCI-ARC\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\perahmat\Downloads\SCI-ARC
+configfile: pytest.ini
+testpaths: tests
+plugins: cov-7.0.0
+collecting ... collected 521 items / 518 deselected / 3 selected
+run-last-failure: rerun previous 3 failures
+
+tests/test_data.py::TestCollateFunction::test_batch_shapes FAILED        [ 33%]
+
+================================== FAILURES ===================================
+____________________ TestCollateFunction.test_batch_shapes ____________________
+tests\test_data.py:141: in test_batch_shapes
+    assert batch['input_grids'].shape == (B, max_pairs, 10, 10)
+E   assert torch.Size([2, 2, 2, 2]) == (2, 2, 10, 10)
+E     
+E     At index 2 diff: 2 != 10
+E     
+E     Full diff:
+E     + torch.Size([2, 2, 2, 2])
+E     - (
+E     -     2,
+E     -     2,
+E     -     10,
+E     -     10,
+E     - )
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+=========================== short test summary info ===========================
+FAILED tests/test_data.py::TestCollateFunction::test_batch_shapes - assert torch.Size([2, 2, 2, 2]) == (2, 2, 10, 10)
+  
+  At index 2 diff: 2 != 10
+  
+  Full diff:
+  + torch.Size([2, 2, 2, 2])
+  - (
+  -     2,
+  -     2,
+  -     10,
+  -     10,
+  - )
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+====================== 1 failed, 518 deselected in 2.90s ======================

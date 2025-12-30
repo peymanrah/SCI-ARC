@@ -56,6 +56,7 @@ from sci_arc.models.rlan_modules.loo_training import (
 from sci_arc.data import ARCDataset, collate_sci_arc, BucketedBatchSampler
 from sci_arc.evaluation.trm_style_evaluator import TRMStyleEvaluator
 from sci_arc.utils.gap_monitor import GapHealthMonitor
+from sci_arc.utils.memory_manager import MemoryManager, get_memory_manager
 
 # Optional wandb import
 try:
@@ -1392,6 +1393,12 @@ def train_epoch(
         if batch_idx > 0 and batch_idx % 50 == 0:
             torch.cuda.empty_cache()
         
+        # Log batch grid sizes for first 5 batches to verify dynamic padding works
+        if batch_idx < 5:
+            batch_grid_size = batch.get('batch_max_size', batch['test_inputs'].shape[-1])
+            actual_tensor_size = batch['test_inputs'].shape[-1]
+            print(f"  [Batch {batch_idx}] Grid size: {actual_tensor_size}x{actual_tensor_size} (batch_max_size={batch_grid_size})")
+        
         # Apply warmup with per-group LR preservation
         warmup_lr(optimizer, global_step, warmup_steps, base_lr, initial_lrs)
         
@@ -1875,8 +1882,9 @@ def train_epoch(
                 if reserved_mb > max_mb * 0.95:
                     print(f"  [WARNING] >95% GPU memory used! Training may slow due to shared memory.")
         
-        # Periodic cache clearing (every 10 batches)
-        if batch_idx % 10 == 0:
+        # Periodic cache clearing (every 100 batches) - less frequent to avoid perf overhead
+        # Note: torch.cuda.empty_cache() can be slow, so only do it occasionally
+        if batch_idx > 0 and batch_idx % 100 == 0:
             torch.cuda.empty_cache()
         
         # Collect diagnostics (first batch of each epoch only to avoid overhead)
@@ -3320,6 +3328,17 @@ Config Overrides:
         print(f"  GPU Total: {total_gpu_mb:.0f}MB")
         print(f"  Headroom:  {total_gpu_mb - model_reserved_mb:.0f}MB")
     
+    # ================================================================
+    # MEMORY MANAGER INTEGRATION (Bug fix: was not used before)
+    # ================================================================
+    # Initialize MemoryManager for safe batch sizing and module activation
+    memory_manager = get_memory_manager(config)
+    print(f"\n[MEMORY MANAGER] Initialized:")
+    print(f"  GPU Total: {memory_manager.gpu_total_mb:.0f}MB")
+    print(f"  Usable (with safety margin): {memory_manager.usable_mb:.0f}MB")
+    print(f"  Min batch size: {memory_manager.min_batch_size}")
+    print(f"  Max batch size: {memory_manager.max_batch_size}")
+    
     # Print parameter count
     param_counts = model.count_parameters()
     print(f"\nModel parameters:")
@@ -3520,6 +3539,31 @@ Config Overrides:
     print(f"Train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
     print(f"Eval samples: {len(eval_dataset)}, batches: {len(eval_loader)}")
     
+    # ================================================================
+    # MEMORY-AWARE BATCH SIZE VALIDATION
+    # ================================================================
+    # Use MemoryManager to validate batch size won't cause OOM
+    if device.type == 'cuda':
+        active_modules = {
+            'hyperlora_active': getattr(model, 'hyperlora_active', False),
+            'solver_context_active': getattr(model, 'solver_context_active', False),
+            'cross_attention_active': getattr(model, 'cross_attention_active', False),
+            'use_hpm': getattr(model, 'use_hpm', False),
+        }
+        safe_batch = memory_manager.get_safe_batch_size(
+            model=model,
+            active_modules=active_modules,
+            max_grid_size=max_grid_size,
+            requested_batch_size=batch_size,
+        )
+        if safe_batch < batch_size:
+            print(f"\n[MEMORY WARNING] Requested batch_size={batch_size} may cause OOM")
+            print(f"  MemoryManager suggests: {safe_batch}")
+            print(f"  Active modules: {[k for k,v in active_modules.items() if v]}")
+            print(f"  Consider reducing batch_size or using gradient accumulation")
+        else:
+            print(f"\n[MEMORY CHECK] batch_size={batch_size} is within safe limits")
+    
     # Create optimizer and scheduler (needs loader length for OneCycle)
     optimizer, scheduler = create_optimizer(model, config, steps_per_epoch=len(train_loader))
     
@@ -3654,18 +3698,24 @@ Config Overrides:
     
     # STAGED META-LEARNING: Delay LOO/Equivariance to prevent early BG collapse
     # Each loss has its own start_epoch for fine-grained control
+    # STAGGERED MODULE ACTIVATION to prevent memory spikes (12GB+ spill at epoch 4)
     meta_learning_start_epoch = config.get('training', {}).get('meta_learning_start_epoch', 3)
+    solver_context_start_epoch = config.get('training', {}).get('solver_context_start_epoch', meta_learning_start_epoch + 2)
+    cross_attention_start_epoch = config.get('training', {}).get('cross_attention_start_epoch', solver_context_start_epoch + 2)
+    
     if use_loo or use_equivariance:
         print(f"\n{'='*60}")
         print(f"STAGED META-LEARNING ENABLED (Per-Loss Scheduling)")
         print(f"{'='*60}")
-        print(f"  HyperLoRA/SolverContext: Epoch {meta_learning_start_epoch + 1}+")
+        print(f"  HyperLoRA: Epoch {meta_learning_start_epoch + 1}+")
+        print(f"  SolverCrossAttention: Epoch {solver_context_start_epoch + 1}+")
+        print(f"  CrossAttentionInjector: Epoch {cross_attention_start_epoch + 1}+")
         if use_equivariance:
             print(f"  Equivariance Loss: Epoch {equiv_start_epoch + 1}+ (weight={equiv_weight})")
-            print(f"    \u2192 Fixes dihedral invariance (currently 13% TTA consensus)")
+            print(f"    → Fixes dihedral invariance (currently 13% TTA consensus)")
         if use_loo:
             print(f"  LOO Loss: Epoch {loo_start_epoch + 1}+ (weight={loo_weight})")
-            print(f"    \u2192 Teaches few-shot generalization (fixes 60x entropy gap)")
+            print(f"    → Teaches few-shot generalization (fixes 60x entropy gap)")
         print(f"{'='*60}\n")
     
     # STAGED HPM: Delay HPM activation to align with meta-learning
@@ -3700,7 +3750,7 @@ Config Overrides:
     
     if use_hyperlora or use_solver_context or use_cross_attention_context:
         print(f"\n{'='*60}")
-        print(f"STAGED NEW MODULE CONTRIBUTIONS")
+        print(f"STAGGERED MODULE CONTRIBUTIONS (Prevents Memory Spike)")
         print(f"{'='*60}")
         if use_hyperlora:
             if start_epoch >= meta_learning_start_epoch:
@@ -3712,25 +3762,25 @@ Config Overrides:
                 print(f"    - Module trains via LOO/Equiv losses after activation")
         
         if use_solver_context:
-            if start_epoch >= meta_learning_start_epoch:
+            if start_epoch >= solver_context_start_epoch:
                 model.solver_context_active = True
                 print(f"  [SolverCrossAttention] Already past start epoch - ACTIVE")
             else:
                 model.solver_context_active = False
-                print(f"  [SolverCrossAttention] Disabled until epoch {meta_learning_start_epoch + 1}")
+                print(f"  [SolverCrossAttention] Disabled until epoch {solver_context_start_epoch + 1}")
                 print(f"    - Solver runs without cross-attention initially")
         
         # CRITICAL: CrossAttentionInjector uses Q/K/V projections that are randomly
         # initialized. During early training, this injects NOISE into features.
         # FiLM (ContextInjector) uses simple γ*features+β which is much more stable.
-        # Stage cross-attention to activate with meta-learning.
+        # Stage cross-attention to activate LAST to prevent memory spike.
         if use_cross_attention_context:
-            if start_epoch >= meta_learning_start_epoch:
+            if start_epoch >= cross_attention_start_epoch:
                 model.cross_attention_active = True
                 print(f"  [CrossAttentionInjector] Already past start epoch - ACTIVE")
             else:
                 model.cross_attention_active = False
-                print(f"  [CrossAttentionInjector] Disabled until epoch {meta_learning_start_epoch + 1}")
+                print(f"  [CrossAttentionInjector] Disabled until epoch {cross_attention_start_epoch + 1}")
                 print(f"    - Using FiLM fallback (pool+scale/shift) for stable early training")
         print(f"{'='*60}\n")
     
@@ -3797,36 +3847,49 @@ Config Overrides:
                 )
                 print(f"  New train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
         
-        # STAGED MODULE ACTIVATION: Activate HyperLoRA/SolverContext at meta_learning_start_epoch
-        if (use_hyperlora or use_solver_context or use_cross_attention_context) and epoch == meta_learning_start_epoch:
+        # STAGGERED MODULE ACTIVATION: Activate each module at its own epoch
+        # This prevents memory spike from all modules activating at once (was 12GB+ spill at epoch 4)
+        
+        # Epoch 3 (default): Activate HyperLoRA
+        if use_hyperlora and epoch == meta_learning_start_epoch:
             print(f"\n{'='*60}")
-            print(f"MODULE CONTRIBUTIONS ACTIVATED (epoch {epoch + 1})")
+            print(f"HYPERLORA ACTIVATED (epoch {epoch + 1})")
             print(f"{'='*60}")
-            
-            # Activate HyperLoRA contributions
-            if use_hyperlora:
-                model.hyperlora_active = True
-                print(f"  HyperLoRA: LoRA deltas NOW CONTRIBUTING to forward pass")
-            
-            # Activate SolverCrossAttention
-            if use_solver_context:
-                model.solver_context_active = True
-                print(f"  SolverCrossAttention: NOW ACTIVE in solver loop")
-            
-            # Activate CrossAttentionInjector (switch from FiLM fallback)
-            if use_cross_attention_context:
-                model.cross_attention_active = True
-                print(f"  CrossAttentionInjector: NOW ACTIVE (was using FiLM fallback)")
-            
-            # Log GPU memory at transition
+            model.hyperlora_active = True
+            print(f"  HyperLoRA: LoRA deltas NOW CONTRIBUTING to forward pass")
             if device.type == 'cuda':
                 torch.cuda.synchronize()
                 allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
-                reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
                 max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
-                print(f"\n  GPU MEMORY AT TRANSITION:")
-                print(f"    Allocated: {allocated_mb:.0f} MB, Reserved: {reserved_mb:.0f} MB, Total: {max_mb:.0f} MB")
-            
+                print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
+            print(f"{'='*60}\n")
+        
+        # Epoch 5 (default): Activate SolverCrossAttention
+        if use_solver_context and epoch == solver_context_start_epoch:
+            print(f"\n{'='*60}")
+            print(f"SOLVER CROSS-ATTENTION ACTIVATED (epoch {epoch + 1})")
+            print(f"{'='*60}")
+            model.solver_context_active = True
+            print(f"  SolverCrossAttention: NOW ACTIVE in solver loop")
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+                max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+                print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
+            print(f"{'='*60}\n")
+        
+        # Epoch 7 (default): Activate CrossAttentionInjector
+        if use_cross_attention_context and epoch == cross_attention_start_epoch:
+            print(f"\n{'='*60}")
+            print(f"CROSS-ATTENTION INJECTOR ACTIVATED (epoch {epoch + 1})")
+            print(f"{'='*60}")
+            model.cross_attention_active = True
+            print(f"  CrossAttentionInjector: NOW ACTIVE (was using FiLM fallback)")
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+                max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+                print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
             print(f"{'='*60}\n")
         
         # STAGED EQUIVARIANCE LOSS: Activate at equiv_start_epoch

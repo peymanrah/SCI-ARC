@@ -1,0 +1,41 @@
+﻿........................................................................ [ 13%]
+........................................................................ [ 27%]
+........................................................F............... [ 41%]
+........................................................................ [ 55%]
+.......ss.....................................................ssssss.sss [ 69%]
+s....................................................................... [ 82%]
+..s...........................................................FF........ [ 96%]
+.................                                                        [100%]
+================================== FAILURES ===================================
+____________________ TestCollateFunction.test_batch_shapes ____________________
+tests\test_data.py:141: in test_batch_shapes
+    assert batch['input_grids'].shape == (B, max_pairs, 10, 10)
+E   assert torch.Size([2, 2, 2, 2]) == (2, 2, 10, 10)
+E     
+E     At index 2 diff: 2 != 10
+E     Use -v to get more diff
+---------------------------- Captured stdout call -----------------------------
+Loaded 1 tasks from training
+______ TestMemoryEstimation.test_staggered_schedule_from_memory_manager _______
+tests\test_staggered_activation.py:314: in test_staggered_schedule_from_memory_manager
+    assert 'hyperlora' in schedule
+E   AssertionError: assert 'hyperlora' in {3: ['hyperlora_active'], 5: ['solver_context_active'], 7: ['cross_attention_active'], 8: ['equivariance_active'], ...}
+________ TestBackwardCompatibility.test_model_without_staggered_flags _________
+tests\test_staggered_activation.py:372: in test_model_without_staggered_flags
+    assert 'logits' in outputs
+           ^^^^^^^^^^^^^^^^^^^
+.venv\Lib\site-packages\torch\_tensor.py:1242: in __contains__
+    raise RuntimeError(
+E   RuntimeError: Tensor.__contains__ only supports Tensor or scalar, but you passed in a <class 'str'>.
+---------------------------- Captured stdout call -----------------------------
+[RecursiveSolver] Output head initialized: bg_bias=0.0 (NEUTRAL), fg_bias=0.0
+[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED (4 heads)
+RLAN Module Config: Enabled=[ContextEncoder, DSC, MSRE, SolverContext, HyperLoRA], Disabled=[LCR, SPH, ACT, HPM]
+=========================== short test summary info ===========================
+FAILED tests/test_data.py::TestCollateFunction::test_batch_shapes - assert to...
+FAILED tests/test_staggered_activation.py::TestMemoryEstimation::test_staggered_schedule_from_memory_manager
+FAILED tests/test_staggered_activation.py::TestBackwardCompatibility::test_model_without_staggered_flags
+3 failed, 505 passed, 13 skipped in 82.69s (0:01:22)
+
+Cleaning up memory...
+Memory cleanup complete.

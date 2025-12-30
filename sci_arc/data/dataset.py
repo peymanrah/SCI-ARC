@@ -241,25 +241,33 @@ class BucketedBatchSampler(Sampler):
         # Build buckets: map sample indices to their grid size bucket
         self._build_buckets()
     
-    def _get_sample_max_grid_size(self, idx: int) -> int:
-        """Get the maximum grid dimension for a sample.
+    def _get_max_grid_size_from_task_metadata(self, idx: int) -> Optional[int]:
+        """Get max grid size from task metadata WITHOUT calling __getitem__.
         
-        CRITICAL: For non-cached mode, we need the ORIGINAL grid size before
-        padding, not the padded tensor shape (which is always max_size).
+        This is the preferred method to avoid:
+        - RNG consumption before training starts
+        - Slowness from materializing samples just for sizing
+        - Augmentation side effects during bucket construction
         
-        We use 'original_max_size' if stored, otherwise fall back to task
-        metadata to get pre-padding sizes.
+        Returns None if metadata isn't available, triggering fallback.
         """
-        sample = self.dataset[idx]
+        # Try cached samples metadata first (fastest)
+        if hasattr(self.dataset, '_cached_samples') and self.dataset._cached_samples:
+            if idx < len(self.dataset._cached_samples):
+                sample = self.dataset._cached_samples[idx]
+                if 'original_max_size' in sample:
+                    return sample['original_max_size']
         
-        # Fast path: use stored original size if available
-        if 'original_max_size' in sample:
-            return sample['original_max_size']
+        # Try precomputed grid sizes array (if dataset computed it)
+        if hasattr(self.dataset, '_grid_sizes') and self.dataset._grid_sizes is not None:
+            if idx < len(self.dataset._grid_sizes):
+                return self.dataset._grid_sizes[idx]
         
-        # For non-cached mode, get original size from task metadata
-        # This avoids using padded tensor shapes which are all max_size
-        if hasattr(self.dataset, 'tasks') and idx < len(self.dataset.tasks):
-            task = self.dataset.tasks[idx % len(self.dataset.tasks)]
+        # Try task metadata (works for non-cached mode)
+        if hasattr(self.dataset, 'tasks') and self.dataset.tasks:
+            # Map sample index to task (may be 1:1 or many:1 depending on expand_test_pairs)
+            task_idx = idx % len(self.dataset.tasks)
+            task = self.dataset.tasks[task_idx]
             max_size = 0
             for pair in task.get('train', []):
                 if 'input' in pair:
@@ -278,7 +286,30 @@ class BucketedBatchSampler(Sampler):
             if max_size > 0:
                 return max_size
         
-        # Fallback: use tensor shapes (may be padded, less useful)
+        return None  # Fallback needed
+    
+    def _get_sample_max_grid_size(self, idx: int) -> int:
+        """Get the maximum grid dimension for a sample.
+        
+        FIXED: Prefers metadata-based sizing to avoid calling __getitem__.
+        Only falls back to __getitem__ if no metadata is available.
+        
+        CRITICAL: For non-cached mode, we need the ORIGINAL grid size before
+        padding, not the padded tensor shape (which is always max_size).
+        """
+        # Try metadata first (no __getitem__ call)
+        size_from_meta = self._get_max_grid_size_from_task_metadata(idx)
+        if size_from_meta is not None:
+            return size_from_meta
+        
+        # FALLBACK: Only call __getitem__ if metadata unavailable
+        # This path should rarely trigger with proper dataset setup
+        sample = self.dataset[idx]
+        
+        if 'original_max_size' in sample:
+            return sample['original_max_size']
+        
+        # Last resort: use tensor shapes (may be padded, less useful)
         max_size = 0
         if 'test_input' in sample:
             t = sample['test_input']
@@ -305,42 +336,44 @@ class BucketedBatchSampler(Sampler):
         return len(self.bucket_boundaries)  # Largest bucket
     
     def _build_buckets(self):
-        """Build sample index buckets based on grid sizes."""
+        """Build sample index buckets based on grid sizes.
+        
+        FIXED: Uses metadata-only sizing to avoid calling __getitem__.
+        This prevents:
+        - RNG consumption before training
+        - Slowness from materializing samples
+        - Augmentation side effects
+        """
         num_buckets = len(self.bucket_boundaries) + 1
         self.buckets = [[] for _ in range(num_buckets)]
         
-        # Sample a subset for large datasets to speed up bucket building
         dataset_len = len(self.dataset)
         
-        print(f"[BucketedBatchSampler] Building {num_buckets} buckets for {dataset_len:,} samples...")
+        print(f"[BucketedBatchSampler] Building {num_buckets} buckets for {dataset_len:,} samples (metadata-only)...")
         
-        # For cached samples, we can access grid sizes efficiently
+        metadata_hits = 0
+        fallback_count = 0
+        
         for idx in range(dataset_len):
-            # Use a fast path if dataset stores grid size metadata
-            if hasattr(self.dataset, '_cached_samples') and self.dataset._cached_samples:
-                sample = self.dataset._cached_samples[idx]
-                # Use stored original_max_size if available (before padding)
-                # This is CRITICAL: padded grids are all max_size (e.g., 30x30)
-                # but we want to bucket by ORIGINAL size for memory efficiency
-                if 'original_max_size' in sample:
-                    max_size = sample['original_max_size']
-                else:
-                    # Fallback: compute from tensor shapes (all padded, so less useful)
-                    max_size = 0
-                    if 'test_input' in sample:
-                        t = sample['test_input']
-                        if isinstance(t, torch.Tensor):
-                            max_size = max(max_size, t.shape[-1], t.shape[-2])
-                    for key in ['input_grids', 'output_grids']:
-                        if key in sample:
-                            for g in sample[key]:
-                                if isinstance(g, torch.Tensor):
-                                    max_size = max(max_size, g.shape[-1], g.shape[-2])
+            # ALWAYS try metadata first to avoid __getitem__
+            max_size = self._get_max_grid_size_from_task_metadata(idx)
+            
+            if max_size is not None:
+                metadata_hits += 1
             else:
+                # Fallback: Must call __getitem__ (logs warning once)
+                if fallback_count == 0:
+                    print(f"  [WARNING] Metadata unavailable, falling back to __getitem__ for sizing")
+                fallback_count += 1
                 max_size = self._get_sample_max_grid_size(idx)
             
             bucket_id = self._get_bucket_id(max_size)
             self.buckets[bucket_id].append(idx)
+        
+        if fallback_count > 0:
+            print(f"  [INFO] Used metadata for {metadata_hits:,}/{dataset_len:,}, fallback for {fallback_count:,}")
+        else:
+            print(f"  [OK] All {dataset_len:,} samples sized via metadata (no __getitem__ calls)")
         
         # Print bucket statistics
         for i, bucket in enumerate(self.buckets):
@@ -912,10 +945,13 @@ class ARCDataset(Dataset):
         # Initialize augmentation tracking
         # CRITICAL: Store actual permutation arrays, not just booleans!
         # This enables inverse transforms during TRM-style evaluation.
+        # FIXED: Include both 'translational_offset' and 'offset_r/offset_c' for compatibility
         aug_info = {
             'dihedral_id': 0,
             'color_perm': None,  # Store actual permutation array (not just boolean!)
             'translational_offset': (0, 0),
+            'offset_r': 0,  # Alternative key format for TRMStyleEvaluator
+            'offset_c': 0,  # Alternative key format for TRMStyleEvaluator
         }
         
         # CRITICAL ORDER: TRM applies color permutation FIRST, then dihedral
@@ -947,6 +983,8 @@ class ARCDataset(Dataset):
             if max_offset_r > 0 and max_offset_c > 0:
                 offset = (random.randint(0, max_offset_r), random.randint(0, max_offset_c))
                 aug_info['translational_offset'] = offset
+                aug_info['offset_r'] = offset[0]  # Alternative key for TRMStyleEvaluator
+                aug_info['offset_c'] = offset[1]  # Alternative key for TRMStyleEvaluator
         
         # Pad grids
         train_inputs_padded = [self._pad_grid(g, offset, is_target=False) for g in train_inputs]
@@ -1053,6 +1091,8 @@ class ARCDataset(Dataset):
             if max_offset_r > 0 and max_offset_c > 0:
                 offset = (random.randint(0, max_offset_r), random.randint(0, max_offset_c))
                 aug_info['translational_offset'] = offset
+                aug_info['offset_r'] = offset[0]  # Alternative key for TRMStyleEvaluator
+                aug_info['offset_c'] = offset[1]  # Alternative key for TRMStyleEvaluator
         
         # Pad grids (with optional translational offset)
         # CRITICAL FIX: Use is_target=False for train outputs too!
@@ -2011,19 +2051,94 @@ class SCIARCDataset(Dataset):
         return aug_inputs, aug_outputs, aug_test_in, aug_test_out, augment_info
 
 
-def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = None, is_target: bool = False) -> torch.Tensor:
+def _extract_content_region(grid: torch.Tensor, target_size: int, is_target: bool = False) -> torch.Tensor:
     """
-    Pad grid to max_size x max_size.
+    Extract the content region from a pre-padded grid.
+    
+    CRITICAL FIX (Dec 2025): Handles translational augmentation correctly.
+    When translational_augment=True, content can be placed at any offset within
+    the 30x30 canvas. A naive top-left slice would cut away actual content.
+    
+    This function finds the content bounding box and extracts it, then crops
+    or pads to target_size as needed.
     
     Args:
-        grid: Input grid tensor
+        grid: Pre-padded grid tensor (e.g., 30x30 with content somewhere inside)
+        target_size: The original content size (max dimension of actual content)
+        is_target: Whether this is a target grid (uses -100 as padding vs 10)
+    
+    Returns:
+        Cropped grid of size (target_size, target_size) or smaller if content is smaller
+    """
+    PAD_COLOR = 10
+    PADDING_IGNORE_VALUE = -100
+    
+    h, w = grid.shape
+    
+    # Determine which values are padding (not content)
+    # For inputs: PAD_COLOR=10 is padding
+    # For targets: PADDING_IGNORE_VALUE=-100 is padding
+    if is_target:
+        content_mask = (grid != PADDING_IGNORE_VALUE)
+    else:
+        content_mask = (grid != PAD_COLOR)
+    
+    # If no content found, return a small grid (edge case)
+    if not content_mask.any():
+        # Return top-left corner as fallback
+        return grid[:min(target_size, h), :min(target_size, w)]
+    
+    # Find bounding box of content
+    rows_with_content = content_mask.any(dim=1)
+    cols_with_content = content_mask.any(dim=0)
+    
+    row_indices = torch.where(rows_with_content)[0]
+    col_indices = torch.where(cols_with_content)[0]
+    
+    rmin, rmax = row_indices[0].item(), row_indices[-1].item()
+    cmin, cmax = col_indices[0].item(), col_indices[-1].item()
+    
+    # Extract the content bounding box
+    content = grid[rmin:rmax+1, cmin:cmax+1]
+    
+    # Crop to target_size if content is larger (shouldn't happen normally)
+    ch, cw = content.shape
+    if ch > target_size or cw > target_size:
+        content = content[:target_size, :target_size]
+    
+    return content
+
+
+def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = None, is_target: bool = False,
+             original_size: int = None) -> torch.Tensor:
+    """
+    Pad (or crop) grid to max_size x max_size.
+    
+    Args:
+        grid: Input grid tensor (may be pre-padded from cache)
         max_size: Target size
         pad_value: Value for padding. If None, use explicit defaults:
                    - Use -100 for targets (is_target=True) so loss ignores padding
                    - Use 10 (PAD_COLOR) for inputs so model distinguishes from black (0)
         is_target: If True and pad_value is None, use -100 for padding
+        original_size: If provided, crop to this size first before padding.
+                       This handles pre-padded tensors from cache correctly.
+                       
+    CRITICAL FIX (Dec 2025): Uses CONTENT-AWARE cropping for pre-padded grids.
+    When translational augmentation places content at a nonzero offset within
+    a 30x30 canvas, a naive top-left crop would cut away the actual content.
+    Instead, we find the content bounding box and extract that region.
     """
     h, w = grid.shape
+    
+    # If original_size provided, extract content from pre-padded grid
+    # CRITICAL: Use content-aware cropping, not naive top-left slice!
+    # This handles translational augmentation where content is offset within 30x30
+    if original_size is not None and (h > original_size or w > original_size):
+        grid = _extract_content_region(grid, original_size, is_target)
+        h, w = grid.shape
+    
+    # Now pad/crop to target size
     if h >= max_size and w >= max_size:
         return grid[:max_size, :max_size]
     
@@ -2040,20 +2155,23 @@ def pad_grid(grid: torch.Tensor, max_size: int, pad_value: int = None, is_target
     return padded
 
 
-def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = None) -> Dict[str, Any]:
+def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = None, 
+                    dynamic_padding: bool = True) -> Dict[str, Any]:
     """
     Collate function for batching variable-size ARC grids.
     
     Strategy:
-    - Pad all grids to max_size x max_size
+    - If dynamic_padding=True: Pad to the max size within THIS batch (memory efficient!)
+    - If dynamic_padding=False: Pad all grids to max_size x max_size (legacy behavior)
     - Stack into batch tensors
     - Handle variable number of train pairs with padding
     - Collect augmentation statistics for diversity logging
     
     Args:
         batch: List of samples from SCIARCDataset
-        max_size: Maximum grid size for padding
+        max_size: Maximum grid size for padding (upper bound, or fixed if dynamic_padding=False)
         max_grid_size: Alias for max_size (for compatibility)
+        dynamic_padding: If True, compute actual max from batch (default: True for memory efficiency)
     
     Returns:
         Batched dictionary with:
@@ -2066,6 +2184,7 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
         - num_pairs: [B] actual number of train pairs per sample
         - grid_masks: [B, max_pairs] mask for valid train pairs
         - aug_stats: Optional dict with augmentation statistics for this batch
+        - batch_max_size: Actual max grid size in this batch (for debugging)
     """
     # Handle both parameter names
     if max_grid_size is not None:
@@ -2076,18 +2195,47 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
     # Find max number of train pairs
     max_pairs = max(sample['num_train_pairs'] for sample in batch)
     
+    # DYNAMIC PADDING: Compute actual max grid size from samples in this batch
+    # This is critical for memory efficiency with bucketed batching!
+    if dynamic_padding:
+        batch_max_size = 1
+        for sample in batch:
+            # Check original_max_size first (stored before padding)
+            if 'original_max_size' in sample:
+                batch_max_size = max(batch_max_size, sample['original_max_size'])
+            else:
+                # Fallback: compute from tensor shapes
+                if 'test_input' in sample:
+                    t = sample['test_input']
+                    if isinstance(t, torch.Tensor):
+                        batch_max_size = max(batch_max_size, t.shape[-1], t.shape[-2])
+                    elif isinstance(t, np.ndarray):
+                        batch_max_size = max(batch_max_size, t.shape[-1], t.shape[-2])
+                for key in ['input_grids', 'output_grids']:
+                    if key in sample:
+                        for g in sample[key]:
+                            if isinstance(g, torch.Tensor):
+                                batch_max_size = max(batch_max_size, g.shape[-1], g.shape[-2])
+                            elif isinstance(g, np.ndarray):
+                                batch_max_size = max(batch_max_size, g.shape[-1], g.shape[-2])
+        # Ensure we don't exceed absolute max_size
+        effective_max = min(batch_max_size, max_size)
+    else:
+        effective_max = max_size
+        batch_max_size = max_size
+    
     # Padding constants
     PAD_COLOR = 10  # For input grids (distinguishes from black=0)
     PADDING_IGNORE_VALUE = -100  # For target grids (loss ignores)
     
-    # Initialize tensors with proper padding values
+    # Initialize tensors with proper padding values using EFFECTIVE max size
     # - Input/output grids (used by encoder/context encoder): PAD_COLOR=10
     # - Test inputs: PAD_COLOR=10
     # - Test outputs (used by loss): PADDING_IGNORE_VALUE=-100
-    input_grids = torch.full((batch_size, max_pairs, max_size, max_size), PAD_COLOR, dtype=torch.long)
-    output_grids = torch.full((batch_size, max_pairs, max_size, max_size), PAD_COLOR, dtype=torch.long)
-    test_inputs = torch.full((batch_size, max_size, max_size), PAD_COLOR, dtype=torch.long)
-    test_outputs = torch.full((batch_size, max_size, max_size), PADDING_IGNORE_VALUE, dtype=torch.long)
+    input_grids = torch.full((batch_size, max_pairs, effective_max, effective_max), PAD_COLOR, dtype=torch.long)
+    output_grids = torch.full((batch_size, max_pairs, effective_max, effective_max), PAD_COLOR, dtype=torch.long)
+    test_inputs = torch.full((batch_size, effective_max, effective_max), PAD_COLOR, dtype=torch.long)
+    test_outputs = torch.full((batch_size, effective_max, effective_max), PADDING_IGNORE_VALUE, dtype=torch.long)
     transform_families = torch.zeros(batch_size, dtype=torch.long)
     num_pairs = torch.zeros(batch_size, dtype=torch.long)
     grid_masks = torch.zeros(batch_size, max_pairs, dtype=torch.bool)
@@ -2105,15 +2253,23 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
         n_pairs = sample['num_train_pairs']
         num_pairs[i] = n_pairs
         
-        # Pad and store input/output grids
+        # Get original size for this sample (used to crop pre-padded tensors)
+        sample_original_size = sample.get('original_max_size', None)
+        
+        # Pad and store input/output grids (using effective_max for memory efficiency)
+        # Pass original_size to handle pre-padded cached tensors correctly
         for j in range(n_pairs):
-            input_grids[i, j] = pad_grid(sample['input_grids'][j], max_size)
-            output_grids[i, j] = pad_grid(sample['output_grids'][j], max_size)
+            input_grids[i, j] = pad_grid(sample['input_grids'][j], effective_max, 
+                                         original_size=sample_original_size)
+            output_grids[i, j] = pad_grid(sample['output_grids'][j], effective_max,
+                                         original_size=sample_original_size)
             grid_masks[i, j] = True
         
-        # Pad test grids
-        test_inputs[i] = pad_grid(sample['test_input'], max_size)
-        test_outputs[i] = pad_grid(sample['test_output'], max_size, is_target=True)
+        # Pad test grids (using effective_max for memory efficiency)
+        test_inputs[i] = pad_grid(sample['test_input'], effective_max,
+                                  original_size=sample_original_size)
+        test_outputs[i] = pad_grid(sample['test_output'], effective_max, is_target=True,
+                                   original_size=sample_original_size)
         
         # Transform family
         transform_families[i] = sample['transform_family']
@@ -2142,6 +2298,7 @@ def collate_sci_arc(batch: List[Dict], max_size: int = 30, max_grid_size: int = 
         'transform_families': transform_families,
         'num_pairs': num_pairs,
         'grid_masks': grid_masks,
+        'batch_max_size': effective_max,  # Track actual padding size for this batch
     }
     
     # Add augmentation stats if any samples had tracking info

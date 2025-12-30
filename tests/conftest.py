@@ -2,6 +2,8 @@
 Pytest configuration and shared fixtures.
 """
 
+import os
+
 import pytest
 import torch
 import numpy as np
@@ -10,9 +12,25 @@ import tempfile
 from pathlib import Path
 
 
-@pytest.fixture(scope="session")
-def device():
-    """Get available device."""
+@pytest.fixture
+def device(request):
+    """Get available device.
+
+    Honors `@pytest.mark.cpu` (force CPU) and `@pytest.mark.gpu` (require CUDA).
+    You can also force CPU for all tests via env var `FORCE_CPU=1`.
+    """
+
+    if os.environ.get("FORCE_CPU") == "1":
+        return torch.device("cpu")
+
+    if request.node.get_closest_marker("cpu") is not None:
+        return torch.device("cpu")
+
+    if request.node.get_closest_marker("gpu") is not None:
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        return torch.device("cuda")
+
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -124,6 +142,9 @@ def pytest_configure(config):
     """Configure pytest."""
     config.addinivalue_line(
         "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+    )
+    config.addinivalue_line(
+        "markers", "cpu: marks tests as CPU-only"
     )
     config.addinivalue_line(
         "markers", "gpu: marks tests as requiring GPU"

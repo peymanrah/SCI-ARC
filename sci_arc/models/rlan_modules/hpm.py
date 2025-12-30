@@ -649,7 +649,7 @@ class HierarchicalPrimitiveMemory(nn.Module):
         print(f"      Static: {static_names or 'None'}")
         print(f"      Dynamic: {dynamic_names or 'None'}")
         print(f"      Top-K routing: k={self.router.top_k}")
-        print(f"      Gated residual: α=0 (starts at 0 contribution)")
+        print(f"      Gated residual: alpha=0 (starts at 0 contribution)")
     
     def forward(
         self,
