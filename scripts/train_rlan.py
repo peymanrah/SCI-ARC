@@ -2846,6 +2846,10 @@ def evaluate_trm_style(
     CRITICAL FIX (Dec 2025): Actually generates all dihedral views per task!
     Previous version just iterated over dataloader samples without generating views.
     
+    OPTIMIZATION (Dec 2025): Batch all augmented views for a task together.
+    Instead of N sequential forward passes with B=1, we do 1 forward pass with B=N.
+    This gives ~N× speedup and better GPU utilization (was 2GB/24GB, now ~8-16GB).
+    
     Args:
         model: RLAN model
         eval_tasks: List of task dicts with 'train' and 'test' keys
@@ -2876,8 +2880,9 @@ def evaluate_trm_style(
     # Track Pass@K metrics
     pass_at_k_correct = {k: 0 for k in pass_ks}
     
-    # Progress logging
-    print(f"\n  [TRM-Eval] Running TTA on {total} tasks × {total_views} views = {total * total_views} forward passes...", flush=True)
+    # Progress logging - note we now do 1 forward pass per task (batched views)
+    print(f"\n  [TRM-Eval] Running TTA on {total} tasks × {total_views} views", flush=True)
+    print(f"  [TRM-Eval] BATCHED: {total} forward passes (B={total_views} each) instead of {total * total_views}", flush=True)
     
     with torch.no_grad():
         for task_idx, task in enumerate(eval_tasks):
@@ -2886,14 +2891,27 @@ def evaluate_trm_style(
                 print(f"  [TRM-Eval] Task {task_idx + 1}/{total} ({(task_idx + 1) * 100 // total}%)", flush=True)
             
             # Parse task
-            train_inputs = [np.array(p['input'], dtype=np.int64) for p in task['train']]
-            train_outputs = [np.array(p['output'], dtype=np.int64) for p in task['train']]
+            train_inputs_np = [np.array(p['input'], dtype=np.int64) for p in task['train']]
+            train_outputs_np = [np.array(p['output'], dtype=np.int64) for p in task['train']]
             test_pair = task['test'][0]
             test_input = np.array(test_pair['input'], dtype=np.int64)
             test_output = np.array(test_pair['output'], dtype=np.int64)
             
-            # Collect predictions from all augmented views
-            predictions = []  # List of (canonical_pred, confidence)
+            num_pairs = len(train_inputs_np)
+            max_pairs = 10
+            
+            # ================================================================
+            # BATCHED VIEW PREPARATION: Build all augmented views at once
+            # ================================================================
+            # We'll create tensors of shape (total_views, ...) and forward all at once
+            
+            batch_test_inputs = []      # Will be (total_views, H, W)
+            batch_train_inputs = []     # Will be (total_views, max_pairs, H, W)
+            batch_train_outputs = []    # Will be (total_views, max_pairs, H, W)
+            batch_pair_masks = []       # Will be (total_views, max_pairs)
+            
+            # Store augmentation info for inverse transforms
+            aug_infos = []  # List of (dihedral_id, color_perm) tuples
             
             for dihedral_id in range(num_dihedral):
                 for color_idx in range(num_color_perms):
@@ -2903,15 +2921,15 @@ def evaluate_trm_style(
                     
                     # Step 1: Apply color permutation FIRST (if any)
                     color_perm = None
-                    color_aug_train_in = train_inputs
-                    color_aug_train_out = train_outputs  
+                    color_aug_train_in = train_inputs_np
+                    color_aug_train_out = train_outputs_np  
                     color_aug_test_in = test_input
                     
                     if color_idx > 0:
                         color_perm = np.arange(10, dtype=np.int64)
                         color_perm[1:] = np.random.permutation(9) + 1
-                        color_aug_train_in = [color_perm[g] for g in train_inputs]
-                        color_aug_train_out = [color_perm[g] for g in train_outputs]
+                        color_aug_train_in = [color_perm[g] for g in train_inputs_np]
+                        color_aug_train_out = [color_perm[g] for g in train_outputs_np]
                         color_aug_test_in = color_perm[test_input]
                     
                     # Step 2: Apply dihedral transform SECOND
@@ -2924,14 +2942,12 @@ def evaluate_trm_style(
                     train_out_padded = [pad_grid_for_tta(g, max_size, is_target=True) for g in aug_train_out]
                     test_in_padded = pad_grid_for_tta(aug_test_in, max_size, is_target=False)
                     
-                    # Build batch tensors
+                    # Build tensors for this view
                     input_grids = torch.stack([torch.from_numpy(g) for g in train_in_padded])  # (K, H, W)
                     output_grids = torch.stack([torch.from_numpy(g) for g in train_out_padded])  # (K, H, W)
                     test_input_t = torch.from_numpy(test_in_padded)  # (H, W)
                     
                     # Create pair mask
-                    num_pairs = len(train_inputs)
-                    max_pairs = 10
                     pair_mask = torch.zeros(max_pairs, dtype=torch.bool)
                     pair_mask[:num_pairs] = True
                     
@@ -2942,41 +2958,61 @@ def evaluate_trm_style(
                         input_grids = torch.cat([input_grids, pad_in], dim=0)
                         output_grids = torch.cat([output_grids, pad_out], dim=0)
                     
-                    # Move to device
-                    input_grids = input_grids.unsqueeze(0).to(device)  # (1, K, H, W)
-                    output_grids = output_grids.unsqueeze(0).to(device)  # (1, K, H, W)
-                    test_input_t = test_input_t.unsqueeze(0).to(device)  # (1, H, W)
-                    pair_mask = pair_mask.unsqueeze(0).to(device)  # (1, K)
-                    
-                    # Get model prediction
-                    outputs = model(
-                        test_input_t,
-                        train_inputs=input_grids,
-                        train_outputs=output_grids,
-                        pair_mask=pair_mask,
-                        temperature=temperature,
-                        return_intermediates=True,
-                    )
-                    
-                    # Best-step selection: use lowest-entropy step for most confident prediction
-                    if hasattr(model, 'use_best_step_selection') and model.use_best_step_selection:
-                        all_logits = outputs.get('all_logits')
-                        if all_logits and len(all_logits) > 1:
-                            best_logits, _, _ = model.get_best_step_logits(all_logits, None, None)
-                            logits = best_logits
-                        else:
-                            logits = outputs['logits']
-                    else:
-                        logits = outputs['logits']  # (1, C, H, W)
-                    pred = logits.argmax(dim=1).squeeze(0).cpu().numpy()  # (H, W)
-                    
-                    # Inverse transform to canonical space
-                    pred_cropped = crop_prediction(pred)
-                    pred_canonical = inverse_dihedral(pred_cropped, dihedral_id)
-                    if color_perm is not None:
-                        pred_canonical = inverse_color_perm(pred_canonical, color_perm)
-                    
-                    predictions.append((pred_canonical, 1.0))  # Confidence fixed at 1.0
+                    # Collect for batching
+                    batch_test_inputs.append(test_input_t)
+                    batch_train_inputs.append(input_grids)
+                    batch_train_outputs.append(output_grids)
+                    batch_pair_masks.append(pair_mask)
+                    aug_infos.append((dihedral_id, color_perm))
+            
+            # ================================================================
+            # BATCHED FORWARD PASS: All views in one call
+            # ================================================================
+            # Stack all views into batch dimension
+            batch_test_inputs = torch.stack(batch_test_inputs).to(device)      # (V, H, W)
+            batch_train_inputs = torch.stack(batch_train_inputs).to(device)    # (V, K, H, W)
+            batch_train_outputs = torch.stack(batch_train_outputs).to(device)  # (V, K, H, W)
+            batch_pair_masks = torch.stack(batch_pair_masks).to(device)        # (V, K)
+            
+            # Single batched forward pass!
+            outputs = model(
+                batch_test_inputs,
+                train_inputs=batch_train_inputs,
+                train_outputs=batch_train_outputs,
+                pair_mask=batch_pair_masks,
+                temperature=temperature,
+                return_intermediates=True,
+            )
+            
+            # Best-step selection: use lowest-entropy step for most confident prediction
+            if hasattr(model, 'use_best_step_selection') and model.use_best_step_selection:
+                all_logits = outputs.get('all_logits')
+                if all_logits and len(all_logits) > 1:
+                    best_logits, _, _ = model.get_best_step_logits(all_logits, None, None)
+                    logits = best_logits
+                else:
+                    logits = outputs['logits']
+            else:
+                logits = outputs['logits']  # (V, C, H, W)
+            
+            # Get predictions for all views
+            preds = logits.argmax(dim=1).cpu().numpy()  # (V, H, W)
+            
+            # ================================================================
+            # INVERSE TRANSFORMS AND VOTING (still sequential per view)
+            # ================================================================
+            predictions = []  # List of (canonical_pred, confidence)
+            
+            for view_idx, (dihedral_id, color_perm) in enumerate(aug_infos):
+                pred = preds[view_idx]  # (H, W)
+                
+                # Inverse transform to canonical space
+                pred_cropped = crop_prediction(pred)
+                pred_canonical = inverse_dihedral(pred_cropped, dihedral_id)
+                if color_perm is not None:
+                    pred_canonical = inverse_color_perm(pred_canonical, color_perm)
+                
+                predictions.append((pred_canonical, 1.0))  # Confidence fixed at 1.0
             
             # Vote across predictions
             vote_counts = {}  # {hash: {'count': int, 'grid': np.array}}
