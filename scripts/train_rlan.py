@@ -513,6 +513,7 @@ def create_train_loader(
     config: dict,
     curriculum_stage: int = 0,
     max_grid_size: int = 30,
+    batch_size_override: Optional[int] = None,
 ) -> DataLoader:
     """
     Create training dataloader with optional curriculum filtering and caching.
@@ -521,6 +522,7 @@ def create_train_loader(
         config: Full configuration dict
         curriculum_stage: Curriculum stage (0=all, 1=easy, 2=medium, 3=hard)
         max_grid_size: Maximum grid size for padding
+        batch_size_override: Override batch size (used for adaptive LOO batch sizing)
     
     Returns:
         DataLoader for training
@@ -606,7 +608,12 @@ def create_train_loader(
         stratified_seed=stratified_seed,  # Seed for reproducible stratified sampling
     )
     
-    batch_size = train_cfg['batch_size']
+    # ADAPTIVE BATCH SIZE: Use override if provided (for LOO memory management)
+    if batch_size_override is not None:
+        batch_size = batch_size_override
+        print(f"  BATCH SIZE OVERRIDE: {batch_size} (adaptive LOO sizing)")
+    else:
+        batch_size = train_cfg['batch_size']
     
     # OPTIMIZATION: When using cached samples, use num_workers=0
     # Workers need to pickle/unpickle the full dataset which is slow for large caches
@@ -3520,6 +3527,8 @@ Config Overrides:
         current_curriculum_stage = 0  # 0 means all data
     
     # Create initial train loader (with curriculum stage if enabled)
+    # Note: If resuming, we might need to recreate this later with correct batch size
+    # but we don't have loo_config parsed yet. The resume logic below handles the override.
     train_loader = create_train_loader(
         config,
         curriculum_stage=current_curriculum_stage,
@@ -3670,6 +3679,37 @@ Config Overrides:
         )
         if reset_optimizer:
             print(f"Optimizer/scheduler reset for fine-tuning (starting fresh from checkpoint weights)")
+            
+    # Initialize LOO training for meta-learning (requires HyperLoRA)
+    loo_config = config.get('training', {}).get('loo_training', {})
+    use_loo = loo_config.get('enabled', False) and config.get('model', {}).get('use_hyperlora', False)
+    loo_start_epoch = loo_config.get('start_epoch', 12)  # Default: epoch 12
+    loo_weight = loo_config.get('loss_weight', 0.2)
+    loo_min_pairs = loo_config.get('min_pairs_for_loo', 2)
+    loo_max_pairs = loo_config.get('max_loo_pairs', 4)  # Cap LOO passes to prevent memory explosion
+    
+    # ADAPTIVE BATCH SIZE INITIALIZATION
+    # If resuming from a checkpoint where LOO is already active, we must start with reduced batch size
+    current_batch_size_override = None
+    if use_loo and start_epoch >= loo_start_epoch:
+        base_batch_size = train_cfg['batch_size']
+        loo_batch_size = (base_batch_size // loo_max_pairs) - 2
+        loo_batch_size = max(loo_batch_size, 4)  # Minimum batch size of 4
+        current_batch_size_override = loo_batch_size
+        print(f"\n{'='*60}")
+        print(f"RESUMING WITH ADAPTIVE BATCH SIZE (LOO active)")
+        print(f"{'='*60}")
+        print(f"  Original batch: {base_batch_size}")
+        print(f"  LOO batch: {loo_batch_size}")
+        print(f"{'='*60}\n")
+        
+        # Recreate loader immediately if resuming into LOO phase
+        train_loader = create_train_loader(
+            config,
+            curriculum_stage=current_curriculum_stage,
+            max_grid_size=max_grid_size,
+            batch_size_override=current_batch_size_override,
+        )
     
     # Initialize EMA for stable evaluation
     # NOTE: Default is False to match rlan_stable.yaml (EMA disabled for short training)
@@ -3680,21 +3720,17 @@ Config Overrides:
         ema = EMAHelper(model, mu=ema_decay, device=device)
         print(f"EMA enabled with decay={ema_decay}")
     
-    # Initialize LOO training for meta-learning (requires HyperLoRA)
-    loo_config = config.get('training', {}).get('loo_training', {})
-    use_loo = loo_config.get('enabled', False) and config.get('model', {}).get('use_hyperlora', False)
-    loo_start_epoch = loo_config.get('start_epoch', 12)  # Default: epoch 12
-    loo_weight = loo_config.get('loss_weight', 0.2)
-    loo_min_pairs = loo_config.get('min_pairs_for_loo', 2)
+    # Initialize LOO training loss function
     loo_loss_fn = None
     if use_loo:
         loo_loss_fn = LOOTrainingLoss(
             config=LOOConfig(
                 loss_weight=loo_weight,
                 min_pairs_for_loo=loo_min_pairs,
+                max_loo_pairs=loo_max_pairs,
             )
         )
-        print(f"LOO training configured: weight={loo_weight}, min_pairs={loo_min_pairs}, start_epoch={loo_start_epoch}")
+        print(f"LOO training configured: weight={loo_weight}, min_pairs={loo_min_pairs}, max_pairs={loo_max_pairs}, start_epoch={loo_start_epoch}")
     
     # Initialize equivariance training (consistency across augmentations)
     equiv_config = config.get('training', {}).get('equivariance_training', {})
@@ -3831,6 +3867,10 @@ Config Overrides:
         'exact_match_pct': [],     # Exact match percentage (should increase)
     }
     
+    # ADAPTIVE BATCH SIZE TRACKING
+    # After LOO activation, batch size is reduced to prevent OOM
+    current_batch_size_override = None  # None = use config batch_size
+    
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
         
@@ -3862,6 +3902,7 @@ Config Overrides:
                     config,
                     curriculum_stage=current_curriculum_stage,
                     max_grid_size=max_grid_size,
+                    batch_size_override=current_batch_size_override,  # Preserve LOO batch size if active
                 )
                 print(f"  New train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
         
@@ -3937,8 +3978,37 @@ Config Overrides:
             print(f"{'='*60}")
             print(f"  Weight: {loo_weight}")
             print(f"  Min pairs required: {loo_min_pairs}")
+            print(f"  Max LOO passes: {loo_max_pairs}")
             print(f"  Purpose: Teach few-shot generalization (fix 60x entropy gap)")
             print(f"  Expected effect: Generalize from N-1 examples to Nth")
+            
+            # ================================================================
+            # ADAPTIVE BATCH SIZE: Reduce batch size when LOO activates
+            # ================================================================
+            # LOO runs N forward passes per sample, multiplying memory usage.
+            # Formula: loo_batch_size = floor(original_batch / max_loo_pairs) - 2
+            # The -2 provides headroom for HPM overhead (~2GB static memory).
+            base_batch_size = train_cfg['batch_size']
+            loo_batch_size = (base_batch_size // loo_max_pairs) - 2
+            loo_batch_size = max(loo_batch_size, 4)  # Minimum batch size of 4
+            
+            print(f"\n  ADAPTIVE BATCH SIZE:")
+            print(f"    Original batch: {base_batch_size}")
+            print(f"    LOO batch: floor({base_batch_size} / {loo_max_pairs}) - 2 = {loo_batch_size}")
+            print(f"    Memory multiplier: {loo_max_pairs}x forward passes")
+            print(f"    Recreating DataLoader with reduced batch size...")
+            
+            # Track current batch size for future DataLoader recreations (curriculum transitions)
+            current_batch_size_override = loo_batch_size
+            
+            # Recreate DataLoader with reduced batch size
+            train_loader = create_train_loader(
+                config,
+                curriculum_stage=current_curriculum_stage,
+                max_grid_size=max_grid_size,
+                batch_size_override=loo_batch_size,
+            )
+            print(f"    New batches per epoch: {len(train_loader)}")
             
             if device.type == 'cuda':
                 torch.cuda.synchronize()
@@ -3946,8 +4016,8 @@ Config Overrides:
                 reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
                 max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
                 print(f"\n  GPU MEMORY: {allocated_mb:.0f}MB alloc, {reserved_mb:.0f}MB reserved / {max_mb:.0f}MB")
-                print(f"  NOTE: LOO does N forward passes per sample - expect significant memory increase")
-                print(f"  If OOM occurs, reduce batch_size or set enabled: false")
+                print(f"  NOTE: LOO does {loo_max_pairs} forward passes per sample")
+                print(f"  Effective samples per step: {loo_batch_size} × {loo_max_pairs} = {loo_batch_size * loo_max_pairs}")
             
             print(f"{'='*60}\n")
         

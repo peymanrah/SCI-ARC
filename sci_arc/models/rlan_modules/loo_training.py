@@ -30,6 +30,7 @@ class LOOConfig:
     enabled: bool = True
     loss_weight: float = 0.5  # Weight of LOO loss relative to task loss
     min_pairs_for_loo: int = 2  # Minimum training pairs needed for LOO
+    max_loo_pairs: int = 4  # Maximum LOO passes to cap memory (ARC max is ~5)
     use_weighted_holdout: bool = True  # Weight harder holdouts more
 
 
@@ -231,7 +232,12 @@ class LOOTrainingLoss(nn.Module):
         # If no scaler: accumulate losses in list (O(N) memory, legacy mode)
         holdout_losses = [] if not use_iterative_backward else None
         
-        for holdout_idx in range(N):
+        # Cap the number of holdout passes to prevent memory explosion
+        # ARC tasks can have up to 5+ pairs, but we limit to max_loo_pairs (default 4)
+        # This keeps memory usage predictable
+        max_holdouts = min(N, self.config.max_loo_pairs)
+        
+        for holdout_idx in range(max_holdouts):
             # Create mask for valid holdouts
             valid_holdout_mask = holdout_idx < num_valid_pairs  # (B,)
             
@@ -379,8 +385,11 @@ class LOOTrainingLoss(nn.Module):
         total_pixels = 0
         num_holdouts = 0
         
+        # Cap the number of holdout passes to prevent memory explosion
+        max_holdouts = min(N, self.config.max_loo_pairs)
+        
         # For each possible holdout position
-        for holdout_idx in range(N):
+        for holdout_idx in range(max_holdouts):
             # Create mask for valid holdouts (position must be < num_valid_pairs)
             valid_holdout_mask = holdout_idx < num_valid_pairs  # (B,)
             

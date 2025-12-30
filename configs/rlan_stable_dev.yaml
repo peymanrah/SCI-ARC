@@ -199,20 +199,21 @@ model:
   # Phase 2: Activate HPM (gate learns to open gradually)
   # Phase 3: Fine-tune with HPM retrieval enabled
   #
-  # STAGED HPM: Delayed to epoch 14 for stable staggered activation
-  # Module activation schedule:
-  #   Epoch 3: HyperLoRA
-  #   Epoch 5: SolverCrossAttention
-  #   Epoch 7: CrossAttentionInjector
-  #   Epoch 8: Equivariance loss
-  #   Epoch 12: LOO loss
-  #   Epoch 14: HPM (gives 2 epochs after LOO for stabilization)
+  # SCIENTIFICALLY OPTIMIZED STAGING (Dec 2025):
+  # Module activation schedule (SYNCED for stability):
+  #   Epoch 0-4: Base model only (ContextEncoder + FiLM fallback)
+  #   Epoch 5: HyperLoRA + SolverCrossAttention + CrossAttentionInjector (SYNCED!)
+  #            → Key insight: HyperLoRA NEEDS CrossAttention features to work
+  #            → Syncing prevents "zombie" HyperLoRA learning from garbage features
+  #   Epoch 8: Equivariance loss (light regularization)
+  #   Epoch 14: HPM (capacity upgrade, ~2GB memory, NOT a gradient shock)
+  #   Epoch 15: LOO loss (heavy, delayed to after HPM stabilizes)
   #
-  # WARNING (Dec 2025): HPM adds significant memory (~1-2GB).
-  # DISABLED temporarily to isolate memory issues from other modules.
+  # WARNING (Dec 2025): HPM adds ~1-2GB static memory but is NOT a gradient shock.
+  # LOO is the heavy one (N forward passes per sample). Keep batch_size reasonable.
   # =============================================================
   use_hpm: false                      # DISABLED: Testing memory without HPM first
-  hpm_start_epoch: 14                 # Activate HPM after epoch 14 (staggered, 2 epochs after LOO)
+  hpm_start_epoch: 14                 # Activate HPM after epoch 14 (before LOO at 15)
   
   # Sparse MoE Routing Configuration
   hpm_top_k: 2                        # Number of banks to route to per sample
@@ -428,13 +429,22 @@ training:
   # - Epoch 8: Equivariance loss
   # - Epoch 12: LOO loss
   # - Epoch 14: HPM (if enabled)
+  # - Epoch 15: LOO loss (delayed for memory stability)
   #
   # This gives the memory manager time to adapt and prevents the
   # catastrophic memory spike that caused the epoch 4 crash.
+  #
+  # SCIENTIFICALLY OPTIMIZED STAGING (Dec 2025):
+  # The key insight is that HyperLoRA NEEDS CrossAttention features to work.
+  # If HyperLoRA activates before CrossAttention, it learns from "garbage"
+  # features (the FiLM fallback doesn't preserve spatial structure).
+  # 
+  # SOLUTION: Sync HyperLoRA + SolverContext + CrossAttention at epoch 5.
+  # This ensures all spatial context modules activate together.
   # =============================================================
-  meta_learning_start_epoch: 3  # HyperLoRA activates here
-  solver_context_start_epoch: 5  # SolverCrossAttention (2 epochs after HyperLoRA)
-  cross_attention_start_epoch: 7  # CrossAttentionInjector (2 epochs after SolverContext)
+  meta_learning_start_epoch: 5  # HyperLoRA activates here (SYNCED with CrossAttn)
+  solver_context_start_epoch: 5  # SolverCrossAttention (SYNCED with HyperLoRA)
+  cross_attention_start_epoch: 5  # CrossAttentionInjector (SYNCED with HyperLoRA)
   
   # =============================================================
   # STAGED LOSS ACTIVATION (Dec 2025)
@@ -463,13 +473,26 @@ training:
   #
   # This explicitly trains the HyperLoRA to GENERALIZE.
   #
-  # STAGED (Dec 2025): Activates at epoch 12 - needs stable base model first
+  # MEMORY WARNING (Dec 2025):
+  # LOO runs N forward passes per sample (N = number of training pairs).
+  # ARC tasks have 2-5+ pairs, so this is a 2-5x memory multiplier!
+  # At batch_size=80 with N=4 pairs, you need 80×4=320 forward passes
+  # worth of gradient memory, causing 12GB+ spillover.
+  #
+  # SOLUTIONS:
+  # 1. max_loo_pairs: Caps N to 4 (prevents 5+ pass explosion)
+  # 2. Delayed activation: Start at epoch 15 (after HPM stabilizes)
+  # 3. Reduced batch size: Consider reducing batch_size when LOO active
+  #
+  # STAGED (Dec 2025): Activates at epoch 15 - needs stable base model first
+  # Delayed from epoch 12 to give HPM 1 epoch to stabilize (epoch 14)
   # =============================================================
   loo_training:
     enabled: true          # ENABLED: Auto-activates at start_epoch
-    start_epoch: 12        # Activate at epoch 12 (stable base required)
-    loss_weight: 0.2       # MIDDLE GROUND: 20% of task loss
+    start_epoch: 15        # Activate at epoch 15 (after HPM stabilizes at 14)
+    loss_weight: 0.1       # REDUCED from 0.2: Softer start to prevent gradient shock
     min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
+    max_loo_pairs: 4       # CAP at 4 passes to prevent memory explosion (ARC max ~5)
   
   # =============================================================
   # AUGMENTATION EQUIVARIANCE LOSS

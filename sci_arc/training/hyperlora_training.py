@@ -51,6 +51,7 @@ class HyperLoRATrainingConfig:
     loo_enabled: bool = True
     loo_loss_weight: float = 0.5
     min_pairs_for_loo: int = 2
+    max_loo_pairs: int = 4  # Cap LOO passes to prevent memory explosion (ARC max is ~5)
     
     # Equivariance training settings
     equivariance_enabled: bool = True
@@ -70,6 +71,7 @@ class HyperLoRATrainingConfig:
             loo_enabled=loo_cfg.get('enabled', True),
             loo_loss_weight=loo_cfg.get('loss_weight', 0.5),
             min_pairs_for_loo=loo_cfg.get('min_pairs_for_loo', 2),
+            max_loo_pairs=loo_cfg.get('max_loo_pairs', 4),  # Read from YAML, default 4
             equivariance_enabled=equiv_cfg.get('enabled', True),
             equivariance_loss_weight=equiv_cfg.get('loss_weight', 0.1),
             num_augmentations=equiv_cfg.get('num_augmentations', 4),
@@ -115,6 +117,7 @@ class HyperLoRATrainer:
             print(f"  - LOO loss weight: {config.loo_loss_weight}")
             print(f"  - Equivariance loss weight: {config.equivariance_loss_weight}")
             print(f"  - Min pairs for LOO: {config.min_pairs_for_loo}")
+            print(f"  - Max LOO passes (memory cap): {config.max_loo_pairs}")
     
     def compute_loo_loss(
         self,
@@ -160,7 +163,12 @@ class HyperLoRATrainer:
         total_pixels = 0
         num_holdouts = 0
         
-        for holdout_idx in range(N):
+        # Cap the number of LOO passes to prevent memory explosion
+        # ARC tasks can have up to 5+ pairs, but we limit to max_loo_pairs (default 4)
+        # This keeps memory usage predictable: batch_size * max_loo_pairs forward passes
+        max_holdouts = min(N, self.config.max_loo_pairs)
+        
+        for holdout_idx in range(max_holdouts):
             # Skip if this holdout is invalid for some samples
             valid_mask = num_valid_pairs > holdout_idx
             if not valid_mask.any():
