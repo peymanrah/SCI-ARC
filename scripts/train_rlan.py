@@ -2541,8 +2541,16 @@ def evaluate(
     # Wrap dataloader with CUDA prefetcher for async data transfer
     prefetcher = CUDAPrefetcher(dataloader, device)
     
+    # Progress logging
+    total_batches = len(dataloader)
+    print(f"\n  [Eval] Running evaluation on {total_batches} batches...", end="", flush=True)
+    
     with torch.no_grad():
-        for batch in prefetcher:
+        for batch_idx, batch in enumerate(prefetcher):
+            # Progress indicator every 20 batches
+            if (batch_idx + 1) % 20 == 0 or batch_idx == total_batches - 1:
+                print(f" {batch_idx + 1}/{total_batches}", end="", flush=True)
+            
             # Batch already on device (prefetcher handles transfer asynchronously)
             test_inputs = batch['test_inputs']
             test_outputs = batch['test_outputs']
@@ -2714,6 +2722,7 @@ def evaluate(
         'eval_stop_prob': eval_stop_prob,
         'predicate_activation': predicate_activation_sum / max(num_eval_samples, 1),
     }
+    print(" Done.")  # End the progress line
 
 
 # =============================================================================
@@ -2838,8 +2847,15 @@ def evaluate_trm_style(
     # Track Pass@K metrics
     pass_at_k_correct = {k: 0 for k in pass_ks}
     
+    # Progress logging
+    print(f"\n  [TRM-Eval] Running TTA on {total} tasks × {total_views} views = {total * total_views} forward passes...", flush=True)
+    
     with torch.no_grad():
-        for task in eval_tasks:
+        for task_idx, task in enumerate(eval_tasks):
+            # Progress indicator every 10 tasks
+            if (task_idx + 1) % 10 == 0 or task_idx == total - 1:
+                print(f"  [TRM-Eval] Task {task_idx + 1}/{total} ({(task_idx + 1) * 100 // total}%)", flush=True)
+            
             # Parse task
             train_inputs = [np.array(p['input'], dtype=np.int64) for p in task['train']]
             train_outputs = [np.array(p['output'], dtype=np.int64) for p in task['train']]
@@ -2977,6 +2993,8 @@ def evaluate_trm_style(
     
     # Compute Pass@K metrics
     pass_at_k = {f'pass@{k}': pass_at_k_correct[k] / max(total, 1) for k in pass_ks}
+    
+    print(f"  [TRM-Eval] Complete. Exact match: {correct}/{total} ({exact_match*100:.1f}%)")
     
     result = {
         'exact_match': exact_match,
