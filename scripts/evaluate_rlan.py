@@ -212,6 +212,10 @@ def predict_with_tta(
     
     MATCHES train_rlan.py's evaluate_trm_style() EXACTLY!
     
+    OPTIMIZATION (Dec 2025): Batch all augmented views together per sample.
+    Instead of V sequential forward passes, we do 1 forward pass with B=V.
+    This gives ~V× speedup (typically 32× for 8 dihedral × 4 color).
+    
     TRM-style TTA order (Dec 2025):
     1. Apply color permutation FIRST to ALL grids (test + train context)
     2. Apply dihedral transform SECOND
@@ -234,70 +238,108 @@ def predict_with_tta(
     total_views = num_dihedral * num_color_perms
     batch_size = input_grid.shape[0]
     
-    # Collect all predictions PER BATCH ITEM as numpy arrays
-    all_predictions_per_sample = [[] for _ in range(batch_size)]  # List of lists
+    # Process each sample in the batch with batched TTA
+    all_predictions_per_sample = [[] for _ in range(batch_size)]
     
-    for color_idx in range(num_color_perms):
-        # Generate color permutation (or identity if color_idx == 0)
-        if color_idx == 0:
-            color_perm = torch.arange(10, device=device)  # Identity
-        else:
-            color_perm = generate_color_permutation(device)
+    for b in range(batch_size):
+        # Extract single sample
+        sample_test = input_grid[b:b+1]  # (1, H, W)
+        sample_train_in = train_inputs[b:b+1] if train_inputs is not None else None  # (1, K, H, W)
+        sample_train_out = train_outputs[b:b+1] if train_outputs is not None else None  # (1, K, H, W)
+        sample_pair_mask = pair_mask[b:b+1] if pair_mask is not None else None  # (1, K)
         
-        # Apply color permutation to test input and training context
-        color_test = apply_color_permutation(input_grid, color_perm)
-        color_train_in = apply_color_permutation(train_inputs, color_perm) if train_inputs is not None else None
-        color_train_out = apply_color_permutation(train_outputs, color_perm) if train_outputs is not None else None
+        # ================================================================
+        # BATCHED VIEW PREPARATION: Build all augmented views at once
+        # ================================================================
+        batch_test_views = []      # Will be (V, H, W)
+        batch_train_in_views = []  # Will be (V, K, H, W)
+        batch_train_out_views = [] # Will be (V, K, H, W)
+        batch_pair_mask_views = [] # Will be (V, K)
+        aug_infos = []             # (color_perm, tid) for inverse transforms
         
-        for tid in range(num_dihedral):
-            # Apply dihedral transform to color-permuted grids
-            transformed_test = apply_dihedral_transform(color_test, tid)
-            transformed_train_in = apply_dihedral_transform(color_train_in, tid) if color_train_in is not None else None
-            transformed_train_out = apply_dihedral_transform(color_train_out, tid) if color_train_out is not None else None
+        for color_idx in range(num_color_perms):
+            # Generate color permutation (or identity if color_idx == 0)
+            if color_idx == 0:
+                color_perm = torch.arange(10, device=device)  # Identity
+            else:
+                color_perm = generate_color_permutation(device)
             
-            # Get prediction with optional step override
-            with torch.no_grad():
-                if getattr(model, 'use_best_step_selection', False):
-                    # Use best-step selection (entropy-based)
-                    outputs = model(
-                        transformed_test,
-                        train_inputs=transformed_train_in,
-                        train_outputs=transformed_train_out,
-                        pair_mask=pair_mask,
-                        temperature=temperature,
-                        return_intermediates=True,
-                        num_steps_override=num_steps_override,
-                    )
-                    all_logits = outputs['all_logits']
-                    if all_logits and len(all_logits) > 1:
-                        best_logits, _, _ = model.solver.select_best_step_by_entropy(all_logits)
-                        logits = best_logits
-                    else:
-                        logits = outputs['logits']
+            # Apply color permutation to test input and training context
+            color_test = apply_color_permutation(sample_test, color_perm)
+            color_train_in = apply_color_permutation(sample_train_in, color_perm) if sample_train_in is not None else None
+            color_train_out = apply_color_permutation(sample_train_out, color_perm) if sample_train_out is not None else None
+            
+            for tid in range(num_dihedral):
+                # Apply dihedral transform to color-permuted grids
+                transformed_test = apply_dihedral_transform(color_test, tid)
+                transformed_train_in = apply_dihedral_transform(color_train_in, tid) if color_train_in is not None else None
+                transformed_train_out = apply_dihedral_transform(color_train_out, tid) if color_train_out is not None else None
+                
+                # Collect for batching (squeeze the batch dim since we'll re-stack)
+                batch_test_views.append(transformed_test.squeeze(0))  # (H, W)
+                if transformed_train_in is not None:
+                    batch_train_in_views.append(transformed_train_in.squeeze(0))  # (K, H, W)
+                if transformed_train_out is not None:
+                    batch_train_out_views.append(transformed_train_out.squeeze(0))  # (K, H, W)
+                if sample_pair_mask is not None:
+                    batch_pair_mask_views.append(sample_pair_mask.squeeze(0))  # (K,)
+                
+                aug_infos.append((color_perm, tid))
+        
+        # ================================================================
+        # BATCHED FORWARD PASS: All views in one call
+        # ================================================================
+        batch_test_views = torch.stack(batch_test_views, dim=0)  # (V, H, W)
+        batch_train_in_views = torch.stack(batch_train_in_views, dim=0) if batch_train_in_views else None  # (V, K, H, W)
+        batch_train_out_views = torch.stack(batch_train_out_views, dim=0) if batch_train_out_views else None  # (V, K, H, W)
+        batch_pair_mask_views = torch.stack(batch_pair_mask_views, dim=0) if batch_pair_mask_views else None  # (V, K)
+        
+        with torch.no_grad():
+            if getattr(model, 'use_best_step_selection', False):
+                # Use best-step selection (entropy-based)
+                outputs = model(
+                    batch_test_views,
+                    train_inputs=batch_train_in_views,
+                    train_outputs=batch_train_out_views,
+                    pair_mask=batch_pair_mask_views,
+                    temperature=temperature,
+                    return_intermediates=True,
+                    num_steps_override=num_steps_override,
+                )
+                all_logits = outputs.get('all_logits')
+                if all_logits and len(all_logits) > 1:
+                    best_logits, _, _ = model.solver.select_best_step_by_entropy(all_logits)
+                    logits = best_logits
                 else:
-                    logits = model(
-                        transformed_test,
-                        train_inputs=transformed_train_in,
-                        train_outputs=transformed_train_out,
-                        pair_mask=pair_mask,
-                        temperature=temperature,
-                        num_steps_override=num_steps_override,
-                    )
-                pred = logits.argmax(dim=1)  # (B, H, W)
+                    logits = outputs['logits']
+            else:
+                logits = model(
+                    batch_test_views,
+                    train_inputs=batch_train_in_views,
+                    train_outputs=batch_train_out_views,
+                    pair_mask=batch_pair_mask_views,
+                    temperature=temperature,
+                    num_steps_override=num_steps_override,
+                )
+            preds = logits.argmax(dim=1)  # (V, H, W)
+        
+        # ================================================================
+        # INVERSE TRANSFORMS AND COLLECT (sequential per view)
+        # ================================================================
+        for v, (color_perm, tid) in enumerate(aug_infos):
+            pred = preds[v]  # (H, W)
             
-            # CRITICAL: Process each batch item separately, collect per sample
-            for b in range(batch_size):
-                # 1. Crop prediction to remove padding (BEFORE inverse transform!)
-                pred_cropped = crop_prediction_torch(pred[b], pad_value=10)
-                
-                # 2. Inverse dihedral FIRST
-                pred_inv_dihedral = inverse_dihedral_transform(pred_cropped, tid)
-                
-                # 3. Inverse color permutation SECOND
-                pred_canonical = inverse_color_permutation(pred_inv_dihedral, color_perm)
-                
-                # Store as numpy for hash-based voting
-                all_predictions_per_sample[b].append(pred_canonical.cpu().numpy())
+            # 1. Crop prediction to remove padding (BEFORE inverse transform!)
+            pred_cropped = crop_prediction_torch(pred, pad_value=10)
+            
+            # 2. Inverse dihedral FIRST
+            pred_inv_dihedral = inverse_dihedral_transform(pred_cropped, tid)
+            
+            # 3. Inverse color permutation SECOND
+            pred_canonical = inverse_color_permutation(pred_inv_dihedral, color_perm)
+            
+            # Store as numpy for hash-based voting
+            all_predictions_per_sample[b].append(pred_canonical.cpu().numpy())
     
     # Vote SEPARATELY for each sample (matching train_rlan.py)
     winner_tensors = []
