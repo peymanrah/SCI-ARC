@@ -3752,24 +3752,49 @@ Config Overrides:
     
     # STAGED META-LEARNING: Delay LOO/Equivariance to prevent early BG collapse
     # Each loss has its own start_epoch for fine-grained control
-    # STAGGERED MODULE ACTIVATION to prevent memory spikes (12GB+ spill at epoch 4)
-    meta_learning_start_epoch = config.get('training', {}).get('meta_learning_start_epoch', 3)
-    solver_context_start_epoch = config.get('training', {}).get('solver_context_start_epoch', meta_learning_start_epoch + 2)
-    cross_attention_start_epoch = config.get('training', {}).get('cross_attention_start_epoch', solver_context_start_epoch + 2)
+    # STAGGERED MODULE ACTIVATION to prevent memory spikes and gradient explosion
+    # SCIENTIFICALLY ORDERED (Dec 2025): Context path FIRST, HyperLoRA LATER
+    meta_learning_start_epoch = config.get('training', {}).get('meta_learning_start_epoch', 8)
+    solver_context_start_epoch = config.get('training', {}).get('solver_context_start_epoch', 5)
+    cross_attention_start_epoch = config.get('training', {}).get('cross_attention_start_epoch', 5)
+    
+    # HyperLoRA warmup parameters
+    hyperlora_warmup_epochs = config.get('training', {}).get('hyperlora_warmup_epochs', 4)
+    hyperlora_warmup_start_scale = config.get('training', {}).get('hyperlora_warmup_start_scale', 0.005)
+    hyperlora_warmup_end_scale = config.get('training', {}).get('hyperlora_warmup_end_scale', 0.1)
+    
+    # LR reduction at activation epochs
+    activation_lr_reduction = config.get('training', {}).get('activation_lr_reduction', 0.5)
+    activation_lr_recovery_epochs = config.get('training', {}).get('activation_lr_recovery_epochs', 2)
+    
+    # Gradient explosion backoff parameters
+    grad_explosion_threshold = config.get('training', {}).get('grad_explosion_threshold', 10.0)
+    grad_explosion_lr_reduction = config.get('training', {}).get('grad_explosion_lr_reduction', 0.5)
+    grad_explosion_cooldown_epochs = config.get('training', {}).get('grad_explosion_cooldown_epochs', 2)
+    
+    # Track activation state for LR management
+    activation_lr_state = {
+        'reduced': False,
+        'reduction_epoch': -1,
+        'original_lr': config['training']['learning_rate'],
+        'grad_explosion_cooldown': 0,  # Countdown epochs after gradient explosion
+    }
     
     if use_loo or use_equivariance:
         print(f"\n{'='*60}")
-        print(f"STAGED META-LEARNING ENABLED (Per-Loss Scheduling)")
+        print(f"STAGED META-LEARNING ENABLED (Scientifically Ordered)")
         print(f"{'='*60}")
-        print(f"  HyperLoRA: Epoch {meta_learning_start_epoch + 1}+")
-        print(f"  SolverCrossAttention: Epoch {solver_context_start_epoch + 1}+")
-        print(f"  CrossAttentionInjector: Epoch {cross_attention_start_epoch + 1}+")
+        print(f"  Phase 2 - Context Path (epoch {solver_context_start_epoch + 1}+):")
+        print(f"    SolverCrossAttention + CrossAttentionInjector")
+        print(f"  Phase 3 - HyperLoRA (epoch {meta_learning_start_epoch + 1}+):")
+        print(f"    With warmup: scale {hyperlora_warmup_start_scale} → {hyperlora_warmup_end_scale} over {hyperlora_warmup_epochs} epochs")
         if use_equivariance:
-            print(f"  Equivariance Loss: Epoch {equiv_start_epoch + 1}+ (weight={equiv_weight})")
-            print(f"    → Fixes dihedral invariance (currently 13% TTA consensus)")
+            print(f"  Phase 4 - Equivariance Loss: Epoch {equiv_start_epoch + 1}+ (weight={equiv_weight})")
         if use_loo:
-            print(f"  LOO Loss: Epoch {loo_start_epoch + 1}+ (weight={loo_weight})")
-            print(f"    → Teaches few-shot generalization (fixes 60x entropy gap)")
+            print(f"  Phase 5 - LOO Loss: Epoch {loo_start_epoch + 1}+ (weight={loo_weight})")
+        print(f"\n  Safety:")
+        print(f"    LR reduction at activation: {activation_lr_reduction}x for {activation_lr_recovery_epochs} epochs")
+        print(f"    Grad explosion threshold: {grad_explosion_threshold}x clip → {grad_explosion_lr_reduction}x LR")
         print(f"{'='*60}\n")
     
     # STAGED HPM: Delay HPM activation to align with meta-learning
@@ -3906,27 +3931,54 @@ Config Overrides:
                 )
                 print(f"  New train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
         
-        # STAGGERED MODULE ACTIVATION: Activate each module at its own epoch
-        # This prevents memory spike from all modules activating at once (was 12GB+ spill at epoch 4)
+        # STAGGERED MODULE ACTIVATION: Scientifically ordered for stability
+        # PHASE 2: Context path FIRST (SolverContext + CrossAttn) - provides meaningful features
+        # PHASE 3: HyperLoRA AFTER context path - has features to predict LoRA from
         
-        # Epoch 3 (default): Activate HyperLoRA
-        if use_hyperlora and epoch == meta_learning_start_epoch:
-            print(f"\n{'='*60}")
-            print(f"HYPERLORA ACTIVATED (epoch {epoch + 1})")
-            print(f"{'='*60}")
-            model.hyperlora_active = True
-            print(f"  HyperLoRA: LoRA deltas NOW CONTRIBUTING to forward pass")
-            if device.type == 'cuda':
-                torch.cuda.synchronize()
-                allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
-                max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
-                print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
-            print(f"{'='*60}\n")
+        # ================================================================
+        # LR MANAGEMENT: Reduce LR at activation epochs to prevent shock
+        # ================================================================
+        is_activation_epoch = (
+            (use_solver_context and epoch == solver_context_start_epoch) or
+            (use_cross_attention_context and epoch == cross_attention_start_epoch) or
+            (use_hyperlora and epoch == meta_learning_start_epoch)
+        )
         
-        # Epoch 5 (default): Activate SolverCrossAttention
+        if is_activation_epoch and not activation_lr_state['reduced']:
+            # Apply LR reduction
+            original_lr = activation_lr_state['original_lr']
+            reduced_lr = original_lr * activation_lr_reduction
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = param_group['lr'] * activation_lr_reduction
+            activation_lr_state['reduced'] = True
+            activation_lr_state['reduction_epoch'] = epoch
+            print(f"  [LR] Reduced to {reduced_lr:.2e} (×{activation_lr_reduction}) for stability")
+        
+        # Recover LR after recovery period
+        if activation_lr_state['reduced']:
+            epochs_since_reduction = epoch - activation_lr_state['reduction_epoch']
+            if epochs_since_reduction >= activation_lr_recovery_epochs:
+                original_lr = activation_lr_state['original_lr']
+                for param_group in optimizer.param_groups:
+                    # Restore proportionally (handles per-module multipliers)
+                    param_group['lr'] = param_group['lr'] / activation_lr_reduction
+                activation_lr_state['reduced'] = False
+                print(f"  [LR] Restored to original after {activation_lr_recovery_epochs} epochs recovery")
+        
+        # Gradient explosion cooldown countdown
+        if activation_lr_state['grad_explosion_cooldown'] > 0:
+            activation_lr_state['grad_explosion_cooldown'] -= 1
+            if activation_lr_state['grad_explosion_cooldown'] == 0:
+                print(f"  [LR] Gradient explosion cooldown ended, restoring LR")
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = param_group['lr'] / grad_explosion_lr_reduction
+        
+        # ================================================================
+        # PHASE 2: Activate Context Path (SolverContext + CrossAttn)
+        # ================================================================
         if use_solver_context and epoch == solver_context_start_epoch:
             print(f"\n{'='*60}")
-            print(f"SOLVER CROSS-ATTENTION ACTIVATED (epoch {epoch + 1})")
+            print(f"PHASE 2: CONTEXT PATH ACTIVATED (epoch {epoch + 1})")
             print(f"{'='*60}")
             model.solver_context_active = True
             print(f"  SolverCrossAttention: NOW ACTIVE in solver loop")
@@ -3937,10 +3989,9 @@ Config Overrides:
                 print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
             print(f"{'='*60}\n")
         
-        # Epoch 7 (default): Activate CrossAttentionInjector
         if use_cross_attention_context and epoch == cross_attention_start_epoch:
             print(f"\n{'='*60}")
-            print(f"CROSS-ATTENTION INJECTOR ACTIVATED (epoch {epoch + 1})")
+            print(f"PHASE 2: CROSS-ATTENTION INJECTOR ACTIVATED (epoch {epoch + 1})")
             print(f"{'='*60}")
             model.cross_attention_active = True
             print(f"  CrossAttentionInjector: NOW ACTIVE (was using FiLM fallback)")
@@ -3950,6 +4001,40 @@ Config Overrides:
                 max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
                 print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
             print(f"{'='*60}\n")
+        
+        # ================================================================
+        # PHASE 3: Activate HyperLoRA with warmup
+        # ================================================================
+        if use_hyperlora and epoch == meta_learning_start_epoch:
+            print(f"\n{'='*60}")
+            print(f"PHASE 3: HYPERLORA ACTIVATED (epoch {epoch + 1})")
+            print(f"{'='*60}")
+            model.hyperlora_active = True
+            # Set initial warmup scale
+            if hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                model.hyper_lora.init_scale = hyperlora_warmup_start_scale
+                print(f"  HyperLoRA: Starting with init_scale={hyperlora_warmup_start_scale}")
+                print(f"  Warmup: {hyperlora_warmup_start_scale} → {hyperlora_warmup_end_scale} over {hyperlora_warmup_epochs} epochs")
+            else:
+                print(f"  HyperLoRA: LoRA deltas NOW CONTRIBUTING to forward pass")
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+                max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+                print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
+            print(f"{'='*60}\n")
+        
+        # HyperLoRA warmup: linearly ramp init_scale
+        if use_hyperlora and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+            if epoch >= meta_learning_start_epoch and epoch < meta_learning_start_epoch + hyperlora_warmup_epochs:
+                warmup_progress = (epoch - meta_learning_start_epoch) / max(hyperlora_warmup_epochs, 1)
+                current_scale = hyperlora_warmup_start_scale + warmup_progress * (hyperlora_warmup_end_scale - hyperlora_warmup_start_scale)
+                model.hyper_lora.init_scale = current_scale
+                if epoch == meta_learning_start_epoch or (epoch - meta_learning_start_epoch) % 2 == 0:
+                    print(f"  [HyperLoRA Warmup] epoch {epoch + 1}: init_scale = {current_scale:.4f}")
+            elif epoch == meta_learning_start_epoch + hyperlora_warmup_epochs:
+                model.hyper_lora.init_scale = hyperlora_warmup_end_scale
+                print(f"  [HyperLoRA Warmup Complete] init_scale = {hyperlora_warmup_end_scale}")
         
         # STAGED EQUIVARIANCE LOSS: Activate at equiv_start_epoch
         if use_equivariance and epoch == equiv_start_epoch:
@@ -4100,6 +4185,27 @@ Config Overrides:
         # Update scheduler (if using one)
         if scheduler is not None:
             scheduler.step()
+        
+        # ================================================================
+        # GRADIENT EXPLOSION BACKOFF (Safety mechanism)
+        # ================================================================
+        # If grad_norm > threshold * clip, reduce LR to prevent instability
+        diagnostics = train_losses.get('diagnostics', {})
+        grad_norm_before = diagnostics.get('grad_norm_before_clip', 0.0)
+        grad_clip = config['training']['gradient_clip']
+        
+        if grad_norm_before > grad_explosion_threshold * grad_clip:
+            # Trigger gradient explosion backoff
+            if activation_lr_state['grad_explosion_cooldown'] == 0:
+                print(f"\n  ⚠️  GRADIENT EXPLOSION DETECTED!")
+                print(f"      Grad norm: {grad_norm_before:.1f} > {grad_explosion_threshold}x clip ({grad_explosion_threshold * grad_clip:.1f})")
+                print(f"      Applying LR reduction: ×{grad_explosion_lr_reduction}")
+                
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = param_group['lr'] * grad_explosion_lr_reduction
+                
+                activation_lr_state['grad_explosion_cooldown'] = grad_explosion_cooldown_epochs
+                print(f"      Cooldown: {grad_explosion_cooldown_epochs} epochs before LR restoration")
         
         epoch_time = time.time() - epoch_start
         

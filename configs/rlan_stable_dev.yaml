@@ -164,7 +164,7 @@ model:
   hyperlora_rank: 8          # LoRA rank (lower = fewer params, less expressive)
   hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
   hyperlora_dropout: 0.0     # Dropout on LoRA activations
-  hyperlora_init_scale: 0.1  # INCREASED: Was 0.01, now 0.1 for stronger meta-learning signal
+  hyperlora_init_scale: 0.005  # NEAR-ZERO: Start as identity, warmup to 0.1 (was 0.1)
 
   # =============================================================
   # HIERARCHICAL PRIMITIVE MEMORY (HPM v2) - Dec 2025
@@ -340,38 +340,39 @@ training:
   
   # Per-module LR boosting
   # NOTE: Set to 1.0 for stable training. Higher values may cause NaN.
-  # HyperLoRA benefits from higher LR to learn meta-weight prediction faster.
-  # MIDDLE GROUND (Dec 2025): Reduced from 10.0 to 3.0 for smoother staged training
+  # HyperLoRA uses same LR as base model (1.0x) for stability during warmup.
+  # Higher multipliers can be used after warmup is complete.
   dsc_lr_multiplier: 1.0
   msre_lr_multiplier: 1.0
-  hyperlora_lr_multiplier: 3.0   # 3x base LR (was 10x, caused instability)
+  hyperlora_lr_multiplier: 1.0   # CONSERVATIVE: Same as base (was 3.0, caused instability)
   
   # Temperature for DSC attention
   temperature_start: 1.0
   temperature_end: 0.5    # Don't go below 0.5
   
   # =============================================================
-  # LOSS CONFIGURATION - PURE STABLEMAX (TRM PROVEN)
+  # LOSS CONFIGURATION - FOCAL WEIGHTED (PHASE 1 FIX FOR BG COLLAPSE)
   # =============================================================
-  # TRM uses PURE stablemax_cross_entropy with NO class weighting.
-  # They handle class imbalance through:
-  #   1. Color permutation on every sample (shuffles which color is rare)
-  #   2. Large pre-generated cache (1000x augmentation per task)
-  #   3. Long training (100K epochs)
+  # ISSUE DIAGNOSED (Dec 2025): At epoch 6 activation shock, model collapsed
+  # to 91% BG accuracy with 3.3% FG accuracy due to:
+  #   1. Gradient explosion (64.5x over clip threshold)
+  #   2. Simultaneous module activation (HyperLoRA + SolverCrossAttn + CrossAttnInjector)
+  #   3. Loss not distinguishing FG from BG sufficiently
   #
-  # For RLAN, we adopt the same approach:
-  #   - Pure stablemax (no weighting, no focal)
-  #   - 100% color permutation (shuffles class distribution)
-  #   - 400K cached samples (500 per task)
+  # FIX: Use focal_weighted loss with conservative caps:
+  #   - focal_gamma=1.5 (gentle focus, not too aggressive)
+  #   - bg_weight_cap=1.5 (slightly boost BG but don't dominate)
+  #   - fg_weight_cap=4.0 (strong FG signal to prevent collapse)
   #
-  # If RLAN's architecture is superior, it should learn faster!
+  # This maintains strong gradients for minority FG classes while preventing
+  # the mode collapse that occurred with pure stablemax.
   # =============================================================
-  loss_mode: 'stablemax'  # TRM-proven: pure cross-entropy, no weighting
-  bg_weight_cap: 2.0      # Not used with stablemax mode
-  fg_weight_cap: 5.0      # Not used with stablemax mode
+  loss_mode: 'focal_weighted'  # FIX: Prevents BG collapse (was stablemax)
+  bg_weight_cap: 1.5      # Conservative BG cap (was 2.0)
+  fg_weight_cap: 4.0      # Strong FG signal (was 5.0)
   
-  focal_gamma: 2.0        # Not used with stablemax mode
-  focal_alpha: 0.75       # Not used with stablemax mode
+  focal_gamma: 1.5        # Gentle focal (was 2.0 - too aggressive)
+  focal_alpha: 0.75       # Not used with focal_weighted
   
   # AUXILIARY LOSSES (minimized for stability)
   lambda_entropy: 0.01          # Light attention sharpness
@@ -413,103 +414,107 @@ training:
   ema_decay: 0.999  # Not used when use_ema=false
   
   # =============================================================
-  # STAGED META-LEARNING (Dec 2025 - Memory + Stability Fix)
+  # STAGED META-LEARNING (Dec 2025 - SCIENTIFICALLY ORDERED ACTIVATION)
   # =============================================================
-  # PROBLEM 1: Enabling LOO + Equivariance from epoch 1 destabilizes
-  # early learning, causing the model to collapse to all-background.
+  # ROOT CAUSE ANALYSIS (Dec 2025 training log):
+  # At epoch 6, ALL three modules activated SIMULTANEOUSLY causing:
+  #   - 64.5x gradient explosion (threshold=1.0, actual=64.5)
+  #   - Forward-path discontinuity (outputs suddenly different)
+  #   - BG collapse: FG acc dropped to 3.3%, BG stayed at 91%
   #
-  # PROBLEM 2: Activating HyperLoRA + SolverCrossAttention + 
-  # CrossAttentionInjector ALL AT ONCE at epoch 3 caused 12GB+ memory
-  # overflow (from 22GB to 32GB peak), crashing training at batch 367.
+  # SOLUTION: Staggered activation with scientifically-ordered dependencies:
   #
-  # SOLUTION: STAGGER module activation across multiple epochs:
-  # - Epoch 3: HyperLoRA only (smallest memory impact)
-  # - Epoch 5: SolverCrossAttention (2 epochs later)
-  # - Epoch 7: CrossAttentionInjector (2 more epochs later)
-  # - Epoch 8: Equivariance loss
-  # - Epoch 12: LOO loss
-  # - Epoch 14: HPM (if enabled)
-  # - Epoch 15: LOO loss (delayed for memory stability)
+  # PHASE 2 (Epoch 5): Context Path FIRST
+  #   - CrossAttentionInjector + SolverCrossAttention activate TOGETHER
+  #   - These provide meaningful spatial context features
+  #   - Temporarily reduce LR by 2x for 2 epochs to smooth transition
   #
-  # This gives the memory manager time to adapt and prevents the
-  # catastrophic memory spike that caused the epoch 4 crash.
+  # PHASE 3 (Epoch 8): HyperLoRA AFTER context path is stable
+  #   - Now has meaningful features to predict LoRA deltas from
+  #   - Uses near-zero init (hyperlora_init_scale=0.005) to start as identity
+  #   - Gradually warms up to full scale over hyperlora_warmup_epochs
   #
-  # SCIENTIFICALLY OPTIMIZED STAGING (Dec 2025):
-  # The key insight is that HyperLoRA NEEDS CrossAttention features to work.
-  # If HyperLoRA activates before CrossAttention, it learns from "garbage"
-  # features (the FiLM fallback doesn't preserve spatial structure).
-  # 
-  # SOLUTION: Sync HyperLoRA + SolverContext + CrossAttention at epoch 5.
-  # This ensures all spatial context modules activate together.
+  # PHASE 4 (Epoch 12): Equivariance after HyperLoRA stabilizes
+  #   - Light regularization (weight=0.01 initially, not 0.05)
+  #
+  # PHASE 5 (Epoch 18): LOO LAST after everything stable
+  #   - Heaviest memory/compute (N forward passes per sample)
+  #   - Gentle weight (0.05 initially, not 0.1)
+  #
+  # BACKOFF RULES: Implemented in train_rlan.py
+  #   - If grad_norm > 10x clip threshold → reduce LR by 2x for next epoch
+  #   - If 3 consecutive NaN batches → halve newest meta-loss weight
   # =============================================================
-  meta_learning_start_epoch: 5  # HyperLoRA activates here (SYNCED with CrossAttn)
-  solver_context_start_epoch: 5  # SolverCrossAttention (SYNCED with HyperLoRA)
-  cross_attention_start_epoch: 5  # CrossAttentionInjector (SYNCED with HyperLoRA)
+  
+  # Context path activates FIRST (Phase 2)
+  solver_context_start_epoch: 5   # SolverCrossAttention
+  cross_attention_start_epoch: 5  # CrossAttentionInjector (SYNCED with SolverContext)
+  
+  # HyperLoRA activates AFTER context path is stable (Phase 3)
+  meta_learning_start_epoch: 8    # HyperLoRA (3 epochs after context path)
+  
+  # HyperLoRA warmup: start near-zero and ramp up over N epochs
+  hyperlora_warmup_epochs: 4      # Ramp init_scale from 0.005 to 0.1 over 4 epochs
+  hyperlora_warmup_start_scale: 0.005  # Near-identity at activation
+  hyperlora_warmup_end_scale: 0.1      # Full scale after warmup
+  
+  # LR reduction at activation epochs (prevents gradient shock)
+  activation_lr_reduction: 0.5    # Multiply LR by 0.5 at activation epochs
+  activation_lr_recovery_epochs: 2  # Recover to full LR over 2 epochs
+  
+  # Gradient explosion backoff (safety mechanism)
+  grad_explosion_threshold: 10.0  # If grad_norm > threshold * clip, trigger backoff
+  grad_explosion_lr_reduction: 0.5  # Multiply LR by this factor on explosion
+  grad_explosion_cooldown_epochs: 2  # Wait this many epochs before restoring LR
   
   # =============================================================
-  # STAGED LOSS ACTIVATION (Dec 2025)
+  # STAGED LOSS ACTIVATION (Dec 2025 - SCIENTIFICALLY ORDERED)
   # =============================================================
   # Enable losses at DIFFERENT epochs based on training needs:
-  # - Equivariance: Earlier (epoch 8) - lighter, helps dihedral consistency
-  # - LOO: Later (epoch 12) - heavier, requires stable base model
+  # - Equivariance: Epoch 12 (AFTER HyperLoRA stabilizes at 8+4=12)
+  # - LOO: Epoch 18 (LAST - heaviest, requires stable everything)
   #
   # This addresses the 60x eval entropy explosion by enforcing:
-  # 1. Dihedral invariance early (fixes 13% consensus problem)
-  # 2. Few-shot generalization later (fixes train→eval gap)
+  # 1. Dihedral invariance after HyperLoRA warmup (fixes 13% consensus)
+  # 2. Few-shot generalization last (fixes train→eval gap)
   # =============================================================
   
   # =============================================================
-  # LOO TRAINING: LEAVE-ONE-OUT META-LEARNING LOSS
+  # LOO TRAINING: LEAVE-ONE-OUT META-LEARNING LOSS (PHASE 5 - LAST)
   # =============================================================
   # Teaches the model to generalize from N-1 examples to the Nth.
   # Only active when use_hyperlora: true in model section.
   #
-  # For each training task with N pairs:
-  #   1. Hold out one pair as the "test"
-  #   2. Pool context from remaining N-1 pairs
-  #   3. Predict LoRA weights from this context
-  #   4. Use LoRA to predict held-out pair
-  #   5. Backprop loss on held-out prediction
+  # DELAYED ACTIVATION (Dec 2025): Activates at epoch 18
+  # This is AFTER:
+  #   - Context path stable (epoch 5+)
+  #   - HyperLoRA warmup complete (epoch 8+4=12)
+  #   - Equivariance regularizing (epoch 12+)
   #
-  # This explicitly trains the HyperLoRA to GENERALIZE.
-  #
-  # MEMORY WARNING (Dec 2025):
-  # LOO runs N forward passes per sample (N = number of training pairs).
-  # ARC tasks have 2-5+ pairs, so this is a 2-5x memory multiplier!
-  # At batch_size=80 with N=4 pairs, you need 80×4=320 forward passes
-  # worth of gradient memory, causing 12GB+ spillover.
-  #
-  # SOLUTIONS:
-  # 1. max_loo_pairs: Caps N to 4 (prevents 5+ pass explosion)
-  # 2. Delayed activation: Start at epoch 15 (after HPM stabilizes)
-  # 3. Reduced batch size: Consider reducing batch_size when LOO active
-  #
-  # STAGED (Dec 2025): Activates at epoch 15 - needs stable base model first
-  # Delayed from epoch 12 to give HPM 1 epoch to stabilize (epoch 14)
+  # MEMORY FIX: Uses reduced batch size automatically.
   # =============================================================
   loo_training:
     enabled: true          # ENABLED: Auto-activates at start_epoch
-    start_epoch: 15        # Activate at epoch 15 (after HPM stabilizes at 14)
-    loss_weight: 0.1       # REDUCED from 0.2: Softer start to prevent gradient shock
+    start_epoch: 18        # PHASE 5: LOO activates LAST (was 15)
+    loss_weight: 0.05      # GENTLER start (was 0.1) - prevents gradient shock
     min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
-    max_loo_pairs: 4       # CAP at 4 passes to prevent memory explosion (ARC max ~5)
+    max_loo_pairs: 4       # CAP at 4 passes to prevent memory explosion
   
   # =============================================================
-  # AUGMENTATION EQUIVARIANCE LOSS
+  # AUGMENTATION EQUIVARIANCE LOSS (PHASE 4 - AFTER HYPERLORA WARMUP)
   # =============================================================
   # Encourages consistent LoRA predictions across augmented views.
-  # If a task is rotated 90°, the predicted LoRA weights should
-  # have similar magnitudes (the "rule" is the same, just rotated).
+  # 
+  # DELAYED ACTIVATION (Dec 2025): Activates at epoch 12
+  # This is AFTER HyperLoRA warmup complete (epoch 8+4=12)
+  # So we're regularizing a module that's already learned something.
   #
-  # Loss: L2 on Frobenius norm difference of LoRA matrices.
-  #
-  # STAGED (Dec 2025): Activates at epoch 8 - fixes dihedral invariance early
-  # This addresses the 13% TTA consensus problem before LOO.
+  # GENTLE WEIGHT: Start with 0.01 (was 0.05) to not overwhelm task loss.
   # =============================================================
   equivariance_training:
     enabled: true          # ENABLED: Auto-activates at start_epoch
-    start_epoch: 8         # Activate at epoch 8 (earlier than LOO)
-    loss_weight: 0.05      # MIDDLE GROUND: Lighter regularization
+    start_epoch: 12        # PHASE 4: After HyperLoRA warmup (was 8)
+    loss_weight: 0.01      # GENTLER start (was 0.05)
     num_augmentations: 4   # Number of random augmentations per task
   
   # =============================================================
