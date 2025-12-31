@@ -2478,12 +2478,33 @@ def train_epoch(
             # =============================================================
             # LoRA delta norms (shows HyperLoRA is producing non-trivial adaptations)
             # P2.1: Optimized - aggregate on GPU, single .item() call to reduce sync overhead
+            # P2.2 FIX (Dec 2025): Exclude 'context' key from norm calculation!
+            #   - 'context' is an auxiliary tensor (B, D) NOT a LoRA delta
+            #   - Including it inflated norms by ~sqrt(B*D) = ~143 for B=80, D=256
+            #   - This caused false-positive governor aborts at HyperLoRA activation
+            # P2.3 FIX: Compute mean per-sample norm for batch-size invariance
+            #   - Old: sum over entire batch -> norm scales with sqrt(B)
+            #   - New: mean of per-sample norms -> consistent across batch sizes
             if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
+                # Only include actual LoRA delta keys, exclude auxiliary tensors
+                LORA_DELTA_KEYS = {'gru_reset', 'gru_update', 'gru_candidate', 'output_head'}
                 lora_norm_sq = torch.tensor(0.0, device=device)
+                lora_sample_count = 0
                 for key, delta in outputs['lora_deltas'].items():
-                    if isinstance(delta, torch.Tensor):
-                        lora_norm_sq = lora_norm_sq + delta.pow(2).sum()
-                lora_norm = lora_norm_sq.sqrt().item()  # Single GPU sync
+                    if key not in LORA_DELTA_KEYS:
+                        continue  # Skip 'context' and any other auxiliary tensors
+                    if isinstance(delta, torch.Tensor) and delta.ndim >= 2:
+                        # Compute per-sample norm: delta shape is (B, D1, D2) for weight matrices
+                        # Flatten per-sample and compute norm, then average across batch
+                        B = delta.shape[0]
+                        per_sample_norms_sq = delta.view(B, -1).pow(2).sum(dim=1)  # (B,)
+                        lora_norm_sq = lora_norm_sq + per_sample_norms_sq.mean()
+                        lora_sample_count += 1
+                # Average across all delta matrices
+                if lora_sample_count > 0:
+                    lora_norm = (lora_norm_sq / lora_sample_count).sqrt().item()
+                else:
+                    lora_norm = 0.0
                 epoch_diagnostics['lora_delta_norm_sum'] += lora_norm
                 epoch_diagnostics['lora_delta_batch_count'] += 1
                 
@@ -2645,11 +2666,23 @@ def train_epoch(
             # Only log every 20 batches to avoid spam, but critical for debugging
             if batch_idx % 20 == 0 and (loo_loss_val > 0 or equiv_loss_val > 0):
                 # Get LoRA delta norms from outputs if available
+                # P2.2 FIX (Dec 2025): Exclude 'context' key and compute mean per-sample norm
                 lora_delta_norm = 0.0
                 if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
+                    LORA_DELTA_KEYS = {'gru_reset', 'gru_update', 'gru_candidate', 'output_head'}
+                    norm_sum = 0.0
+                    key_count = 0
                     for key, delta in outputs['lora_deltas'].items():
-                        lora_delta_norm += delta.norm().item() ** 2
-                    lora_delta_norm = lora_delta_norm ** 0.5
+                        if key not in LORA_DELTA_KEYS:
+                            continue  # Skip 'context' and other auxiliary tensors
+                        if isinstance(delta, torch.Tensor) and delta.ndim >= 2:
+                            # Mean per-sample norm for batch-size invariance
+                            B = delta.shape[0]
+                            per_sample_norms = delta.view(B, -1).norm(dim=1)  # (B,)
+                            norm_sum += per_sample_norms.mean().item() ** 2
+                            key_count += 1
+                    if key_count > 0:
+                        lora_delta_norm = (norm_sum / key_count) ** 0.5
                 
                 # Get context encoder contribution
                 context_contrib = 0.0

@@ -820,14 +820,20 @@ monitoring:
   # Based on 821b111 failure analysis: LoRA norms reached 62+ before NaN
   # These thresholds trigger warnings and auto-backoff to prevent explosion
   #
-  # RATIONALE:
-  # - Healthy LoRA norms: 0.01 - 1.0 (producing small weight updates)
-  # - Warning zone: 1.0 - 10.0 (may indicate instability, worth monitoring)
-  # - Critical zone: 10.0 - 30.0 (likely gradient explosion, reduce LR)
-  # - Kill zone: > 50.0 (model weights likely corrupted, abort/restart)
-  lora_norm_warn: 10.0        # Log warning if EMA LoRA norm > 10
-  lora_norm_critical: 30.0    # Log critical + consider LR reduction if > 30
-  lora_norm_kill: 50.0        # Model is exploding - weights corrupted
+  # METRIC FIX (Dec 2025): Now computes MEAN PER-SAMPLE norm, excluding
+  # the 'context' auxiliary tensor. Old metric was batch-size dependent
+  # and included context vector (L2 ~143 for batch 80, hidden 256).
+  #
+  # NEW RATIONALE (per-sample mean, actual LoRA deltas only):
+  # - With delta_scale=0.005 (warmup start): expect ~0.001-0.05
+  # - With delta_scale=0.1 (warmup end): expect ~0.05-0.5
+  # - With delta_scale=0.3 (escalation target): expect ~0.1-1.5
+  # - Warning zone: > 2.0 (unusually large adaptations)
+  # - Critical zone: > 5.0 (likely gradient issues)
+  # - Kill zone: > 10.0 (model weights likely corrupted)
+  lora_norm_warn: 2.0         # Log warning if mean per-sample LoRA norm > 2.0
+  lora_norm_critical: 5.0     # Log critical + consider LR reduction if > 5.0
+  lora_norm_kill: 10.0        # Model is exploding - weights corrupted
   
   # =============================================================
   # P0.4: NaN BATCH ABORT THRESHOLD
