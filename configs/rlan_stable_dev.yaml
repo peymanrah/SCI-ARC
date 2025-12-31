@@ -332,9 +332,11 @@ training:
   use_torch_compile: false    # DISABLED - can cause issues with dynamic shapes in ARC grids
   torch_compile_mode: 'reduce-overhead'  # Options: 'default', 'reduce-overhead', 'max-autotune'
   
-  batch_size: 80    # Standard for 24GB GPU - LOO training auto-reduces this when active
-                     # Safe with CrossAttn + SolverCrossAttn + HyperLoRA + Equiv
-  grad_accumulation_steps: 4  # effective_batch_size = 80 × 4 = 320 (TRM-competitive)
+  # MEMORY FIX (Dec 2025): Reduced from 80 to 64 due to +5GB VRAM spill after HyperLoRA activation
+  # Peak was ~29GB (24+5), now targeting ~23GB peak with 20% batch reduction
+  # Effective batch unchanged: 64×5 = 320 (same as previous 80×4 = 320)
+  batch_size: 64    # Reduced for HyperLoRA activation headroom (was 80)
+  grad_accumulation_steps: 5  # Increased to maintain effective_batch_size = 64 × 5 = 320
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
