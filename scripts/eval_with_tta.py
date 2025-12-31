@@ -193,7 +193,7 @@ class TTAEvaluator:
         max_size: int = 30,
         num_dihedral: int = 8,  # Use all 8 dihedral transforms
         num_color_perms: int = 4,  # Random color perms per dihedral
-        use_gumbel: bool = True,
+        use_gumbel: bool = False,  # P0.1: DISABLED - Gumbel noise at eval creates train/eval mismatch (16x entropy ratio)
         temperature: float = 0.5,
     ):
         self.model = model
@@ -537,7 +537,8 @@ def main():
     parser.add_argument('--eval-path', type=str, default='data/arc-agi_evaluation_challenges.json', help='Eval data path')
     parser.add_argument('--num-dihedral', type=int, default=8, help='Number of dihedral transforms (1-8)')
     parser.add_argument('--num-color-perms', type=int, default=4, help='Color permutations per dihedral')
-    parser.add_argument('--no-gumbel', action='store_true', help='Disable Gumbel noise')
+    parser.add_argument('--use-gumbel', action='store_true', help='Enable Gumbel noise (disabled by default for eval consistency)')
+    parser.add_argument('--no-gumbel', action='store_true', help='[Deprecated] Disable Gumbel noise (now default behavior)')
     parser.add_argument('--temperature', type=float, default=0.5, help='DSC temperature')
     parser.add_argument('--compare-simple', action='store_true', help='Also run simple eval for comparison')
     parser.add_argument('--max-tasks', type=int, default=None, help='Limit number of tasks')
@@ -577,8 +578,6 @@ def main():
     
     # Load state dict
     model.load_state_dict(checkpoint['model_state_dict'])
-    
-    model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
     print(f"Loaded model from epoch {checkpoint['epoch']}")
@@ -612,6 +611,14 @@ def main():
     
     print(f"Evaluating {len(tasks)} tasks")
     
+    # Gumbel noise: disabled by default for eval consistency (P0.1 fix)
+    # --use-gumbel explicitly enables it, --no-gumbel is deprecated (already default)
+    use_gumbel = args.use_gumbel and not args.no_gumbel
+    if args.no_gumbel and not args.use_gumbel:
+        print("Note: --no-gumbel is now default behavior (deprecated flag)")
+    if use_gumbel:
+        print("Note: Gumbel noise ENABLED (may cause train/eval mismatch)")
+    
     # Run simple evaluation first (for comparison)
     if args.compare_simple:
         print("\n" + "="*60)
@@ -621,7 +628,7 @@ def main():
         simple_eval = SimpleEvaluator(
             model=model,
             device=device,
-            use_gumbel=not args.no_gumbel,
+            use_gumbel=use_gumbel,
             temperature=args.temperature,
         )
         simple_results = simple_eval.evaluate_dataset(tasks)
@@ -637,7 +644,7 @@ def main():
         device=device,
         num_dihedral=args.num_dihedral,
         num_color_perms=args.num_color_perms,
-        use_gumbel=not args.no_gumbel,
+        use_gumbel=use_gumbel,
         temperature=args.temperature,
     )
     tta_results = tta_eval.evaluate_dataset(tasks)

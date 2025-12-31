@@ -327,12 +327,14 @@ training:
   #    - O(N) memory instead of O(N²) for attention
   # =============================================================
   use_8bit_optimizer: true    # ~75% optimizer memory savings (fallback to AdamW if bitsandbytes missing)
-  gradient_checkpointing: true   # ~30% activation memory savings (trades compute for memory)
+  gradient_checkpointing: false  # DISABLED: Known issues with Dict/None args in this codebase (Dec 2025)
+                                 # Enable only after validating with 1-2 epoch smoke test
   use_torch_compile: false    # DISABLED - can cause issues with dynamic shapes in ARC grids
   torch_compile_mode: 'reduce-overhead'  # Options: 'default', 'reduce-overhead', 'max-autotune'
   
-  batch_size: 80    # Safe with memory optimizations (epochs 0-13). LOO/Equi add N passes at epoch 8+/12+
-  grad_accumulation_steps: 4  # effective_batch_size = 80 × 4 = 320
+  batch_size: 80    # Standard for 24GB GPU - LOO training auto-reduces this when active
+                     # Safe with CrossAttn + SolverCrossAttn + HyperLoRA + Equiv
+  grad_accumulation_steps: 4  # effective_batch_size = 80 × 4 = 320 (TRM-competitive)
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -404,14 +406,17 @@ training:
   min_lr: 5.0e-4  # Same as learning_rate
   
   # =============================================================
-  # EMA CONFIGURATION - DISABLED FOR 20-EPOCH TRAINING
+  # EMA CONFIGURATION (Dec 2025)
   # =============================================================
-  # Analysis showed EMA with decay=0.999 creates 1000-step lag.
-  # For 20-epoch training (~26K steps), EMA never catches up.
-  # Disabled based on user guidance: "EMA doesn't benefit 20 epochs"
+  # For 200-epoch training (~50K+ steps), EMA CAN be beneficial.
+  # However, decay=0.999 creates ~1000-step lag which may hide
+  # recent learning. Consider decay=0.995 (200-step window) or
+  # 0.99 (100-step window) for faster convergence tracking.
+  # Currently DISABLED to simplify debugging during development.
+  # Enable for production runs where evaluation stability matters.
   # =============================================================
   use_ema: false
-  ema_decay: 0.999  # Not used when use_ema=false
+  ema_decay: 0.995  # Faster-tracking decay (was 0.999) for use when enabled
   
   # =============================================================
   # STAGED META-LEARNING (Dec 2025 - SCIENTIFICALLY ORDERED ACTIVATION)
@@ -499,6 +504,20 @@ training:
     loss_weight: 0.05      # GENTLER start (was 0.1) - prevents gradient shock
     min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
     max_loo_pairs: 4       # CAP at 4 passes to prevent memory explosion
+    
+    # ADAPTIVE BATCH SIZE REDUCTION (Dec 2025)
+    # When LOO activates, batch size is reduced to fit N forward passes in VRAM.
+    # Formula: loo_batch = floor(base_batch / batch_reduction_divisor)
+    #
+    # OBSERVED (24GB GPU): 10GB peak at LOO activation with batch=18
+    # This means we have 14GB headroom → can safely use ~2x larger batch.
+    #
+    # Divisor=2.0: 80/2 = 40 batch (vs old formula: 80/4-2 = 18)
+    # adjust_grad_accumulation=true: auto-increase grad_accum to maintain
+    # effective batch size (80×4=320 → 40×8=320)
+    batch_reduction_divisor: 2.0    # Divide base batch by this (was ~4.4 implicitly)
+    min_batch_size: 8               # Floor for safety (was 4)
+    adjust_grad_accumulation: true  # Auto-adjust grad_accum to maintain effective batch
   
   # =============================================================
   # AUGMENTATION EQUIVARIANCE LOSS (PHASE 4 - AFTER HYPERLORA WARMUP)
@@ -794,6 +813,42 @@ monitoring:
   entropy_ratio_critical: 5.0 # Critical if > 5x
   stop_value_warning: 0.15    # Warn if stop value gap > 0.15
   stop_value_critical: 0.25   # Critical if > 0.25
+  
+  # =============================================================
+  # P0.3: LoRA NORM GOVERNOR THRESHOLDS (Dec 2025)
+  # =============================================================
+  # Based on 821b111 failure analysis: LoRA norms reached 62+ before NaN
+  # These thresholds trigger warnings and auto-backoff to prevent explosion
+  #
+  # RATIONALE:
+  # - Healthy LoRA norms: 0.01 - 1.0 (producing small weight updates)
+  # - Warning zone: 1.0 - 10.0 (may indicate instability, worth monitoring)
+  # - Critical zone: 10.0 - 30.0 (likely gradient explosion, reduce LR)
+  # - Kill zone: > 50.0 (model weights likely corrupted, abort/restart)
+  lora_norm_warn: 10.0        # Log warning if EMA LoRA norm > 10
+  lora_norm_critical: 30.0    # Log critical + consider LR reduction if > 30
+  lora_norm_kill: 50.0        # Model is exploding - weights corrupted
+  
+  # =============================================================
+  # P0.4: NaN BATCH ABORT THRESHOLD
+  # =============================================================
+  # If NaN batches exceed this count in an epoch, abort and restart
+  # with smaller learning rate or different random seed
+  nan_batches_abort: 20       # Abort epoch if > 20 NaN batches (10% of typical 200 batches)
+  
+  # =============================================================
+  # TTA CONSENSUS THRESHOLDS
+  # =============================================================
+  # Based on 821b111 failure: 9% TTA consensus indicates broken equivariance
+  tta_consensus_warning: 0.25  # Warn if winner votes < 25% of total views
+  tta_consensus_critical: 0.15 # Critical if < 15% (random would be 3%)
+  
+  # =============================================================
+  # CENTROID DIVERSITY THRESHOLDS
+  # =============================================================
+  # Based on 821b111 failure: centroid spread 0.19 indicates collapsed attention
+  centroid_spread_warning: 2.0   # Warn if spread < 2.0
+  centroid_spread_critical: 0.5  # Critical if spread < 0.5 (complete collapse)
 
 logging:
   log_every: 1

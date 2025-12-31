@@ -987,9 +987,10 @@ class SCIARCTrainer:
                         aug_deltas = self.model.hyper_lora(aug_features)
                         
                         # Compare LoRA weights (MSE on actual weight matrices)
+                        # P1.7: Detach original_deltas to stabilize gradient flow - only aug path gets gradients
                         for key in ['gru_reset', 'gru_update', 'gru_candidate', 'output_head']:
                             if key in original_deltas and key in aug_deltas:
-                                delta_diff = F.mse_loss(original_deltas[key], aug_deltas[key])
+                                delta_diff = F.mse_loss(original_deltas[key].detach(), aug_deltas[key])
                                 total_delta = total_delta + delta_diff
                         num_augs += 1
                     
@@ -998,12 +999,43 @@ class SCIARCTrainer:
                         losses['equiv_delta_norm'] = equiv_loss.item()
                         losses['equivariance'] = equiv_loss.item()
                         
+                        # P0.2: Track equivariance success for fail-loud monitoring
+                        if not hasattr(self, '_equiv_consecutive_failures'):
+                            self._equiv_consecutive_failures = 0
+                            self._equiv_total_successes = 0
+                        self._equiv_consecutive_failures = 0  # Reset on success
+                        self._equiv_total_successes += 1
+                        
             except Exception as e:
+                # P0.2: FAIL-LOUD equivariance tracking with abort threshold
                 if not hasattr(self, '_equiv_warn_count'):
                     self._equiv_warn_count = 0
-                if self._equiv_warn_count < 3:
-                    print(f"[EQUIV WARNING] Equivariance loss computation failed: {e}")
-                    self._equiv_warn_count += 1
+                if not hasattr(self, '_equiv_consecutive_failures'):
+                    self._equiv_consecutive_failures = 0
+                    self._equiv_total_successes = 0
+                
+                self._equiv_consecutive_failures += 1
+                self._equiv_warn_count += 1
+                
+                # Always log first failure and every 10th
+                if self._equiv_warn_count <= 3 or self._equiv_consecutive_failures % 10 == 0:
+                    print(f"[EQUIV WARNING] Equivariance loss computation failed (consecutive={self._equiv_consecutive_failures}): {e}")
+                
+                # P0.2: Critical alert if 10+ consecutive failures
+                if self._equiv_consecutive_failures >= 10:
+                    print(f"\n{'!'*60}")
+                    print(f"[EQUIV CRITICAL] 10 consecutive equivariance failures!")
+                    print(f"  Total successes before collapse: {self._equiv_total_successes}")
+                    print(f"  Last error: {e}")
+                    print(f"  The equiv=0 metric is masking a BROKEN equivariance path.")
+                    print(f"  Training continues but TTA consensus will likely be <25%.")
+                    print(f"{'!'*60}\n")
+                    # Reset counter but mark as broken for epoch summary
+                    self._equiv_path_broken = True
+                    self._equiv_consecutive_failures = 0
+                    
+                # Track as metric for monitoring
+                losses['equiv_failures'] = self._equiv_consecutive_failures
         
         # Total loss
         total = task_loss

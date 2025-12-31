@@ -1307,6 +1307,18 @@ def train_epoch(
         'per_sample_accuracies': [],   # List of per-sample accuracies (sampled)
         'batch_accuracies': [],        # Accuracy per batch (for trend analysis)
         'batch_exact_matches': [],     # Exact matches per batch
+        
+        # =============================================================
+        # TASK-LEVEL ACCURACY TRACKING (for apples-to-apples eval gap)
+        # =============================================================
+        # TWO METRICS for different purposes:
+        # 1. FIRST-SAMPLE (strict): Only counts first sample seen per task
+        #    → Truly comparable to eval (single-shot, no "multiple attempts")
+        # 2. ANY-SAMPLE (lenient): Task solved if ANY sample hits exact match
+        #    → Upper bound, shows learning capacity but inflated by N attempts
+        'first_sample_task_correct': {},  # Dict: task_id -> bool (was FIRST sample correct?)
+        'solved_task_ids': set(),         # Set of task_ids with at least one exact match (any sample)
+        'seen_task_ids': set(),           # Set of all task_ids seen this epoch
         'fg_accuracy_sum': 0.0,        # Sum of FG accuracy across batches
         'bg_accuracy_sum': 0.0,        # Sum of BG accuracy across batches
         'running_accuracy_window': [], # Last N batch accuracies for trend
@@ -1382,6 +1394,30 @@ def train_epoch(
     consecutive_nan = 0  # Track consecutive NaN for detecting model corruption
     max_consecutive_nan_streak = 0  # Track peak consecutive NaN streak for backoff (Patch 4 fix)
     max_consecutive_nan = 10  # Abort if this many consecutive NaN (model is corrupted)
+    
+    # =============================================================
+    # MONITORING THRESHOLDS - Read once from YAML for consistency
+    # =============================================================
+    monitoring_cfg = config.get('monitoring', {})
+    monitoring_enabled = monitoring_cfg.get('enabled', True)
+    # Gap thresholds
+    exact_match_warning = monitoring_cfg.get('exact_match_warning', 0.10)
+    exact_match_critical = monitoring_cfg.get('exact_match_critical', 0.20)
+    stop_value_warning = monitoring_cfg.get('stop_value_warning', 0.15)
+    stop_value_critical = monitoring_cfg.get('stop_value_critical', 0.25)
+    # TTA consensus thresholds
+    tta_consensus_warning = monitoring_cfg.get('tta_consensus_warning', 0.25)
+    tta_consensus_critical = monitoring_cfg.get('tta_consensus_critical', 0.15)
+    # Centroid spread thresholds
+    centroid_spread_warning = monitoring_cfg.get('centroid_spread_warning', 2.0)
+    centroid_spread_critical = monitoring_cfg.get('centroid_spread_critical', 0.5)
+    # NaN abort threshold (per-epoch total)
+    nan_batches_abort = monitoring_cfg.get('nan_batches_abort', 20)
+    # LoRA thresholds (also used in batch loop)
+    lora_norm_warn_threshold = monitoring_cfg.get('lora_norm_warn', 10.0)
+    lora_norm_critical_threshold = monitoring_cfg.get('lora_norm_critical', 30.0)
+    lora_norm_kill_threshold = monitoring_cfg.get('lora_norm_kill', 50.0)
+    lora_kill_consecutive_limit = 3  # Abort after this many consecutive kill-threshold breaches
     
     # Wrap dataloader with CUDA prefetcher for async data transfer
     # This overlaps CPU→GPU transfer with GPU computation, eliminating stalls
@@ -1541,23 +1577,44 @@ def train_epoch(
                                 del aug_features
                             
                             if augmented_contexts:
-                                equiv_result, equiv_metrics = equiv_loss_fn(
-                                    hyper_lora=model.hyper_lora,
-                                    original_context=original_context,
-                                    augmented_contexts=augmented_contexts,
-                                    # v3: Iterative backward
-                                    scaler=scaler,
-                                    loss_weight=equiv_loss_fn.config.loss_weight,
-                                    grad_accumulation_steps=grad_accumulation_steps,
-                                )
-                                # equiv_result is now a float (backward already done inside)
-                                equiv_loss_value = equiv_result
-                                if isinstance(equiv_loss_value, torch.Tensor):
-                                    equiv_loss_value = equiv_loss_value.item()
-                                losses['equiv_loss'] = equiv_loss_value  # Store for logging
-                                # Note: Don't add to total_loss - backward already done inside
-                                epoch_diagnostics['equiv_loss_sum'] = epoch_diagnostics.get('equiv_loss_sum', 0.0) + equiv_loss_value
-                                epoch_diagnostics['equiv_batch_count'] = epoch_diagnostics.get('equiv_batch_count', 0) + 1
+                                # P0.4: Wrap equivariance in try/except to track failures
+                                try:
+                                    equiv_result, equiv_metrics = equiv_loss_fn(
+                                        hyper_lora=model.hyper_lora,
+                                        original_context=original_context,
+                                        augmented_contexts=augmented_contexts,
+                                        # v3: Iterative backward
+                                        scaler=scaler,
+                                        loss_weight=equiv_loss_fn.config.loss_weight,
+                                        grad_accumulation_steps=grad_accumulation_steps,
+                                    )
+                                    # equiv_result is now a float (backward already done inside)
+                                    equiv_loss_value = equiv_result
+                                    if isinstance(equiv_loss_value, torch.Tensor):
+                                        equiv_loss_value = equiv_loss_value.item()
+                                    losses['equiv_loss'] = equiv_loss_value  # Store for logging
+                                    # Note: Don't add to total_loss - backward already done inside
+                                    epoch_diagnostics['equiv_loss_sum'] = epoch_diagnostics.get('equiv_loss_sum', 0.0) + equiv_loss_value
+                                    epoch_diagnostics['equiv_batch_count'] = epoch_diagnostics.get('equiv_batch_count', 0) + 1
+                                    # Reset consecutive failures on success
+                                    epoch_diagnostics['equiv_consecutive_failures'] = 0
+                                except Exception as e:
+                                    # P0.4: Track equivariance failures for fail-loud monitoring
+                                    epoch_diagnostics['equiv_failures'] = epoch_diagnostics.get('equiv_failures', 0) + 1
+                                    epoch_diagnostics['equiv_consecutive_failures'] = epoch_diagnostics.get('equiv_consecutive_failures', 0) + 1
+                                    consec = epoch_diagnostics['equiv_consecutive_failures']
+                                    total_failures = epoch_diagnostics['equiv_failures']
+                                    # Log first 3 failures and every 10th
+                                    if total_failures <= 3 or total_failures % 10 == 0:
+                                        print(f"[EQUIV WARNING] Equivariance failed (total={total_failures}, consec={consec}): {e}")
+                                    # Critical alert after 10 consecutive failures
+                                    if consec >= 10 and not epoch_diagnostics.get('equiv_path_broken', False):
+                                        print(f"\n{'!'*60}")
+                                        print(f"[EQUIV CRITICAL] 10 consecutive equivariance failures!")
+                                        print(f"  The equiv=0 metric is masking a BROKEN equivariance path.")
+                                        print(f"  TTA consensus will likely be <25%.")
+                                        print(f"{'!'*60}\n")
+                                        epoch_diagnostics['equiv_path_broken'] = True
                             
                             # MEMORY FIX: Clean up augmented contexts after use
                             del augmented_contexts, support_features_detached
@@ -1577,9 +1634,45 @@ def train_epoch(
             
             # NaN detection: skip batch if loss is NaN
             if not torch.isfinite(loss):
+                # =============================================================
+                # P0.4: NaN ATTRIBUTION - Identify which component caused NaN
+                # =============================================================
+                nan_source = "unknown"
+                nan_components = []
+                
+                # Check each loss component individually
+                for key, val in losses.items():
+                    if key == 'total_loss':
+                        continue
+                    if torch.is_tensor(val):
+                        if not torch.isfinite(val).all():
+                            nan_components.append(key)
+                            # Prioritize attribution
+                            if 'loo' in key.lower():
+                                nan_source = "LOO loss (meta-learning)"
+                            elif 'equiv' in key.lower():
+                                nan_source = "Equivariance loss"
+                            elif 'task' in key.lower() or 'focal' in key.lower():
+                                nan_source = "Task loss"
+                            elif 'hpm' in key.lower():
+                                nan_source = "HPM balance loss"
+                    elif isinstance(val, float) and not math.isfinite(val):
+                        nan_components.append(key)
+                        if 'loo' in key.lower():
+                            nan_source = "LOO loss (meta-learning)"
+                        elif 'equiv' in key.lower():
+                            nan_source = "Equivariance loss"
+                
+                # Track NaN attribution for epoch summary
+                if 'nan_attribution' not in epoch_diagnostics:
+                    epoch_diagnostics['nan_attribution'] = {}
+                epoch_diagnostics['nan_attribution'][nan_source] = epoch_diagnostics['nan_attribution'].get(nan_source, 0) + 1
+                
                 # Detailed diagnostics on first NaN
                 if consecutive_nan == 0:
                     print(f"\n[WARNING] First NaN/Inf loss at batch {batch_idx}!")
+                    print(f"  🎯 ATTRIBUTION: {nan_source}")
+                    print(f"  NaN components: {nan_components}")
                     print(f"  Loss components: {', '.join(f'{k}={v.item():.4f}' if torch.is_tensor(v) else f'{k}={v}' for k,v in losses.items() if k != 'total_loss')}")
                     # Check model weights for NaN
                     nan_params = []
@@ -1595,9 +1688,12 @@ def train_epoch(
                         print(f"  Logits contain NaN/Inf! range=[{outputs['logits'].min():.4f}, {outputs['logits'].max():.4f}]")
                     if torch.is_tensor(outputs.get('attention_maps')) and not torch.isfinite(outputs['attention_maps']).all():
                         print(f"  Attention maps contain NaN/Inf!")
+                    # Check LoRA norms if available
+                    if epoch_diagnostics.get('lora_norm_ema', 0) > 0:
+                        print(f"  LoRA norm EMA: {epoch_diagnostics['lora_norm_ema']:.2f}")
                     print()
                 else:
-                    print(f"[WARNING] NaN/Inf loss at batch {batch_idx}, skipping...")
+                    print(f"[WARNING] NaN/Inf loss at batch {batch_idx} (source: {nan_source}), skipping...")
                 
                 optimizer.zero_grad()  # Clear any partial gradients
                 nan_batches += 1
@@ -2234,9 +2330,21 @@ def train_epoch(
             batch_class_correct = [0] * 10
             batch_class_total = [0] * 10
             
+            # Get task_ids for this batch (for task-level tracking)
+            batch_task_ids = batch.get('task_ids', [None] * B)
+            
             for i in range(B):
                 pred_i = preds[i]  # (H, W)
                 target_i = targets[i]  # (H, W)
+                
+                # Track which task this sample belongs to (for task-level accuracy)
+                sample_task_id = batch_task_ids[i] if i < len(batch_task_ids) else None
+                is_first_sample_for_task = False
+                if sample_task_id is not None:
+                    # Check if this is the FIRST sample we've seen for this task
+                    if sample_task_id not in epoch_diagnostics['seen_task_ids']:
+                        is_first_sample_for_task = True
+                    epoch_diagnostics['seen_task_ids'].add(sample_task_id)
                 
                 # Valid mask (exclude padding)
                 valid_mask = target_i != -100
@@ -2249,8 +2357,18 @@ def train_epoch(
                     batch_sample_accuracies.append(sample_acc)
                     
                     # Exact match (100% correct)
-                    if correct == valid_pixels:
+                    is_exact_match = (correct == valid_pixels)
+                    
+                    # FIRST-SAMPLE TRACKING: Record if first sample for this task was correct
+                    # This is the TRUE single-shot metric, comparable to eval
+                    if is_first_sample_for_task and sample_task_id is not None:
+                        epoch_diagnostics['first_sample_task_correct'][sample_task_id] = is_exact_match
+                    
+                    if is_exact_match:
                         batch_exact_match_count += 1
+                        # ANY-SAMPLE TRACKING: Mark task as solved (lenient metric)
+                        if sample_task_id is not None:
+                            epoch_diagnostics['solved_task_ids'].add(sample_task_id)
                         
                         # HPM DYNAMIC BUFFER POPULATION:
                         # When a sample is solved exactly, store its context in dynamic banks
@@ -2359,13 +2477,71 @@ def train_epoch(
             # TRACK META-LEARNING METRICS (for epoch 8+ debugging)
             # =============================================================
             # LoRA delta norms (shows HyperLoRA is producing non-trivial adaptations)
+            # P2.1: Optimized - aggregate on GPU, single .item() call to reduce sync overhead
             if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
-                lora_norm = 0.0
+                lora_norm_sq = torch.tensor(0.0, device=device)
                 for key, delta in outputs['lora_deltas'].items():
-                    lora_norm += delta.norm().item() ** 2
-                lora_norm = lora_norm ** 0.5
+                    if isinstance(delta, torch.Tensor):
+                        lora_norm_sq = lora_norm_sq + delta.pow(2).sum()
+                lora_norm = lora_norm_sq.sqrt().item()  # Single GPU sync
                 epoch_diagnostics['lora_delta_norm_sum'] += lora_norm
                 epoch_diagnostics['lora_delta_batch_count'] += 1
+                
+                # =============================================================
+                # P0.3: LORA NORM GOVERNOR - Auto-detect runaway HyperLoRA
+                # =============================================================
+                # Problem observed in 821b111: LoRA norms reached 62+ causing NaN
+                # Solution: EMA tracking with warn/critical/kill thresholds
+                
+                # Initialize governor state on first batch
+                if 'lora_norm_ema' not in epoch_diagnostics:
+                    epoch_diagnostics['lora_norm_ema'] = lora_norm
+                    epoch_diagnostics['lora_norm_max_seen'] = lora_norm
+                    epoch_diagnostics['lora_norm_warnings'] = 0
+                    epoch_diagnostics['lora_norm_critical_count'] = 0
+                
+                # Update EMA (smoothing factor 0.95 = ~20 batch window)
+                ema_alpha = 0.95
+                epoch_diagnostics['lora_norm_ema'] = ema_alpha * epoch_diagnostics['lora_norm_ema'] + (1 - ema_alpha) * lora_norm
+                epoch_diagnostics['lora_norm_max_seen'] = max(epoch_diagnostics['lora_norm_max_seen'], lora_norm)
+                
+                # Check thresholds (use EMA for stability, not raw value)
+                # Thresholds loaded from YAML at epoch start: lora_norm_*_threshold
+                ema_val = epoch_diagnostics['lora_norm_ema']
+                
+                if ema_val > lora_norm_kill_threshold:
+                    epoch_diagnostics['lora_norm_kill_count'] = epoch_diagnostics.get('lora_norm_kill_count', 0) + 1
+                    kill_count = epoch_diagnostics['lora_norm_kill_count']
+                    if kill_count == 1:
+                        print(f"\n{'!'*60}")
+                        print(f"[LORA GOVERNOR] KILL THRESHOLD EXCEEDED!")
+                        print(f"  EMA LoRA Norm: {ema_val:.2f} > {lora_norm_kill_threshold} (kill)")
+                        print(f"  Max seen this epoch: {epoch_diagnostics['lora_norm_max_seen']:.2f}")
+                        print(f"  This indicates HyperLoRA is exploding - model weights may be corrupted.")
+                        print(f"  Will abort after {lora_kill_consecutive_limit} consecutive kill-threshold breaches.")
+                        print(f"{'!'*60}\n")
+                    # P0.2: Actually abort after consecutive kill-threshold breaches
+                    if kill_count >= lora_kill_consecutive_limit:
+                        print(f"\n{'!'*60}")
+                        print(f"[LORA GOVERNOR] ABORTING EPOCH - {kill_count} consecutive kill-threshold breaches!")
+                        print(f"  EMA LoRA Norm: {ema_val:.2f} (threshold: {lora_norm_kill_threshold})")
+                        print(f"  Model weights are likely corrupted. Stopping to prevent wasted compute.")
+                        print(f"  Recommend: Reduce hyperlora_lr_multiplier or init_scale and restart.")
+                        print(f"{'!'*60}\n")
+                        epoch_diagnostics['lora_kill_abort'] = True
+                        break  # Exit batch loop
+                else:
+                    # Reset kill counter on non-kill batch
+                    epoch_diagnostics['lora_norm_kill_count'] = 0
+                
+                if ema_val > lora_norm_critical_threshold:
+                    epoch_diagnostics['lora_norm_critical_count'] += 1
+                    if epoch_diagnostics['lora_norm_critical_count'] <= 3:
+                        print(f"[LORA GOVERNOR] ⚠️ CRITICAL: LoRA norm EMA={ema_val:.2f} > {lora_norm_critical_threshold}")
+                elif ema_val > lora_norm_warn_threshold:
+                    epoch_diagnostics['lora_norm_warnings'] += 1
+                    if epoch_diagnostics['lora_norm_warnings'] <= 2:
+                        print(f"[LORA GOVERNOR] Warning: LoRA norm EMA={ema_val:.2f} > {lora_norm_warn_threshold}")
             
             # Context/support feature magnitude (shows context encoder is contributing)
             if 'support_features' in outputs and outputs['support_features'] is not None:
@@ -2516,6 +2692,14 @@ def train_epoch(
     # Log NaN batches if any occurred
     if nan_batches > 0:
         print(f"[WARNING] {nan_batches} batches had NaN loss and were skipped this epoch")
+        # P0.3: Check against YAML nan_batches_abort threshold
+        if nan_batches > nan_batches_abort:
+            print(f"\\n{'!'*60}")
+            print(f"[NaN ABORT] Epoch had {nan_batches} NaN batches > {nan_batches_abort} threshold!")
+            print(f"  This exceeds monitoring.nan_batches_abort from config.")
+            print(f"  Model may be unstable. Consider reducing learning rate.")
+            print(f"{'!'*60}\\n")
+            total_losses['nan_abort_triggered'] = True
     
     # Add augmentation diversity stats (CRITICAL for debugging)
     total_losses['aug_stats'] = epoch_aug_stats
@@ -3746,19 +3930,41 @@ Config Overrides:
     loo_min_pairs = loo_config.get('min_pairs_for_loo', 2)
     loo_max_pairs = loo_config.get('max_loo_pairs', 4)  # Cap LOO passes to prevent memory explosion
     
+    # ADAPTIVE BATCH SIZE CONFIG (Dec 2025)
+    # Configurable reduction instead of hardcoded formula
+    loo_batch_reduction_divisor = loo_config.get('batch_reduction_divisor', 2.0)  # Default: halve batch
+    loo_min_batch_size = loo_config.get('min_batch_size', 8)  # Safety floor
+    loo_adjust_grad_accum = loo_config.get('adjust_grad_accumulation', True)  # Maintain effective batch
+    
     # ADAPTIVE BATCH SIZE INITIALIZATION
     # If resuming from a checkpoint where LOO is already active, we must start with reduced batch size
     current_batch_size_override = None
+    current_grad_accum_override = None
+    base_grad_accum = train_cfg.get('grad_accumulation_steps', 4)
     if use_loo and start_epoch >= loo_start_epoch:
         base_batch_size = train_cfg['batch_size']
-        loo_batch_size = (base_batch_size // loo_max_pairs) - 2
-        loo_batch_size = max(loo_batch_size, 4)  # Minimum batch size of 4
+        # Use configurable divisor instead of hardcoded formula
+        loo_batch_size = int(base_batch_size / loo_batch_reduction_divisor)
+        loo_batch_size = max(loo_batch_size, loo_min_batch_size)  # Safety floor
         current_batch_size_override = loo_batch_size
+        
+        # Adjust grad accumulation to maintain effective batch size
+        if loo_adjust_grad_accum and loo_batch_size < base_batch_size:
+            # effective_batch = batch × grad_accum should stay constant
+            # new_grad_accum = old_effective / new_batch = (base_batch × base_accum) / new_batch
+            effective_batch = base_batch_size * base_grad_accum
+            new_grad_accum = max(1, int(round(effective_batch / loo_batch_size)))
+            current_grad_accum_override = new_grad_accum
+        
         print(f"\n{'='*60}")
         print(f"RESUMING WITH ADAPTIVE BATCH SIZE (LOO active)")
         print(f"{'='*60}")
-        print(f"  Original batch: {base_batch_size}")
-        print(f"  LOO batch: {loo_batch_size}")
+        print(f"  Original batch: {base_batch_size}, grad_accum: {base_grad_accum}")
+        print(f"  LOO batch: {loo_batch_size} (divisor={loo_batch_reduction_divisor})")
+        if current_grad_accum_override:
+            print(f"  Adjusted grad_accum: {current_grad_accum_override} (effective batch: {loo_batch_size * current_grad_accum_override})")
+            # Update config in-place so train_epoch picks up new grad_accumulation_steps
+            config['training']['grad_accumulation_steps'] = current_grad_accum_override
         print(f"{'='*60}\n")
         
         # Recreate loader immediately if resuming into LOO phase
@@ -4084,6 +4290,21 @@ Config Overrides:
     # After LOO activation, batch size is reduced to prevent OOM
     current_batch_size_override = None  # None = use config batch_size
     
+    # =============================================================
+    # MONITORING THRESHOLDS - Extract once for use in eval loop and abort checks
+    # =============================================================
+    monitoring_cfg = config.get('monitoring', {})
+    exact_match_warning = monitoring_cfg.get('exact_match_warning', 0.10)
+    exact_match_critical = monitoring_cfg.get('exact_match_critical', 0.20)
+    stop_value_warning = monitoring_cfg.get('stop_value_warning', 0.15)
+    stop_value_critical = monitoring_cfg.get('stop_value_critical', 0.25)
+    tta_consensus_warning = monitoring_cfg.get('tta_consensus_warning', 0.25)
+    tta_consensus_critical = monitoring_cfg.get('tta_consensus_critical', 0.15)
+    centroid_spread_warning = monitoring_cfg.get('centroid_spread_warning', 2.0)
+    centroid_spread_critical = monitoring_cfg.get('centroid_spread_critical', 0.5)
+    # P0.1: LoRA kill threshold for abort check (also read in train_epoch)
+    lora_norm_kill_threshold = monitoring_cfg.get('lora_norm_kill', 50.0)
+    
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
         
@@ -4394,16 +4615,30 @@ Config Overrides:
             # ADAPTIVE BATCH SIZE: Reduce batch size when LOO activates
             # ================================================================
             # LOO runs N forward passes per sample, multiplying memory usage.
-            # Formula: loo_batch_size = floor(original_batch / max_loo_pairs) - 2
-            # The -2 provides headroom for HPM overhead (~2GB static memory).
+            # Formula: loo_batch_size = floor(original_batch / batch_reduction_divisor)
+            # Configurable divisor (default 2.0) allows tuning based on observed VRAM usage.
+            # Observed: 10GB peak on 24GB GPU → can safely use divisor=2.0 (was ~4.4).
             base_batch_size = train_cfg['batch_size']
-            loo_batch_size = (base_batch_size // loo_max_pairs) - 2
-            loo_batch_size = max(loo_batch_size, 4)  # Minimum batch size of 4
+            loo_batch_size = int(base_batch_size / loo_batch_reduction_divisor)
+            loo_batch_size = max(loo_batch_size, loo_min_batch_size)  # Safety floor
             
-            print(f"\n  ADAPTIVE BATCH SIZE:")
-            print(f"    Original batch: {base_batch_size}")
-            print(f"    LOO batch: floor({base_batch_size} / {loo_max_pairs}) - 2 = {loo_batch_size}")
-            print(f"    Memory multiplier: {loo_max_pairs}x forward passes")
+            # Adjust grad accumulation to maintain effective batch size
+            orig_grad_accum = train_cfg.get('grad_accumulation_steps', 4)
+            new_grad_accum = orig_grad_accum
+            if loo_adjust_grad_accum and loo_batch_size < base_batch_size:
+                # effective_batch = batch × grad_accum should stay constant
+                effective_batch = base_batch_size * orig_grad_accum
+                new_grad_accum = max(1, int(round(effective_batch / loo_batch_size)))
+                current_grad_accum_override = new_grad_accum
+            
+            print(f"\n  ADAPTIVE BATCH SIZE (Dec 2025 - Configurable):")
+            print(f"    Original: batch={base_batch_size}, grad_accum={orig_grad_accum}, effective={base_batch_size * orig_grad_accum}")
+            print(f"    LOO batch: floor({base_batch_size} / {loo_batch_reduction_divisor}) = {loo_batch_size}")
+            if loo_adjust_grad_accum:
+                print(f"    Adjusted grad_accum: {new_grad_accum} (effective batch: {loo_batch_size * new_grad_accum})")
+                # Update config in-place so train_epoch picks up new grad_accumulation_steps
+                config['training']['grad_accumulation_steps'] = new_grad_accum
+            print(f"    Memory multiplier: {loo_max_pairs}x forward passes per sample")
             print(f"    Recreating DataLoader with reduced batch size...")
             
             # Track current batch size for future DataLoader recreations (curriculum transitions)
@@ -4478,6 +4713,51 @@ Config Overrides:
             epoch, config, scaler, global_step, ema, effective_loo_fn, effective_equiv_fn,
             loo_start_epoch=loo_start_epoch, equiv_start_epoch=equiv_start_epoch,
         )
+        
+        # ================================================================
+        # P0.1: HARD-STOP ENFORCEMENT FOR FATAL EVENTS (Dec 2025)
+        # ================================================================
+        # Check if epoch triggered abort conditions. If so, save checkpoint and stop.
+        # This prevents silently continuing on corrupted weights or unstable state.
+        # ================================================================
+        fatal_abort = False
+        abort_reason = ""
+        
+        # Check NaN abort threshold
+        if train_losses.get('nan_abort_triggered', False):
+            fatal_abort = True
+            abort_reason = f"NaN batches exceeded monitoring.nan_batches_abort threshold"
+        
+        # Check LoRA kill abort
+        if train_losses.get('diagnostics', {}).get('lora_kill_abort', False):
+            fatal_abort = True
+            abort_reason = f"LoRA norm exceeded kill threshold ({lora_norm_kill_threshold}) for {3} consecutive batches"
+        
+        if fatal_abort:
+            print(f"\n{'!'*60}")
+            print(f"[FATAL] TRAINING ABORTED - {abort_reason}")
+            print(f"{'!'*60}")
+            print(f"Saving emergency checkpoint before exit...")
+            
+            # Save emergency checkpoint
+            emergency_path = checkpoint_dir / f"emergency_epoch_{epoch + 1}.pt"
+            save_checkpoint(
+                model, optimizer, scheduler, epoch, global_step,
+                train_losses, best_task_accuracy, config, str(emergency_path)
+            )
+            print(f"Emergency checkpoint saved to: {emergency_path}")
+            print(f"\nRecommended actions:")
+            print(f"  1. Reduce learning_rate (current: {config['training']['learning_rate']})")
+            print(f"  2. Reduce hyperlora_init_scale or hyperlora_lr_multiplier")
+            print(f"  3. Check data pipeline for corrupted samples")
+            print(f"  4. Resume from last stable checkpoint with adjusted config")
+            print(f"{'!'*60}\n")
+            
+            # Cleanup and exit
+            if tee_logger:
+                tee_logger.close()
+            cleanup_memory()
+            raise RuntimeError(f"Training aborted: {abort_reason}")
         
         # ================================================================
         # PATCH 4: NaN-Driven Meta-Loss Backoff (Dec 2025)
@@ -4995,13 +5275,18 @@ Config Overrides:
                     print(f"    Good entropy ({mean_entropy:.2f}) - attention is focused!")
             
             # Centroid spread
+            # P1.6: Enhanced centroid diversity monitoring (821b111 showed spread=0.19 collapse)
+            # Now uses YAML thresholds: centroid_spread_warning, centroid_spread_critical
             centroid_spread = diagnostics.get('centroid_spread', 0)
             if centroid_spread > 0:
                 print(f"  Centroid Spread: {centroid_spread:.2f} (higher=more diverse)")
-                if centroid_spread < 2.0:
-                    print(f"    [!] Clues clustered (spread < 2) - should spread out")
+                if centroid_spread < centroid_spread_critical:
+                    print(f"    🚨 CRITICAL COLLAPSE: Spread={centroid_spread:.2f} < {centroid_spread_critical} - all clues at same location!")
+                    print(f"    [!] Stop predictor cannot differentiate - needs diversity regularizer")
+                elif centroid_spread < centroid_spread_warning:
+                    print(f"    ⚠️ Clues clustered (spread < {centroid_spread_warning}) - should spread out")
                 elif centroid_spread > 8.0:
-                    print(f"    Good spread - clues are distributed across grid")
+                    print(f"    ✓ Good spread - clues are distributed across grid")
             
             # ============================================================
             # NEW DIAGNOSTICS: Entropy-Stop Coupling & Sparsity Components
@@ -5111,20 +5396,37 @@ Config Overrides:
                         print(f"    [!] HyperLoRA gradients near zero - not learning!")
                 
                 # Equivariance Loss Metrics
+                # P1.5: Fixed "equiv=0 means good" bug - now distinguishes success from failure
                 equiv_loss_sum = diagnostics.get('equiv_loss_sum', 0.0)
                 equiv_batch_count = diagnostics.get('equiv_batch_count', 0)
+                equiv_failures = diagnostics.get('equiv_failures', 0)  # From P0.2 tracking
+                
                 if equiv_batch_count > 0:
                     avg_equiv_loss = equiv_loss_sum / equiv_batch_count
                     print(f"  Equivariance Loss (avg): {avg_equiv_loss:.4f}")
-                    # Interpret equivariance loss
-                    if avg_equiv_loss < 0.05:
+                    
+                    # P1.5: Check if equiv=0 is real success or silent failure
+                    if avg_equiv_loss < 0.001 and equiv_batch_count < 10:
+                        # Suspiciously low with few samples - likely failed silently
+                        print(f"    ⚠️ SUSPICIOUS: equiv≈0 with only {equiv_batch_count} batches")
+                        print(f"    [!] Check if equivariance path is working (may be silent failures)")
+                    elif avg_equiv_loss < 0.05 and equiv_failures == 0:
                         print(f"    ✓ EXCELLENT: LoRA predictions consistent across augmentations")
+                    elif avg_equiv_loss < 0.05 and equiv_failures > 0:
+                        # Low loss but had failures - the "good" batches may be hiding issues
+                        print(f"    ⚠️ MIXED: Low avg but {equiv_failures} failures detected")
+                        print(f"    [!] Some batches silently failed - TTA may have low consensus")
                     elif avg_equiv_loss < 0.2:
                         print(f"    ✓ Good: HyperLoRA learning augmentation invariance")
                     elif avg_equiv_loss < 0.5:
                         print(f"    Learning: Equivariance still converging...")
                     else:
                         print(f"    [!] High equivariance loss - LoRA predictions vary with augmentation")
+                else:
+                    # P1.5: Explicitly flag when equivariance is enabled but never computed
+                    if epoch >= config['training'].get('equivariance_training', {}).get('start_epoch', 12):
+                        print(f"  Equivariance: ⚠️ BROKEN - 0 batches computed (should be active)")
+                        print(f"    [!] Equivariance path is silently failing - TTA will have <25% consensus")
                 
                 # Meta-Learning Health Summary (combined status)
                 print(f"  --- Meta-Learning Health Summary ---")
@@ -5606,16 +5908,19 @@ Config Overrides:
                         health_warnings.append(f"⚠ Stop probs uniform (std={stop_std:.3f}) - early epoch OK")
             
             # === CHECK 3: Centroid Spread (should be spread, not clustered) ===
+            # Uses YAML thresholds: centroid_spread_warning, centroid_spread_critical
             centroid_spread = diagnostics.get('centroid_spread', 0)
-            if centroid_spread > 5.0:
-                health_checks.append(f"✓ Centroids spread out ({centroid_spread:.1f} > 5)")
-            elif centroid_spread > 2.0:
+            if centroid_spread > centroid_spread_warning * 2.5:  # Good = well above warning
+                health_checks.append(f"✓ Centroids spread out ({centroid_spread:.1f} > {centroid_spread_warning * 2.5:.1f})")
+            elif centroid_spread > centroid_spread_warning:
                 health_warnings.append(f"⚠ Centroids moderately spread ({centroid_spread:.1f})")
-            else:
+            elif centroid_spread > centroid_spread_critical:
                 if epoch > 10:
-                    health_critical.append(f"✗ Centroids clustered ({centroid_spread:.1f} < 2)")
+                    health_critical.append(f"✗ Centroids clustered ({centroid_spread:.1f} < {centroid_spread_warning})")
                 else:
                     health_warnings.append(f"⚠ Centroids clustered ({centroid_spread:.1f}) - early epoch OK")
+            else:
+                health_critical.append(f"✗ Centroid COLLAPSE ({centroid_spread:.1f} < {centroid_spread_critical})")
             
             # === CHECK 4: Entropy-Stop Coupling (should be positive) ===
             clue_loss_corr = diagnostics.get('clue_loss_correlation', 0)
@@ -5805,29 +6110,50 @@ Config Overrides:
                     print(f"  Avg Winner Votes: {trm_metrics['avg_winner_votes']:.1f} / {trm_metrics['total_views']}")
                     
                     # GAP MONITORING: Compare train metrics vs eval metrics
-                    train_exact_match = epoch_exact_match_pct / 100.0  # Convert to 0-1
+                    # FIXED (Dec 2025): Uses FIRST-SAMPLE metric for true apples-to-apples comparison!
+                    # Only the FIRST sample seen per task counts - no "multiple attempts" advantage.
+                    # This matches eval behavior exactly (single-shot per task).
+                    
+                    # FIRST-SAMPLE metric (strict, comparable to eval)
+                    first_sample_results = diagnostics.get('first_sample_task_correct', {})
+                    first_sample_correct = sum(1 for v in first_sample_results.values() if v)
+                    first_sample_total = len(first_sample_results)
+                    train_first_sample_acc = (first_sample_correct / first_sample_total) if first_sample_total > 0 else 0.0
+                    
+                    # ANY-SAMPLE metric (lenient, for reference)
+                    solved_tasks_any = len(diagnostics.get('solved_task_ids', set()))
+                    seen_tasks = len(diagnostics.get('seen_task_ids', set()))
+                    train_any_sample_acc = (solved_tasks_any / seen_tasks) if seen_tasks > 0 else 0.0
+                    
+                    # Sample-level for reference
+                    train_sample_level_acc = epoch_exact_match_pct / 100.0
+                    
                     eval_exact_match = trm_metrics.get('exact_match', 0)
-                    gap = train_exact_match - eval_exact_match
+                    gap = train_first_sample_acc - eval_exact_match  # TRUE apples-to-apples!
                     
                     # GENERALIZATION HEALTH METRICS
-                    print(f"\n  --- Generalization Health ---")
-                    print(f"  Train Exact Match: {train_exact_match:.1%}")
-                    print(f"  Eval Exact Match (TTA): {eval_exact_match:.1%}")
-                    print(f"  Delta (Train - Eval): {gap:.1%}")
+                    print(f"\n  --- Generalization Health (SINGLE-SHOT) ---")
+                    print(f"  Train Tasks (first-sample): {first_sample_correct}/{first_sample_total} ({train_first_sample_acc:.1%})")
+                    print(f"  Eval Tasks (TTA): {trm_metrics['correct_tasks']}/{trm_metrics['total_tasks']} ({eval_exact_match:.1%})")
+                    print(f"  Train→Eval Gap: {gap:.1%} [true single-shot comparison]")
+                    print(f"  (Any-sample train: {train_any_sample_acc:.1%} | Sample-level: {train_sample_level_acc:.1%})")
                     
-                    if gap > 0.20:
-                        print(f"  🚨 CRITICAL GAP: {gap:.1%} > 20% - Model overfitting!")
-                    elif gap > 0.10:
-                        print(f"  ⚠️ WARNING GAP: {gap:.1%} > 10% - Monitor closely")
-                    elif gap > 0.05:
+                    # Use YAML thresholds for exact match gap
+                    if gap > exact_match_critical:
+                        print(f"  🚨 CRITICAL GAP: {gap:.1%} > {exact_match_critical:.0%} - Model overfitting!")
+                    elif gap > exact_match_warning:
+                        print(f"  ⚠️ WARNING GAP: {gap:.1%} > {exact_match_warning:.0%} - Monitor closely")
+                    elif gap > exact_match_warning / 2:
                         print(f"  ℹ️ Mild gap: {gap:.1%} - Acceptable")
                     else:
                         print(f"  ✅ Healthy gap: {gap:.1%} - Good generalization!")
                     
-                    # Check voting consensus
+                    # Check voting consensus using YAML thresholds
                     consensus_ratio = trm_metrics['avg_winner_votes'] / trm_metrics['total_views']
-                    if consensus_ratio < 0.25:  # Less than 25% agreement
-                        print(f"  🚨 LOW CONSENSUS: {consensus_ratio:.0%} - Model not dihedral-invariant!")
+                    if consensus_ratio < tta_consensus_critical:
+                        print(f"  🚨 CRITICAL CONSENSUS: {consensus_ratio:.0%} < {tta_consensus_critical:.0%} - Equivariance broken!")
+                    elif consensus_ratio < tta_consensus_warning:
+                        print(f"  ⚠️ LOW CONSENSUS: {consensus_ratio:.0%} < {tta_consensus_warning:.0%} - Model not dihedral-invariant!")
                     elif consensus_ratio < 0.5:
                         print(f"  ⚠️ Moderate consensus: {consensus_ratio:.0%}")
                     else:
@@ -5889,12 +6215,15 @@ Config Overrides:
             if ema is not None:
                 print("  (Using EMA weights for evaluation)")
                 # Check for EMA lag - compare training stop_prob vs eval stop_prob
+                # Uses YAML thresholds: stop_value_warning, stop_value_critical
                 train_stop_prob = diagnostics.get('stop_prob_mean', 0) if diagnostics else 0
                 if train_stop_prob > 0 and eval_stop_prob > 0:
-                    ema_diff = abs(train_stop_prob - eval_stop_prob)
-                    if ema_diff > 0.2:
-                        print(f"  [!] EMA LAG DETECTED: train_stop={train_stop_prob:.3f} vs eval_stop={eval_stop_prob:.3f}")
+                    stop_gap = abs(train_stop_prob - eval_stop_prob)
+                    if stop_gap > stop_value_critical:
+                        print(f"  🚨 CRITICAL EMA LAG: train_stop={train_stop_prob:.3f} vs eval_stop={eval_stop_prob:.3f} (gap={stop_gap:.3f} > {stop_value_critical})")
                         print(f"      EMA decay may be too high (0.999), consider 0.99 or 0.995")
+                    elif stop_gap > stop_value_warning:
+                        print(f"  ⚠️ EMA LAG DETECTED: train_stop={train_stop_prob:.3f} vs eval_stop={eval_stop_prob:.3f} (gap={stop_gap:.3f})")
             
             # ============================================================
             # BACKGROUND COLLAPSE DETECTION - CRITICAL FOR DEBUGGING
