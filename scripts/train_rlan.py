@@ -303,14 +303,20 @@ def get_tensor_memory_breakdown(model, outputs: dict = None, batch: dict = None)
             module_memory[name] = mod_bytes / 1024 / 1024
     breakdown['per_module_mb'] = module_memory
     
-    # Track which optional modules are ACTIVE (critical for debugging staged activation)
+    # Track which optional modules are ACTIVE at this moment (critical for debugging staged activation)
+    # Note: These reflect RUNTIME state, not YAML config. Modules may be configured but not yet active
+    # due to staged activation (e.g., HPM configured but hpm_start_epoch not yet reached).
     active_modules = {}
     active_modules['hyperlora_active'] = getattr(model, 'hyperlora_active', False)
     active_modules['solver_context_active'] = getattr(model, 'solver_context_active', False)
     active_modules['cross_attention_active'] = getattr(model, 'cross_attention_active', False)
-    active_modules['use_hpm'] = getattr(model, 'use_hpm', False)
-    active_modules['use_loo'] = getattr(model, 'loo_enabled', False)
-    active_modules['use_equivariance'] = getattr(model, 'equivariance_enabled', False)
+    # HPM: model.use_hpm is toggled by training script at hpm_start_epoch
+    # Also check if HPM module actually exists (model.hpm is not None)
+    active_modules['hpm_active'] = getattr(model, 'use_hpm', False) and getattr(model, 'hpm', None) is not None
+    # LOO/Equivariance: These are controlled by training loop, not model attributes
+    # Check if the attributes exist (set by training loop)
+    active_modules['loo_active'] = getattr(model, 'loo_enabled', False)
+    active_modules['equivariance_active'] = getattr(model, 'equivariance_enabled', False)
     breakdown['active_modules'] = active_modules
     
     return breakdown
@@ -342,11 +348,12 @@ def format_memory_breakdown(breakdown: Dict[str, Any], prefix: str = "      ") -
         for name, mb in module_items[:5]:
             lines.append(f"{prefix}  {name}: {mb:.1f}MB")
     
-    # Active modules status (CRITICAL for debugging staged activation)
+    # Active modules status (shows RUNTIME activation, not YAML config)
+    # Modules may be configured in YAML but inactive until their start_epoch is reached
     if 'active_modules' in breakdown:
         active = breakdown['active_modules']
-        active_list = [k for k, v in active.items() if v]
-        inactive_list = [k for k, v in active.items() if not v]
+        active_list = [k.replace('_active', '') for k, v in active.items() if v]
+        inactive_list = [k.replace('_active', '') for k, v in active.items() if not v]
         if active_list:
             lines.append(f"{prefix}Active modules: {', '.join(active_list)}")
         if inactive_list:
@@ -4752,6 +4759,11 @@ Config Overrides:
         meta_learning_active = epoch >= meta_learning_start_epoch
         effective_loo_fn = loo_loss_fn if meta_learning_active else None
         effective_equiv_fn = equiv_loss_fn if meta_learning_active else None
+        
+        # Set model attributes for LOO/Equivariance activation state
+        # This allows memory breakdown logging to show correct activation status
+        model.loo_enabled = use_loo and epoch >= loo_start_epoch
+        model.equivariance_enabled = use_equivariance and epoch >= equiv_start_epoch
         
         # ======================================================================
         # META ESCALATION: Apply escalated weights to loss functions (Dec 2025)
