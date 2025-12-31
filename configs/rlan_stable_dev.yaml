@@ -553,6 +553,63 @@ training:
   # - 10x ensures HyperLoRA doesn't become a bottleneck
   # =============================================================
 
+  # =============================================================
+  # META ESCALATION: LATE-PHASE STRENGTH INCREASE (Dec 2025)
+  # =============================================================
+  # After the baseline training is stable (epochs 0-24), we can safely
+  # increase meta-learning signal strength to improve AGI-ARC generalization.
+  #
+  # PROBLEM SOLVED:
+  # Current weights (HyperLoRA=0.1, equiv=0.01, loo=0.05) are "safe but capped":
+  #   ∇L = ∇L_task + λ_equiv*∇L_equiv + λ_loo*∇L_loo
+  # If λ values stay too small, meta terms never become impactful enough
+  # to carve the invariances/generalization needed for never-seen rules.
+  #
+  # SOLUTION:
+  # Stability-gated late-phase escalation:
+  # - Only increase weights after training is demonstrably stable
+  # - Automatic pause on any instability (NaN, grad explosion)
+  # - Asymmetric backoff/recovery: fast backoff, slow recovery
+  #
+  # ONE-RUN PROOF: This creates a within-run "A/B test":
+  # - Phase A (epochs 0-24): baseline behavior (meta signals weak, stable)
+  # - Phase B (epochs 25-36): gated ramp (meta signals increase if stable)
+  # - Phase C (epochs 37+): hold at target (observe AGI-ARC improvement)
+  # =============================================================
+  meta_escalation:
+    enabled: true                    # Set to false to disable (baseline behavior)
+    
+    # When to start increasing meta-learning strength
+    start_epoch: 25                  # After LOO is stable (18 + 7 epochs)
+    ramp_epochs: 12                  # Gradual increase over 12 epochs
+    schedule: linear                 # linear | cosine
+    
+    # Target values (conservative but impactful)
+    # These are what we ramp TOWARD, not what we jump to
+    targets:
+      hyperlora_delta_scale: 0.30    # Current: 0.1 → Target: 0.3 (3x increase)
+      equiv_loss_weight: 0.05        # Current: 0.01 → Target: 0.05 (5x increase)
+      loo_loss_weight: 0.10          # Current: 0.05 → Target: 0.10 (2x increase)
+    
+    # Stability gating (controls whether escalation pauses on instability)
+    # When true: escalation pauses if previous epoch had instability events
+    # When false: always follow schedule regardless of instability (for ablations)
+    require_stability: true
+    
+    # Per-epoch thresholds (gating checks previous epoch's counters)
+    # These are NOT rolling windows - counters reset each epoch
+    max_grad_explosion_events_per_epoch: 0    # Must be zero for stability
+    max_lr_backoff_events_per_epoch: 0        # Must be zero for stability  
+    max_consecutive_nan_streak_per_epoch: 0   # Must be zero for stability
+    
+    # Recovery after backoff (prevents permanent suppression)
+    # If NaN/explosion causes weight reduction, this restores toward target once stable
+    recovery_enabled: true
+    recovery_step_per_window: 0.05   # +5% of gap per stable window
+    
+    # Logging
+    log_every_epoch: true            # Log escalation state every epoch
+
 data:
   train_path: "./data/arc-agi/data/training"
   eval_path: "./data/arc-agi/data/evaluation"
@@ -741,7 +798,7 @@ monitoring:
 logging:
   log_every: 1
   save_every: 10
-  eval_every: 1  # Changed from 5 to detect train/eval gap early
+  eval_every: 10  # Every 10 epochs (was 1) - TTA on 100 tasks is expensive
   keep_last_n: 3
   checkpoint_dir: "checkpoints/rlan_stable"
   log_to_file: true

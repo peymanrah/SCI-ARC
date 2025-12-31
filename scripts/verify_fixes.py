@@ -147,13 +147,14 @@ def test_configs():
             else:
                 print(f"  {config_name}: use_ema=false ✓")
             
-            # Check eval_every is 1
+            # Check eval_every is reasonable (>= 1, was strictly 1 before Dec 2025)
+            # Now accepts eval_every >= 1 for flexibility (10 recommended for expensive TTA)
             eval_every = config.get('logging', {}).get('eval_every', 5)
-            if eval_every != 1:
-                print(f"  {config_name}: eval_every should be 1 but is {eval_every}")
+            if eval_every < 1:
+                print(f"  {config_name}: eval_every should be >= 1 but is {eval_every}")
                 configs_ok = False
             else:
-                print(f"  {config_name}: eval_every=1 ✓")
+                print(f"  {config_name}: eval_every={eval_every} ✓")
                 
         except Exception as e:
             print(f"  {config_name}: ERROR - {e}")
@@ -223,7 +224,7 @@ def main():
         print("  1. Gumbel noise removed from DSC (train=eval behavior)")
         print("  2. TRM-style evaluator with inverse augmentation")
         print("  3. EMA disabled for 20-epoch training")
-        print("  4. eval_every=1 for per-epoch monitoring")
+        print("  4. eval_every configured (10 recommended for expensive TTA)")
     else:
         print("SOME TESTS FAILED! Review before production training.")
     print("=" * 60)

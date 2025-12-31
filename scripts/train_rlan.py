@@ -3857,6 +3857,94 @@ Config Overrides:
     }
     nan_backoff_threshold = 3  # Consecutive NaN batches to trigger backoff
     
+    # ==========================================================================
+    # META ESCALATION: Late-phase stability-gated weight increase (Dec 2025)
+    # ==========================================================================
+    # After baseline training is stable, we increase meta-learning signal strength
+    # to improve AGI-ARC generalization on never-seen rules.
+    # ==========================================================================
+    meta_escalation_config = config.get('training', {}).get('meta_escalation', {})
+    meta_escalation_enabled = meta_escalation_config.get('enabled', False)
+    meta_escalation_start_epoch = meta_escalation_config.get('start_epoch', 25)
+    meta_escalation_ramp_epochs = meta_escalation_config.get('ramp_epochs', 12)
+    meta_escalation_schedule = meta_escalation_config.get('schedule', 'linear')
+    
+    # Target values (what we ramp toward)
+    meta_escalation_targets = meta_escalation_config.get('targets', {})
+    target_hyperlora_delta_scale = meta_escalation_targets.get('hyperlora_delta_scale', 0.30)
+    target_equiv_weight = meta_escalation_targets.get('equiv_loss_weight', 0.05)
+    target_loo_weight = meta_escalation_targets.get('loo_loss_weight', 0.10)
+    
+    # Stability gating (controls pause/resume behavior)
+    meta_escalation_require_stability = meta_escalation_config.get('require_stability', True)
+    # Backward compatible: check new names first, fall back to old names
+    meta_escalation_max_grad_events = meta_escalation_config.get(
+        'max_grad_explosion_events_per_epoch',
+        meta_escalation_config.get('max_grad_explosion_events_in_window', 0)  # Old name fallback
+    )
+    meta_escalation_max_lr_events = meta_escalation_config.get(
+        'max_lr_backoff_events_per_epoch',
+        meta_escalation_config.get('max_lr_backoff_events_in_window', 0)  # Old name fallback
+    )
+    meta_escalation_max_nan_streak = meta_escalation_config.get(
+        'max_consecutive_nan_streak_per_epoch',
+        meta_escalation_config.get('max_consecutive_nan_streak_in_window', 0)  # Old name fallback
+    )
+    
+    # Recovery settings
+    meta_escalation_recovery_enabled = meta_escalation_config.get('recovery_enabled', True)
+    meta_escalation_recovery_step = meta_escalation_config.get('recovery_step_per_window', 0.05)
+    meta_escalation_log_every_epoch = meta_escalation_config.get('log_every_epoch', True)
+    
+    # Meta escalation state tracking
+    meta_escalation_state = {
+        # Current applied values (what's actually used in forward/loss)
+        'hyperlora_delta_scale_current': hyperlora_warmup_end_scale,  # Start from warmup end
+        'equiv_weight_current': equiv_weight,  # Start from config baseline
+        'loo_weight_current': loo_weight,      # Start from config baseline
+        
+        # Scheduled values (what we're ramping toward, may be paused)
+        'hyperlora_delta_scale_scheduled': hyperlora_warmup_end_scale,
+        'equiv_weight_scheduled': equiv_weight,
+        'loo_weight_scheduled': loo_weight,
+        
+        # Progress tracking
+        'escalation_active': False,  # Whether we've started escalation phase
+        'escalation_paused': False,  # Whether escalation is paused due to instability
+        'escalation_progress': 0.0,  # 0.0 to 1.0 progress through ramp
+        
+        # Stability tracking (epoch-based, not rolling window)
+        # Note: Despite config naming, gating uses per-epoch counters reset each epoch
+        'stable_epochs_count': 0,  # Consecutive stable epochs
+        'is_stable': True,  # Whether previous epoch was stable
+        
+        # Per-epoch counters (reset each epoch)
+        'grad_explosion_events_epoch': 0,
+        'lr_backoff_events_epoch': 0,
+        'max_nan_streak_epoch': 0,
+    }
+    
+    if meta_escalation_enabled:
+        print(f"\n{'='*60}")
+        print(f"META ESCALATION ENABLED (Late-Phase Strength Increase)")
+        print(f"{'='*60}")
+        print(f"  Schedule: {meta_escalation_schedule}")
+        print(f"  Start epoch: {meta_escalation_start_epoch + 1}")
+        print(f"  Ramp epochs: {meta_escalation_ramp_epochs}")
+        print(f"  Targets:")
+        print(f"    HyperLoRA delta_scale: {hyperlora_warmup_end_scale} → {target_hyperlora_delta_scale}")
+        print(f"    Equiv weight: {equiv_weight} → {target_equiv_weight}")
+        print(f"    LOO weight: {loo_weight} → {target_loo_weight}")
+        print(f"  Stability gating:")
+        if meta_escalation_require_stability:
+            print(f"    Mode: GATED (pauses on instability, resumes when stable)")
+            print(f"    Max allowed per epoch: nan_streak={meta_escalation_max_nan_streak}, grad_events={meta_escalation_max_grad_events}, lr_events={meta_escalation_max_lr_events}")
+        else:
+            print(f"    Mode: FORCE (always follows schedule, ignores instability - for ablations)")
+        if meta_escalation_recovery_enabled:
+            print(f"  Recovery: +{meta_escalation_recovery_step*100:.0f}% per stable window")
+        print(f"{'='*60}\n")
+    
     if use_loo or use_equivariance:
         print(f"\n{'='*60}")
         print(f"STAGED META-LEARNING ENABLED (Scientifically Ordered)")
@@ -3946,6 +4034,29 @@ Config Overrides:
     eval_every = log_cfg.get('eval_every', 1)
     keep_last_n = log_cfg.get('keep_last_n', 5)
     
+    # ================================================================
+    # PRE-CACHE EVAL TASKS (Dec 2025 - Prod optimization)
+    # ================================================================
+    # Load TRM/TTA eval tasks ONCE before training loop to avoid
+    # re-parsing JSON files every evaluation epoch.
+    # ================================================================
+    cached_eval_tasks = None
+    use_trm_eval = config.get('evaluation', {}).get('use_trm_style_eval', False)
+    if use_trm_eval:
+        eval_path = Path(config['data']['eval_path'])
+        max_eval_tasks = config.get('evaluation', {}).get('max_eval_tasks', 50)
+        if eval_path.is_dir():
+            cached_eval_tasks = []
+            for json_file in sorted(eval_path.glob('*.json'))[:max_eval_tasks]:
+                try:
+                    with open(json_file, 'r') as f:
+                        task_data = json.load(f)
+                    cached_eval_tasks.append(task_data)
+                except Exception:
+                    pass
+            if cached_eval_tasks:
+                print(f"  [Eval Cache] Pre-loaded {len(cached_eval_tasks)} TRM eval tasks")
+    
     print(f"\nStarting training from epoch {start_epoch} to {max_epochs}")
     print("=" * 60)
     
@@ -4033,6 +4144,10 @@ Config Overrides:
             activation_lr_state['reduction_epoch'] = epoch
             effective_lr = activation_lr_state['original_lr'] * activation_lr_state['activation_factor']
             print(f"  [LR] Reduced to {effective_lr:.2e} (×{activation_lr_reduction}) for stability")
+            
+            # Track for meta escalation stability gating
+            if meta_escalation_enabled:
+                meta_escalation_state['lr_backoff_events_epoch'] += 1
         
         # Recover LR after recovery period (Patch 3: use composable factors)
         if activation_lr_state['reduced']:
@@ -4124,6 +4239,126 @@ Config Overrides:
                 model.hyper_lora.delta_scale = hyperlora_warmup_end_scale
                 print(f"  [HyperLoRA Warmup Complete] delta_scale = {hyperlora_warmup_end_scale}")
         
+        # ======================================================================
+        # META ESCALATION: Stability-gated late-phase weight increase (Dec 2025)
+        # ======================================================================
+        # After start_epoch, gradually increase meta-learning weights toward targets
+        # ONLY if training is stable. Pauses on instability, resumes when stable.
+        # ======================================================================
+        if meta_escalation_enabled and epoch >= meta_escalation_start_epoch:
+            # Mark escalation as active
+            if not meta_escalation_state['escalation_active']:
+                meta_escalation_state['escalation_active'] = True
+                print(f"\n{'='*60}")
+                print(f"META ESCALATION PHASE STARTED (epoch {epoch + 1})")
+                print(f"{'='*60}")
+                print(f"  Ramping meta-learning weights toward targets over {meta_escalation_ramp_epochs} epochs")
+                print(f"  Gated by stability: will pause if instability detected")
+                print(f"{'='*60}\n")
+            
+            # Compute scheduled values based on progress
+            if meta_escalation_ramp_epochs > 0:
+                raw_progress = (epoch - meta_escalation_start_epoch) / meta_escalation_ramp_epochs
+            else:
+                raw_progress = 1.0
+            scheduled_progress = min(1.0, max(0.0, raw_progress))
+            
+            # Apply schedule type
+            if meta_escalation_schedule == 'cosine':
+                import math
+                # Cosine annealing: slower at start and end, faster in middle
+                scheduled_progress = 0.5 * (1.0 - math.cos(math.pi * scheduled_progress))
+            # else linear (default)
+            
+            # Compute scheduled target values
+            scheduled_hyperlora = hyperlora_warmup_end_scale + scheduled_progress * (target_hyperlora_delta_scale - hyperlora_warmup_end_scale)
+            scheduled_equiv = equiv_weight + scheduled_progress * (target_equiv_weight - equiv_weight)
+            scheduled_loo = loo_weight + scheduled_progress * (target_loo_weight - loo_weight)
+            
+            meta_escalation_state['hyperlora_delta_scale_scheduled'] = scheduled_hyperlora
+            meta_escalation_state['equiv_weight_scheduled'] = scheduled_equiv
+            meta_escalation_state['loo_weight_scheduled'] = scheduled_loo
+            meta_escalation_state['escalation_progress'] = scheduled_progress
+            
+            # Check stability: use info from previous epoch
+            # ONLY if require_stability is True; otherwise always follow schedule
+            prev_nan_streak = meta_escalation_state['max_nan_streak_epoch']
+            prev_grad_events = meta_escalation_state['grad_explosion_events_epoch']
+            prev_lr_events = meta_escalation_state['lr_backoff_events_epoch']
+            
+            if meta_escalation_require_stability:
+                # Stability-gated mode: check previous epoch for instability events
+                is_stable = (
+                    prev_nan_streak <= meta_escalation_max_nan_streak and
+                    prev_grad_events <= meta_escalation_max_grad_events and
+                    prev_lr_events <= meta_escalation_max_lr_events
+                )
+            else:
+                # Force-schedule mode: always considered stable (for ablations)
+                is_stable = True
+            meta_escalation_state['is_stable'] = is_stable
+            
+            if not is_stable:
+                meta_escalation_state['escalation_paused'] = True
+                meta_escalation_state['stable_epochs_count'] = 0
+                # Don't increase weights, but don't decrease either (backoff handles that)
+                if meta_escalation_log_every_epoch:
+                    print(f"  [Meta Escalation] PAUSED due to instability (nan={prev_nan_streak}, grad={prev_grad_events}, lr={prev_lr_events})")
+            else:
+                meta_escalation_state['stable_epochs_count'] = meta_escalation_state.get('stable_epochs_count', 0) + 1
+                
+                if meta_escalation_state['escalation_paused']:
+                    # Recovery: slowly move current toward scheduled
+                    if meta_escalation_recovery_enabled:
+                        gap_hyperlora = scheduled_hyperlora - meta_escalation_state['hyperlora_delta_scale_current']
+                        gap_equiv = scheduled_equiv - meta_escalation_state['equiv_weight_current']
+                        gap_loo = scheduled_loo - meta_escalation_state['loo_weight_current']
+                        
+                        recovery_hyperlora = meta_escalation_state['hyperlora_delta_scale_current'] + meta_escalation_recovery_step * gap_hyperlora
+                        recovery_equiv = meta_escalation_state['equiv_weight_current'] + meta_escalation_recovery_step * gap_equiv
+                        recovery_loo = meta_escalation_state['loo_weight_current'] + meta_escalation_recovery_step * gap_loo
+                        
+                        meta_escalation_state['hyperlora_delta_scale_current'] = min(recovery_hyperlora, scheduled_hyperlora)
+                        meta_escalation_state['equiv_weight_current'] = min(recovery_equiv, scheduled_equiv)
+                        meta_escalation_state['loo_weight_current'] = min(recovery_loo, scheduled_loo)
+                        
+                        # Check if we've caught up to schedule
+                        if (abs(meta_escalation_state['hyperlora_delta_scale_current'] - scheduled_hyperlora) < 0.001 and
+                            abs(meta_escalation_state['equiv_weight_current'] - scheduled_equiv) < 0.001 and
+                            abs(meta_escalation_state['loo_weight_current'] - scheduled_loo) < 0.001):
+                            meta_escalation_state['escalation_paused'] = False
+                            if meta_escalation_log_every_epoch:
+                                print(f"  [Meta Escalation] RESUMED - caught up to schedule")
+                        else:
+                            if meta_escalation_log_every_epoch:
+                                print(f"  [Meta Escalation] Recovering toward schedule...")
+                else:
+                    # Normal escalation: apply scheduled values directly
+                    meta_escalation_state['hyperlora_delta_scale_current'] = scheduled_hyperlora
+                    meta_escalation_state['equiv_weight_current'] = scheduled_equiv
+                    meta_escalation_state['loo_weight_current'] = scheduled_loo
+            
+            # Apply HyperLoRA delta_scale now (model attribute, not loss fn)
+            if hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                # Only override if we're past warmup
+                if epoch >= meta_learning_start_epoch + hyperlora_warmup_epochs:
+                    model.hyper_lora.delta_scale = meta_escalation_state['hyperlora_delta_scale_current']
+            
+            # NOTE: equiv/loo weight application moved AFTER effective_*_fn assignment below
+            # to avoid UnboundLocalError (effective_equiv_fn/effective_loo_fn defined later)
+            
+            # Log escalation state
+            if meta_escalation_log_every_epoch:
+                print(f"  [Meta Escalation] epoch {epoch + 1}: progress={scheduled_progress:.2f}, stable={is_stable}")
+                print(f"    HyperLoRA: {meta_escalation_state['hyperlora_delta_scale_current']:.4f} (target={scheduled_hyperlora:.4f})")
+                print(f"    Equiv: {meta_escalation_state['equiv_weight_current']:.4f} (target={scheduled_equiv:.4f})")
+                print(f"    LOO: {meta_escalation_state['loo_weight_current']:.4f} (target={scheduled_loo:.4f})")
+            
+            # Reset per-epoch counters for next epoch
+            meta_escalation_state['grad_explosion_events_epoch'] = 0
+            meta_escalation_state['lr_backoff_events_epoch'] = 0
+            meta_escalation_state['max_nan_streak_epoch'] = 0
+        
         # STAGED EQUIVARIANCE LOSS: Activate at equiv_start_epoch
         if use_equivariance and epoch == equiv_start_epoch:
             print(f"\n{'='*60}")
@@ -4212,6 +4447,25 @@ Config Overrides:
         effective_loo_fn = loo_loss_fn if meta_learning_active else None
         effective_equiv_fn = equiv_loss_fn if meta_learning_active else None
         
+        # ======================================================================
+        # META ESCALATION: Apply escalated weights to loss functions (Dec 2025)
+        # ======================================================================
+        # This MUST be after effective_*_fn assignment to avoid UnboundLocalError.
+        # Only applies if meta escalation is enabled AND active this epoch.
+        # ======================================================================
+        if meta_escalation_enabled and meta_escalation_state['escalation_active']:
+            # Check require_stability flag - if False, always apply scheduled values
+            should_apply = True
+            if meta_escalation_require_stability and not meta_escalation_state['is_stable']:
+                should_apply = False  # Gating blocked, keep current values
+            
+            if should_apply:
+                if effective_equiv_fn is not None and hasattr(effective_equiv_fn, 'config'):
+                    effective_equiv_fn.config.loss_weight = meta_escalation_state['equiv_weight_current'] * nan_backoff_state['equiv_weight_factor']
+                
+                if effective_loo_fn is not None and hasattr(effective_loo_fn, 'config'):
+                    effective_loo_fn.config.loss_weight = meta_escalation_state['loo_weight_current'] * nan_backoff_state['loo_weight_factor']
+        
         # Record memory before training epoch for comparison
         if device.type == 'cuda':
             torch.cuda.synchronize()
@@ -4233,6 +4487,18 @@ Config Overrides:
         # We use max_consecutive_nan_streak (true consecutive detection) not total nan_batches.
         # Priority: reduce equivariance first (less critical), then LOO.
         consecutive_nan_streak = train_losses.get('max_consecutive_nan_streak', 0)
+        
+        # Track for meta escalation stability gating
+        if meta_escalation_enabled:
+            meta_escalation_state['max_nan_streak_epoch'] = max(
+                meta_escalation_state['max_nan_streak_epoch'],
+                consecutive_nan_streak
+            )
+            meta_escalation_state['max_nan_streak_in_window'] = max(
+                meta_escalation_state['max_nan_streak_in_window'],
+                consecutive_nan_streak
+            )
+        
         if consecutive_nan_streak >= nan_backoff_threshold and not nan_backoff_state['nan_backoff_active']:
             print(f"\n  ⚠️  NaN BACKOFF TRIGGERED!")
             print(f"      {consecutive_nan_streak} consecutive NaN batches (threshold={nan_backoff_threshold})")
@@ -4257,6 +4523,7 @@ Config Overrides:
                 effective_loo_fn.config.loss_weight = loo_weight * nan_backoff_state['loo_weight_factor']
         
         # Restore meta-loss weights after cooldown if NaNs stopped
+        epoch_nan_batches = train_losses.get('nan_batches', 0)
         if nan_backoff_state['nan_backoff_active']:
             if epoch_nan_batches == 0:
                 nan_backoff_state['nan_backoff_epochs'] -= 1
@@ -4350,6 +4617,13 @@ Config Overrides:
                 
                 activation_lr_state['grad_explosion_cooldown'] = grad_explosion_cooldown_epochs
                 print(f"      Cooldown: {grad_explosion_cooldown_epochs} epochs before LR restoration")
+                
+                # Track for meta escalation stability gating
+                # NOTE: Grad explosion LR reduction counts as BOTH grad_explosion AND lr_backoff
+                # since it's a safety LR intervention that should pause escalation
+                if meta_escalation_enabled:
+                    meta_escalation_state['grad_explosion_events_epoch'] += 1
+                    meta_escalation_state['lr_backoff_events_epoch'] += 1  # Also counts as LR backoff
         
         epoch_time = time.time() - epoch_start
         
@@ -4403,6 +4677,29 @@ Config Overrides:
                     print(f"  HPM Tasks Added (exact matches): {tasks_added}")
         
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
+        
+        # ================================================================
+        # META ESCALATION SUMMARY (Dec 2025)
+        # ================================================================
+        if meta_escalation_enabled and meta_escalation_state['escalation_active']:
+            print(f"  Meta Escalation: progress={meta_escalation_state['escalation_progress']:.1%}, stable={meta_escalation_state['is_stable']}")
+            print(f"    HyperLoRA: {meta_escalation_state['hyperlora_delta_scale_current']:.4f}/{meta_escalation_state['hyperlora_delta_scale_scheduled']:.4f}")
+            print(f"    Equiv: {meta_escalation_state['equiv_weight_current']:.4f}/{meta_escalation_state['equiv_weight_scheduled']:.4f}")
+            print(f"    LOO: {meta_escalation_state['loo_weight_current']:.4f}/{meta_escalation_state['loo_weight_scheduled']:.4f}")
+            if meta_escalation_state['escalation_paused']:
+                print(f"    ⚠️ PAUSED (nan={meta_escalation_state['max_nan_streak_epoch']}, grad={meta_escalation_state['grad_explosion_events_epoch']})")
+            
+            # Compute and log meta contribution ratios
+            task_loss_val = train_losses.get('task_loss', train_losses.get('focal_loss', 1.0))
+            equiv_loss_val = train_losses.get('equiv_loss', 0.0)
+            loo_loss_val = train_losses.get('loo_loss', 0.0)
+            
+            if task_loss_val > 0:
+                weighted_equiv = equiv_loss_val * meta_escalation_state['equiv_weight_current']
+                weighted_loo = loo_loss_val * meta_escalation_state['loo_weight_current']
+                total_loss = task_loss_val + weighted_equiv + weighted_loo
+                meta_ratio = (weighted_equiv + weighted_loo) / max(total_loss, 1e-6)
+                print(f"    Meta contribution ratio: {meta_ratio:.1%} of total loss")
         
         # Show per-module LRs if different groups exist
         if len(optimizer.param_groups) > 2:  # More than just decay/no_decay
@@ -5427,6 +5724,20 @@ Config Overrides:
         
         # Evaluate
         if (epoch + 1) % eval_every == 0:
+            # ================================================================
+            # MEMORY CLEANUP BEFORE EVALUATION (Dec 2025)
+            # ================================================================
+            # Prevent memory fragmentation that causes TTA slowdown at higher epochs.
+            # Clear cached allocations and reset memory stats before heavy TTA eval.
+            # ================================================================
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                # Force garbage collection to free Python objects holding GPU refs
+                import gc
+                gc.collect()
+                torch.cuda.synchronize()
+            
             # Compute current training temperature for eval
             # CRITICAL: Use same temperature as training to avoid distribution shift!
             eval_temp = get_temperature(epoch, config)
@@ -5455,20 +5766,12 @@ Config Overrides:
             # This is the CRITICAL evaluation for measuring true generalization.
             # Uses proper TTA: generates all dihedral views per task, votes.
             # ============================================================
-            use_trm_eval = config.get('evaluation', {}).get('use_trm_style_eval', False)
-            if use_trm_eval:
-                # Load eval tasks from JSON files for proper TTA
-                eval_path = Path(config['data']['eval_path'])
-                max_eval_tasks = config.get('evaluation', {}).get('max_eval_tasks', 50)
-                eval_tasks = []
-                if eval_path.is_dir():
-                    for json_file in sorted(eval_path.glob('*.json'))[:max_eval_tasks]:
-                        try:
-                            with open(json_file, 'r') as f:
-                                task_data = json.load(f)
-                            eval_tasks.append(task_data)
-                        except Exception:
-                            pass
+            if use_trm_eval and cached_eval_tasks:
+                import time as time_module
+                trm_eval_start = time_module.time()
+                
+                # Use pre-cached tasks (no JSON re-parsing)
+                eval_tasks = cached_eval_tasks
                 
                 if eval_tasks:
                     num_dihedral = config.get('evaluation', {}).get('num_augmented_views', 8)
@@ -5482,9 +5785,12 @@ Config Overrides:
                         max_size=max_grid_size,
                         pass_ks=pass_ks,
                     )
+                    trm_eval_time = time_module.time() - trm_eval_start
+                    
                     total_views = num_dihedral * num_color_perms
                     print(f"\n  --- TRM-Style TTA Evaluation ({num_dihedral} dihedral x {num_color_perms} color = {total_views} views) ---")
                     print(f"  ★ TTA Exact Match (Pass@1): {trm_metrics['correct_tasks']}/{trm_metrics['total_tasks']} ({trm_metrics['exact_match']*100:.1f}%)")
+                    print(f"  ⏱️ TTA eval time: {trm_eval_time:.1f}s ({trm_eval_time/len(eval_tasks):.2f}s/task)")
                     
                     # Report Pass@K metrics
                     pass_k_parts = []
@@ -5695,6 +6001,20 @@ Config Overrides:
                     train_losses, best_task_accuracy, config, str(best_path)
                 )
                 print(f"  ★★★ NEW BEST: {best_correct}/{best_total} exact matches ({best_task_accuracy*100:.1f}%) ★★★")
+            
+            # ================================================================
+            # MEMORY CLEANUP AFTER EVALUATION (Dec 2025)
+            # ================================================================
+            # Free EMA copy and any cached tensors from TTA evaluation.
+            # This prevents memory fragmentation that slows down later epochs.
+            # ================================================================
+            if ema is not None and eval_model is not ema.ema_model and eval_model is not model:
+                del eval_model  # Delete EMA copy
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                import gc
+                gc.collect()
         
         # Save periodic checkpoint
         if (epoch + 1) % save_every == 0:

@@ -1950,6 +1950,194 @@ hardware:
 
 ---
 
+## 🎯 Staged Module Activation (December 2025)
+
+> **CRITICAL**: This section documents the phased training approach that prevents training instability (BG collapse, LOO shock) by activating modules in a scientifically-ordered sequence.
+
+### Phase Overview
+
+| Phase | Epochs | What's Active | What's Learning |
+|-------|--------|---------------|-----------------|
+| **Phase 0** | 0–4 | Base RLAN only (Encoder, DSC, MSRE, Solver) | Core feature extraction + recursive solving |
+| **Phase 1** | 5–7 | + Context Path (SolverContext + CrossAttn) | Task context integration |
+| **Phase 2** | 8–11 | + HyperLoRA (warming up) | Meta-learning weight prediction |
+| **Phase 3** | 12–13 | + Equivariance Loss | Augmentation invariance |
+| **Phase 4** | 14–17 | + HPM *(currently disabled)* | Long-term memory retrieval |
+| **Phase 5** | 18+ | + LOO Loss | Leave-one-out generalization |
+
+### Per-Module Detailed Breakdown
+
+| Module | Start Epoch | Initial Weight/Scale | Warmup Duration | Full Impact Epoch | LR Reduction at Start |
+|--------|-------------|---------------------|-----------------|-------------------|----------------------|
+| **Base RLAN** | 0 | 1.0 (full) | None | 0 | No |
+| **SolverContext** | 5 | 1.0 (full) | None | 5 | Yes (×0.5) |
+| **CrossAttention** | 5 | 1.0 (full) | None | 5 | Yes (×0.5) |
+| **HyperLoRA** | 8 | **0.005** (delta_scale) | 4 epochs | **12** | Yes (×0.5) |
+| **Equivariance Loss** | 12 | **0.01** (loss_weight) | None | 12 | Yes (×0.5) |
+| **HPM** *(disabled)* | 14 | **0.0** (gated residual) | Learned gate | Auto | No (self-gates) |
+| **LOO Loss** | 18 | **0.05** (loss_weight) | None | 18 | Yes (×0.5) |
+
+### HyperLoRA Warmup Schedule
+
+HyperLoRA is the **only module with a gradual warmup** - others activate at full weight immediately.
+
+| Epoch | `delta_scale` | Effect on Deltas |
+|-------|---------------|------------------|
+| 8 | 0.005 | Deltas scaled to 0.5% of full magnitude |
+| 9 | 0.029 | ~3% of full |
+| 10 | 0.053 | ~5% of full |
+| 11 | 0.076 | ~8% of full |
+| **12** | **0.100** | **10% of full** (warmup complete) |
+
+After epoch 12, `delta_scale` stays at 0.1 permanently.
+
+### ⚠️ Important: Final Weights Are NOT "Full Scale"
+
+**Current design keeps meta-learning weights intentionally small for stability:**
+
+| Module | Warmup End Value | Is This "Full"? | Notes |
+|--------|------------------|-----------------|-------|
+| **HyperLoRA** | 0.1 (10%) | ❌ No | Deltas contribute 10% of what they could |
+| **Equivariance** | 0.01 | ❌ No | Task loss dominates (~100×) |
+| **LOO** | 0.05 | ❌ No | Task loss dominates (~20×) |
+
+**This is by design** - these values prevent gradient explosions and training collapse.
+
+**However**, if you want stronger meta-learning impact after stability is confirmed:
+
+```python
+# FUTURE ENHANCEMENT: Weight escalation after epoch 25
+# Currently NOT implemented - would need to add to train_rlan.py
+if epoch >= 25 and training_stable:
+    equiv_loss_fn.config.loss_weight = min(0.1, current_weight * 1.2)  # Ramp to 0.1
+    loo_loss_fn.config.loss_weight = min(0.2, current_weight * 1.2)    # Ramp to 0.2
+    model.hyper_lora.delta_scale = min(0.5, current_scale * 1.1)       # Ramp to 0.5
+```
+
+**Status**: This escalation is NOT yet implemented. Contact maintainer if you want stronger meta-learning.
+
+### HPM (Hierarchical Primitive Memory) - Currently Disabled
+
+**Status**: `use_hpm: false` in config. Designed but not yet integrated into staged activation.
+
+**When enabled** (epoch 14):
+- HPM uses a **gated residual** mechanism: `z_final = z_encoded + tanh(α) × z_memory`
+- Gate `α` is initialized to 0, so `tanh(0) = 0` → HPM contributes **nothing** initially
+- The gate is **learnable**, so it opens gradually as training progresses
+- No explicit warmup needed - the gate self-regulates
+
+**Why between Equivariance (12) and LOO (18)?**
+- HPM adds ~2GB static memory but is NOT a gradient shock
+- Needs stable base features (from epochs 0-11) to populate memory banks
+- Must stabilize before LOO because LOO is the most destabilizing
+
+**To enable HPM**, set in `configs/rlan_stable_dev.yaml`:
+```yaml
+training:
+  use_hpm: true
+  hpm_start_epoch: 14
+  hpm_num_banks: 4
+  hpm_top_k: 2
+  hpm_balance_weight: 0.01
+```
+
+### What to Expect in Training Logs
+
+| Epoch Range | Expected Behavior |
+|-------------|-------------------|
+| **0–4** | Loss drops steadily as base model learns. BG/FG balance stabilizes with focal-weighted loss. |
+| **5** | Slight loss bump (LR halved + context path activated). Should recover within 1-2 epochs. |
+| **6–7** | Context features now guide solver. May see improved train accuracy. |
+| **8** | Another slight bump (HyperLoRA activated at 0.5% scale). Minimal initial impact. |
+| **9–11** | HyperLoRA influence grows. Watch `lora_total_magnitude` in diagnostics. |
+| **12** | Equivariance loss kicks in (0.01 weight). Training should become more robust to augmentations. |
+| **13** | Steady improvement. HyperLoRA at full warmup scale (0.1). |
+| **14** | *(If HPM enabled)* Memory banks activate. Watch `hpm_gate_value` in diagnostics. |
+| **15–17** | Model learns to retrieve from HPM. May see improved few-shot tasks. |
+| **18** | LOO loss activated (0.05 weight). Batch size may auto-reduce. Small loss bump expected. |
+| **19+** | Full meta-learning regime. All modules active. Best generalization expected. |
+
+### Safety Mechanisms
+
+| Mechanism | Trigger | Action |
+|-----------|---------|--------|
+| **LR Reduction at Activation** | Epochs 5, 8, 12, 18 | LR × 0.5 for 2 epochs, then restore |
+| **Gradient Explosion Backoff** | Grad norm > 10× clip | LR × 0.5 for 2 epochs cooldown |
+| **NaN Backoff** | ≥3 consecutive NaN batches | Halve equiv weight, then LOO weight |
+| **Composable LR Factors** | Multiple triggers overlap | base_lr × activation_factor × explosion_factor |
+
+### Visual Timeline
+
+```
+Epoch:  0────5────8────12───14───18────25────30+
+        │    │    │     │    │    │     │
+        ▼    ▼    ▼     ▼    ▼    ▼     ▼
+       Base Context HyperLoRA Equiv HPM* LOO  (Escalation?)
+       RLAN  Path   warmup    Loss      Loss
+        │    │    │     │    │    │     │
+        │    │    │────►│    │    │     │  (HyperLoRA: 0.005 → 0.1)
+        │    │          │    │    │     │
+        │    │─────────►│    │    │     │  (context stable by epoch 8)
+        │               │    │    │     │
+        │──────────────►│────│────│     │  (base stable for meta-learning)
+                             │    │     │
+                             *    │     │  (*HPM currently disabled)
+                                  │     │
+                                  │─────│  (weights stay at safe values)
+
+CURRENT: Weights stay at 0.1/0.01/0.05 permanently (safe but weak)
+FUTURE:  Could escalate to 0.5/0.1/0.2 after epoch 25 (not implemented)
+```
+
+### Key Takeaways
+
+1. **HyperLoRA is the only module with a gradual warmup** - others activate at full weight immediately
+2. **Expect small loss bumps at epochs 5, 8, 12, 14 (if HPM), 18** - this is normal and should recover in 1-2 epochs
+3. **Don't judge HyperLoRA impact until epoch 12+** - it's at only 0.5% scale when it first activates
+4. **HPM is designed but disabled** - enable with `use_hpm: true` when ready for memory-augmented training
+5. **LOO is last because it's most destabilizing** - it needs all other modules stable first
+6. **Weights stay small after activation** - currently no escalation; 0.1/0.01/0.05 are the permanent values
+7. **Each activation halves LR temporarily** - prevents the new module from causing gradient explosions
+
+### Configuration Reference
+
+These parameters are in `configs/rlan_stable_dev.yaml`:
+
+```yaml
+training:
+  # Staged activation epochs
+  solver_context_start_epoch: 5
+  cross_attention_start_epoch: 5
+  meta_learning_start_epoch: 8
+  
+  # HyperLoRA warmup
+  hyperlora_warmup_epochs: 4
+  hyperlora_warmup_start_scale: 0.005
+  hyperlora_warmup_end_scale: 0.1
+  
+  # LR safety at activation
+  activation_lr_reduction: 0.5
+  activation_lr_recovery_epochs: 2
+  
+  # Gradient explosion backoff
+  grad_explosion_threshold: 10.0
+  grad_explosion_lr_reduction: 0.5
+  grad_explosion_cooldown_epochs: 2
+  
+  # Meta-learning losses
+  equivariance_training:
+    enabled: true
+    start_epoch: 12
+    loss_weight: 0.01
+  
+  loo_training:
+    enabled: true
+    start_epoch: 18
+    loss_weight: 0.05
+```
+
+---
+
 ## Implementation Checklist
 
 ### Phase 1: Environment Setup (Day 1)

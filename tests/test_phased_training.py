@@ -596,6 +596,231 @@ def test_nan_backoff_implementation():
         test_failed("Backoff uses consecutive streak", "Trigger may use total count instead of consecutive")
 
 
+def test_meta_escalation_config():
+    """Test 10: Verify meta escalation config is properly defined."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Meta Escalation Config (Dec 2025)")
+    print("=" * 60)
+    
+    config_path = project_root / "configs" / "rlan_stable_dev.yaml"
+    
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    training = config.get('training', {})
+    meta_esc = training.get('meta_escalation', {})
+    
+    # Check core config exists
+    if 'meta_escalation' in training:
+        test_passed("meta_escalation config block exists")
+    else:
+        test_failed("meta_escalation config block exists", "Not found")
+        return
+    
+    if meta_esc.get('enabled') is not None:
+        test_passed(f"meta_escalation.enabled is defined ({meta_esc.get('enabled')})")
+    else:
+        test_failed("meta_escalation.enabled defined", "Not found")
+    
+    if meta_esc.get('start_epoch', 0) >= 20:
+        test_passed(f"start_epoch is late enough ({meta_esc.get('start_epoch')})")
+    else:
+        test_failed("start_epoch >= 20", f"Got {meta_esc.get('start_epoch')} - too early")
+    
+    if meta_esc.get('ramp_epochs', 0) >= 5:
+        test_passed(f"ramp_epochs is reasonable ({meta_esc.get('ramp_epochs')})")
+    else:
+        test_failed("ramp_epochs >= 5", f"Got {meta_esc.get('ramp_epochs')} - too short")
+    
+    # Check targets
+    targets = meta_esc.get('targets', {})
+    if targets.get('hyperlora_delta_scale', 0) > 0.1:
+        test_passed(f"target hyperlora_delta_scale > 0.1 ({targets.get('hyperlora_delta_scale')})")
+    else:
+        test_failed("target hyperlora_delta_scale > 0.1", f"Got {targets.get('hyperlora_delta_scale')}")
+    
+    if targets.get('equiv_loss_weight', 0) > 0.01:
+        test_passed(f"target equiv_loss_weight > 0.01 ({targets.get('equiv_loss_weight')})")
+    else:
+        test_failed("target equiv_loss_weight > 0.01", f"Got {targets.get('equiv_loss_weight')}")
+    
+    if targets.get('loo_loss_weight', 0) > 0.05:
+        test_passed(f"target loo_loss_weight > 0.05 ({targets.get('loo_loss_weight')})")
+    else:
+        test_failed("target loo_loss_weight > 0.05", f"Got {targets.get('loo_loss_weight')}")
+    
+    # Check stability gating
+    if meta_esc.get('require_stability') == True:
+        test_passed("require_stability is True (safety first)")
+    else:
+        test_failed("require_stability is True", f"Got {meta_esc.get('require_stability')}")
+    
+    if meta_esc.get('recovery_enabled') == True:
+        test_passed("recovery_enabled is True (prevents permanent suppression)")
+    else:
+        test_failed("recovery_enabled is True", f"Got {meta_esc.get('recovery_enabled')}")
+
+
+def test_meta_escalation_implementation():
+    """Test 11: Verify meta escalation is implemented in training script."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Meta Escalation Implementation (Dec 2025)")
+    print("=" * 60)
+    
+    train_script = project_root / "scripts" / "train_rlan.py"
+    
+    with open(train_script, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Check for meta_escalation_state initialization
+    if "meta_escalation_state" in content:
+        test_passed("meta_escalation_state is defined")
+    else:
+        test_failed("meta_escalation_state is defined", "Not found")
+    
+    if "'hyperlora_delta_scale_current'" in content:
+        test_passed("hyperlora_delta_scale_current tracked")
+    else:
+        test_failed("hyperlora_delta_scale_current tracked", "Not found")
+    
+    if "'equiv_weight_current'" in content:
+        test_passed("equiv_weight_current tracked")
+    else:
+        test_failed("equiv_weight_current tracked", "Not found")
+    
+    if "'escalation_paused'" in content:
+        test_passed("escalation_paused state tracked")
+    else:
+        test_failed("escalation_paused tracked", "Not found")
+    
+    if "'is_stable'" in content:
+        test_passed("is_stable state tracked")
+    else:
+        test_failed("is_stable tracked", "Not found")
+    
+    # Check for stability gating with require_stability conditional
+    if "if meta_escalation_require_stability:" in content and "is_stable = True" in content:
+        test_passed("Stability gating respects require_stability flag")
+    else:
+        test_failed("require_stability conditional", "Pattern not found")
+    
+    # Check for LR backoff tracking
+    if "lr_backoff_events_epoch" in content and "+= 1" in content:
+        test_passed("LR backoff events tracked")
+    else:
+        test_failed("LR backoff tracking", "Not found")
+    
+    # Check for schedule computation
+    if "scheduled_progress" in content and "meta_escalation_schedule" in content:
+        test_passed("Schedule progress computed (linear/cosine)")
+    else:
+        test_failed("Schedule computation", "Pattern not found")
+    
+    # Check for recovery mechanism
+    if "recovery_hyperlora" in content or "recovery_step" in content:
+        test_passed("Recovery mechanism implemented")
+    else:
+        test_failed("Recovery mechanism", "Not found")
+    
+    # Check for meta contribution ratio logging
+    if "meta_ratio" in content or "Meta contribution ratio" in content:
+        test_passed("Meta contribution ratio logged")
+    else:
+        test_failed("Meta contribution ratio logged", "Not found")
+
+
+def test_meta_escalation_schedule_math():
+    """Test 12: Verify meta escalation schedule math is correct."""
+    print("\n" + "=" * 60)
+    print("TEST 12: Meta Escalation Schedule Math")
+    print("=" * 60)
+    
+    # Test linear schedule
+    start_epoch = 25
+    ramp_epochs = 12
+    base = 0.1
+    target = 0.3
+    
+    # Test epoch 25 (start): should be at base
+    epoch = 25
+    progress = min(1.0, max(0.0, (epoch - start_epoch) / ramp_epochs))
+    value = base + progress * (target - base)
+    if abs(value - 0.1) < 0.001:
+        test_passed(f"Epoch 25: value={value:.4f} (expected=0.1)")
+    else:
+        test_failed(f"Epoch 25 value", f"Got {value:.4f}, expected 0.1")
+    
+    # Test epoch 31 (midpoint): should be 0.2
+    epoch = 31
+    progress = min(1.0, max(0.0, (epoch - start_epoch) / ramp_epochs))
+    value = base + progress * (target - base)
+    expected = 0.2  # 50% progress
+    if abs(value - expected) < 0.01:
+        test_passed(f"Epoch 31: value={value:.4f} (expected~0.2)")
+    else:
+        test_failed(f"Epoch 31 value", f"Got {value:.4f}, expected ~0.2")
+    
+    # Test epoch 37 (end): should be at target
+    epoch = 37
+    progress = min(1.0, max(0.0, (epoch - start_epoch) / ramp_epochs))
+    value = base + progress * (target - base)
+    if abs(value - 0.3) < 0.001:
+        test_passed(f"Epoch 37: value={value:.4f} (expected=0.3)")
+    else:
+        test_failed(f"Epoch 37 value", f"Got {value:.4f}, expected 0.3")
+    
+    # Test epoch 50 (past end): should cap at target
+    epoch = 50
+    progress = min(1.0, max(0.0, (epoch - start_epoch) / ramp_epochs))
+    value = base + progress * (target - base)
+    if abs(value - 0.3) < 0.001:
+        test_passed(f"Epoch 50: value={value:.4f} (capped at 0.3)")
+    else:
+        test_failed(f"Epoch 50 value", f"Got {value:.4f}, expected 0.3 (capped)")
+
+
+def test_eval_task_caching():
+    """Test 13: Verify eval task caching is implemented for performance."""
+    print("\n" + "=" * 60)
+    print("TEST 13: Eval Task Caching (Dec 2025)")
+    print("=" * 60)
+    
+    train_script = project_root / "scripts" / "train_rlan.py"
+    
+    with open(train_script, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Check for cached_eval_tasks variable
+    if "cached_eval_tasks" in content:
+        test_passed("cached_eval_tasks variable exists")
+    else:
+        test_failed("cached_eval_tasks variable", "Not found")
+    
+    # Check that caching happens BEFORE training loop
+    if "cached_eval_tasks = []" in content and "Pre-loaded" in content:
+        test_passed("Eval tasks pre-cached before training loop")
+    else:
+        test_failed("Pre-caching pattern", "Not found")
+    
+    # Check that cached tasks are used in eval
+    if "eval_tasks = cached_eval_tasks" in content:
+        test_passed("Cached tasks used during evaluation")
+    else:
+        test_failed("Cache usage pattern", "Not found")
+    
+    # Check for timing breakdown
+    if "trm_eval_time" in content and "TTA eval time" in content:
+        test_passed("TTA eval timing breakdown logged")
+    else:
+        test_failed("Eval timing breakdown", "Not found")
+    
+    # Check that grad explosion also counts as lr_backoff
+    if "lr_backoff_events_epoch'] += 1" in content and "grad_explosion" in content:
+        test_passed("Grad explosion counts as LR backoff event")
+    else:
+        test_failed("Grad explosion -> LR backoff tracking", "Not found")
+
+
 def run_all_tests():
     """Run all tests and print summary."""
     print("\n" + "=" * 60)
@@ -617,6 +842,12 @@ def run_all_tests():
     test_lr_composability()
     test_max_grad_norm_tracking()
     test_nan_backoff_implementation()
+    
+    # Meta Escalation tests (Dec 2025)
+    test_meta_escalation_config()
+    test_meta_escalation_implementation()
+    test_meta_escalation_schedule_math()
+    test_eval_task_caching()
     
     # Print summary
     print("\n" + "=" * 60)
