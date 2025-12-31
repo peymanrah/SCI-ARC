@@ -4128,6 +4128,7 @@ Config Overrides:
         'grad_explosion_events_epoch': 0,
         'lr_backoff_events_epoch': 0,
         'max_nan_streak_epoch': 0,
+        'max_nan_streak_in_window': 0,  # Track max NaN streak across escalation window
     }
     
     if meta_escalation_enabled:
