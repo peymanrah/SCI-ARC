@@ -205,15 +205,16 @@ model:
   #   Epoch 5: HyperLoRA + SolverCrossAttention + CrossAttentionInjector (SYNCED!)
   #            → Key insight: HyperLoRA NEEDS CrossAttention features to work
   #            → Syncing prevents "zombie" HyperLoRA learning from garbage features
-  #   Epoch 8: Equivariance loss (light regularization)
-  #   Epoch 14: HPM (capacity upgrade, ~2GB memory, NOT a gradient shock)
-  #   Epoch 15: LOO loss (heavy, delayed to after HPM stabilizes)
+  #   Epoch 16: Equivariance loss (regularization after HyperLoRA warmup)
+  #   Epoch 20: HPM (capacity upgrade, ~2GB memory, NO gradient shock - gated residual starts at 0)
+  #   Epoch 24: LOO loss (heavy, delayed to after HPM stabilizes)
   #
-  # WARNING (Dec 2025): HPM adds ~1-2GB static memory but is NOT a gradient shock.
+  # HPM WARMUP (Dec 2025): HPM uses gated residual initialized to 0.
+  # This means HPM contribution starts at 0 and grows during training - NO additional warmup needed.
   # LOO is the heavy one (N forward passes per sample). Keep batch_size reasonable.
   # =============================================================
-  use_hpm: false                      # DISABLED: Testing memory without HPM first
-  hpm_start_epoch: 14                 # Activate HPM after epoch 14 (before LOO at 15)
+  use_hpm: true                       # ENABLED: HPM with gated residual (safe warmup built-in)
+  hpm_start_epoch: 20                 # Activate HPM at epoch 20 (after equivariance @ 16, before LOO @ 24)
   
   # Sparse MoE Routing Configuration
   hpm_top_k: 2                        # Number of banks to route to per sample
@@ -372,10 +373,10 @@ training:
   # the mode collapse that occurred with pure stablemax.
   # =============================================================
   loss_mode: 'focal_weighted'  # FIX: Prevents BG collapse (was stablemax)
-  bg_weight_cap: 1.5      # Conservative BG cap (was 2.0)
-  fg_weight_cap: 4.0      # Strong FG signal (was 5.0)
+  bg_weight_cap: 1.0      # Lower BG pressure to avoid collapse
+  fg_weight_cap: 6.0      # Stronger FG signal to counter BG-heavy pixel imbalance
   
-  focal_gamma: 1.5        # Gentle focal (was 2.0 - too aggressive)
+  focal_gamma: 1.2        # Slightly gentler focal to reduce early instability
   focal_alpha: 0.75       # Not used with focal_weighted
   
   # AUXILIARY LOSSES (minimized for stability)
@@ -385,6 +386,7 @@ training:
   lambda_curriculum: 0.0        # OFF
   lambda_deep_supervision: 0.0  # OFF - not needed with weighted_stablemax
   lambda_act: 0.0               # OFF
+  lambda_centroid_diversity: 0.1  # NEW: Prevents DSC centroid collapse (spread > 0.5)
   
   # Clue regularization (ENABLED - validated stable Dec 2025)
   # Helps model learn appropriate clue count per task
@@ -455,15 +457,15 @@ training:
   
   # Context path activates FIRST (Phase 2)
   solver_context_start_epoch: 5   # SolverCrossAttention
-  cross_attention_start_epoch: 5  # CrossAttentionInjector (SYNCED with SolverContext)
+  cross_attention_start_epoch: 12 # CrossAttentionInjector (DELAYED; FiLM fallback is stabler early)
   
   # HyperLoRA activates AFTER context path is stable (Phase 3)
   meta_learning_start_epoch: 8    # HyperLoRA (3 epochs after context path)
   
   # HyperLoRA warmup: start near-zero and ramp up over N epochs
-  hyperlora_warmup_epochs: 4      # Ramp init_scale from 0.005 to 0.1 over 4 epochs
+  hyperlora_warmup_epochs: 8      # Slower warmup to reduce activation shock
   hyperlora_warmup_start_scale: 0.005  # Near-identity at activation
-  hyperlora_warmup_end_scale: 0.1      # Full scale after warmup
+  hyperlora_warmup_end_scale: 0.05     # Lower end-scale to reduce BG-bias amplification risk
   
   # LR reduction at activation epochs (prevents gradient shock)
   activation_lr_reduction: 0.5    # Multiply LR by 0.5 at activation epochs
@@ -502,7 +504,7 @@ training:
   # =============================================================
   loo_training:
     enabled: true          # ENABLED: Auto-activates at start_epoch
-    start_epoch: 18        # PHASE 5: LOO activates LAST (was 15)
+    start_epoch: 24        # PHASE 5: LOO activates LAST (after HyperLoRA warmup + equivariance)
     loss_weight: 0.05      # GENTLER start (was 0.1) - prevents gradient shock
     min_pairs_for_loo: 2   # Need at least 2 pairs to hold one out
     max_loo_pairs: 4       # CAP at 4 passes to prevent memory explosion
@@ -534,7 +536,7 @@ training:
   # =============================================================
   equivariance_training:
     enabled: true          # ENABLED: Auto-activates at start_epoch
-    start_epoch: 12        # PHASE 4: After HyperLoRA warmup (was 8)
+    start_epoch: 16        # PHASE 4: After HyperLoRA warmup (8 + 8 = 16)
     loss_weight: 0.01      # GENTLER start (was 0.05)
     num_augmentations: 4   # Number of random augmentations per task
   
@@ -775,7 +777,7 @@ data:
     flip: true
     transpose: true
     color_permutation: true
-    color_permutation_prob: 1.0  # TRM STYLE: ALWAYS apply (was 0.3, now 1.0)
+    color_permutation_prob: 0.5  # Reduce early instability; can increase later by resuming
     translational: true
     track_augmentation: true  # REQUIRED for inverse aug at eval
 

@@ -862,6 +862,8 @@ def create_loss(config: dict) -> RLANLoss:
         # BG/FG weight caps for weighted_stablemax (CRITICAL for preventing collapse)
         bg_weight_cap=train_config.get('bg_weight_cap', 2.0),
         fg_weight_cap=train_config.get('fg_weight_cap', 5.0),
+        # Centroid diversity (CRITICAL for DSC health - prevents clue collapse)
+        lambda_centroid_diversity=train_config.get('lambda_centroid_diversity', 0.1),
     )
     
     return loss_fn
@@ -1031,7 +1033,10 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     
     if use_8bit:
         try:
-            import bitsandbytes as bnb
+            # Optional dependency: use dynamic import so static analyzers
+            # (e.g., Pylance) don't hard-error when it's not installed.
+            import importlib
+            bnb = importlib.import_module("bitsandbytes")
             optimizer = bnb.optim.AdamW8bit(
                 param_groups,
                 lr=base_lr,
@@ -1496,6 +1501,7 @@ def train_epoch(
                     max_epochs=max_epochs,
                     all_logits=outputs.get('all_logits'),
                     act_outputs=outputs.get('act_outputs'),
+                    centroids=outputs.get('centroids'),  # For centroid diversity loss
                 )
                 
                 # Compute LOO loss if enabled (meta-learning via HyperLoRA)
@@ -1855,6 +1861,7 @@ def train_epoch(
                 max_epochs=max_epochs,
                 all_logits=outputs.get('all_logits'),
                 act_outputs=outputs.get('act_outputs'),
+                centroids=outputs.get('centroids'),  # For centroid diversity loss
             )
             
             # Compute LOO loss if enabled (meta-learning via HyperLoRA)
@@ -2118,6 +2125,9 @@ def train_epoch(
                 stop_logits = outputs['stop_logits']  # (B, K)
                 stop_probs = torch.sigmoid(stop_logits)  # (B, K)
                 epoch_diagnostics['stop_prob_mean'] = stop_probs.mean().item()
+                # Global stop probability std (captures the “frozen uniform std=0.008” failure mode)
+                # This aggregates variation across both batch and clue index.
+                epoch_diagnostics['stop_prob_std'] = stop_probs.std().item()
                 # Per-clue stop probability for detailed tracking
                 epoch_diagnostics['per_clue_stop_prob'] = stop_probs.mean(dim=0).tolist()  # (K,)
                 
@@ -2168,11 +2178,38 @@ def train_epoch(
                     epoch_diagnostics['per_sample_loss_min'] = per_sample_loss.min().item()
                     epoch_diagnostics['per_sample_loss_max'] = per_sample_loss.max().item()
             
-            # DSC entropy inputs to stop_predictor (coupling verification)
+            # DSC confidence inputs to stop_predictor (coupling verification)
+            # NOTE: Despite key name 'dsc_entropy_inputs', these are now CONFIDENCE values (1 - entropy)
             if 'dsc_entropy_inputs' in outputs:
-                entropy_inputs = outputs['dsc_entropy_inputs']  # (B, K)
-                epoch_diagnostics['dsc_entropy_input_mean'] = entropy_inputs.mean().item()
-                epoch_diagnostics['per_clue_entropy_input'] = entropy_inputs.mean(dim=0).tolist()  # (K,)
+                confidence_inputs = outputs['dsc_entropy_inputs']  # (B, K) - actually confidence now
+                epoch_diagnostics['dsc_confidence_input_mean'] = confidence_inputs.mean().item()
+                epoch_diagnostics['per_clue_confidence_input'] = confidence_inputs.mean(dim=0).tolist()  # (K,)
+                # Backward compat aliases
+                epoch_diagnostics['dsc_entropy_input_mean'] = 1.0 - confidence_inputs.mean().item()
+                epoch_diagnostics['per_clue_entropy_input'] = [1.0 - c for c in confidence_inputs.mean(dim=0).tolist()]
+
+                # Confidence-stop coupling correlation (per-clue means)
+                # We correlate mean confidence per clue with mean stop prob per clue.
+                # Expectation: higher confidence (sharper) -> higher stop probability (POSITIVE correlation = HEALTHY).
+                if 'stop_logits' in outputs:
+                    stop_logits_local = outputs['stop_logits']
+                    stop_probs_local = torch.sigmoid(stop_logits_local)
+                    per_clue_stop = stop_probs_local.mean(dim=0)  # (K,)
+                    per_clue_confidence = confidence_inputs.mean(dim=0)  # (K,)
+                    if (
+                        per_clue_stop.numel() > 1
+                        and per_clue_stop.std() > 1e-6
+                        and per_clue_confidence.std() > 1e-6
+                    ):
+                        a = per_clue_confidence - per_clue_confidence.mean()
+                        b = per_clue_stop - per_clue_stop.mean()
+                        corr = (a * b).sum() / (a.norm() * b.norm() + 1e-8)
+                        epoch_diagnostics['confidence_stop_correlation'] = corr.item()
+                        # Backward compat alias
+                        epoch_diagnostics['entropy_stop_correlation'] = corr.item()
+                    else:
+                        epoch_diagnostics['confidence_stop_correlation'] = 0.0
+                        epoch_diagnostics['entropy_stop_correlation'] = 0.0
             
             # Context encoder diagnostics
             if 'context' in outputs:
@@ -5252,7 +5289,10 @@ Config Overrides:
                 clues_min = diagnostics.get('clues_used_min', 0)
                 clues_max = diagnostics.get('clues_used_max', 0)
                 clue_loss_corr = diagnostics.get('clue_loss_correlation', 0)
+                stop_prob_std = diagnostics.get('stop_prob_std', 0)
                 print(f"  Stop Prob: {stop_prob:.3f} (approx {clues_used:.1f} clues active)")
+                if stop_prob_std > 0:
+                    print(f"  Stop Probs Std: {stop_prob_std:.3f} (global std across batch×clues)")
                 print(f"  Clues Used: mean={clues_used:.2f}, std={clues_std:.2f}, range=[{clues_min:.1f}, {clues_max:.1f}]")
                 print(f"  Clue-Loss Correlation: {clue_loss_corr:+.3f}", end="")
                 # Interpret correlation - this is the KEY metric for per-sample coupling
@@ -5929,17 +5969,22 @@ Config Overrides:
             
             # === CHECK 2: Stop Probabilities (should adapt, not uniform) ===
             per_clue_stop = diagnostics.get('per_clue_stop_prob', [])
+            stop_prob_std_global = diagnostics.get('stop_prob_std', None)
             if per_clue_stop:
                 stop_std = (sum((s - stop_prob)**2 for s in per_clue_stop) / len(per_clue_stop))**0.5
-                if stop_std > 0.1:
-                    health_checks.append(f"✓ Stop probs adapting (std={stop_std:.2f})")
-                elif stop_std > 0.03:
-                    health_warnings.append(f"⚠ Stop probs nearly uniform (std={stop_std:.2f})")
+                # Prefer the global std when available (matches the production log’s “std=0.008” style).
+                std_to_use = stop_prob_std_global if stop_prob_std_global is not None else stop_std
+                std_detail = f"global={stop_prob_std_global:.3f}, per_clue={stop_std:.3f}" if stop_prob_std_global is not None else f"std={stop_std:.3f}"
+
+                if std_to_use > 0.1:
+                    health_checks.append(f"✓ Stop probs adapting ({std_detail})")
+                elif std_to_use > 0.03:
+                    health_warnings.append(f"⚠ Stop probs nearly uniform ({std_detail})")
                 else:
                     if epoch > 10:
-                        health_critical.append(f"✗ Stop probs frozen uniform (std={stop_std:.3f})")
+                        health_critical.append(f"✗ Stop probs frozen uniform ({std_detail})")
                     else:
-                        health_warnings.append(f"⚠ Stop probs uniform (std={stop_std:.3f}) - early epoch OK")
+                        health_warnings.append(f"⚠ Stop probs uniform ({std_detail}) - early epoch OK")
             
             # === CHECK 3: Centroid Spread (should be spread, not clustered) ===
             # Uses YAML thresholds: centroid_spread_warning, centroid_spread_critical
@@ -5956,17 +6001,18 @@ Config Overrides:
             else:
                 health_critical.append(f"✗ Centroid COLLAPSE ({centroid_spread:.1f} < {centroid_spread_critical})")
             
-            # === CHECK 4: Entropy-Stop Coupling (should be positive) ===
-            clue_loss_corr = diagnostics.get('clue_loss_correlation', 0)
-            if clue_loss_corr > 0.3:
-                health_checks.append(f"✓ Good entropy-stop coupling (r={clue_loss_corr:.2f})")
-            elif clue_loss_corr > 0:
-                health_warnings.append(f"⚠ Weak entropy-stop coupling (r={clue_loss_corr:.2f})")
+            # === CHECK 4: Confidence-Stop Coupling (should be positive) ===
+            # POSITIVE correlation = sharp attention leads to stopping = HEALTHY
+            confidence_stop_corr = diagnostics.get('confidence_stop_correlation', diagnostics.get('entropy_stop_correlation', 0))
+            if confidence_stop_corr > 0.3:
+                health_checks.append(f"✓ Good confidence-stop coupling (r={confidence_stop_corr:.2f})")
+            elif confidence_stop_corr > 0:
+                health_warnings.append(f"⚠ Weak confidence-stop coupling (r={confidence_stop_corr:.2f})")
             else:
                 if epoch > 15:
-                    health_critical.append(f"✗ No entropy-stop coupling (r={clue_loss_corr:.2f})")
+                    health_critical.append(f"✗ No confidence-stop coupling (r={confidence_stop_corr:.2f})")
                 else:
-                    health_warnings.append(f"⚠ Negative coupling (r={clue_loss_corr:.2f}) - early epoch OK")
+                    health_warnings.append(f"⚠ Negative coupling (r={confidence_stop_corr:.2f}) - early epoch OK")
             
             # === CHECK 5: Loss Decreasing ===
             if n >= 3:

@@ -19,7 +19,7 @@ The combined loss enables stable training while encouraging:
 """
 
 import math
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -914,6 +914,124 @@ class SparsityRegularization(nn.Module):
         return getattr(self, '_last_components', {})
 
 
+class CentroidDiversityLoss(nn.Module):
+    """
+    Centroid diversity loss to prevent DSC clue collapse.
+    
+    Encourages different clues to attend to different spatial locations
+    by penalizing when centroids are too close together.
+    
+    This is CRITICAL for DSC health - without it, all clues collapse
+    to the same location (centroid spread < 0.5), making the stop
+    predictor unable to differentiate between clues.
+    
+    Formula: L_diversity = -mean(min_pairwise_distance)
+    
+    We want to MAXIMIZE the minimum pairwise distance between centroids,
+    which is equivalent to MINIMIZING the negative.
+    """
+    
+    def __init__(
+        self,
+        min_distance: float = 2.0,  # Minimum desired distance between centroids
+        weight_by_usage: bool = True,  # Weight by clue usage probability
+    ):
+        """
+        Args:
+            min_distance: Target minimum distance between clue centroids.
+                          For 30x30 grid, ~2.0 means clues should be at least
+                          2 pixels apart (reasonable for different objects).
+            weight_by_usage: If True, weight pairwise distances by clue usage
+                            probability so unused clues don't dominate loss.
+        """
+        super().__init__()
+        self.min_distance = min_distance
+        self.weight_by_usage = weight_by_usage
+    
+    def forward(
+        self,
+        centroids: torch.Tensor,
+        stop_logits: Optional[torch.Tensor] = None,
+        grid_size: Optional[Tuple[int, int]] = None,
+    ) -> torch.Tensor:
+        """
+        Compute centroid diversity loss.
+        
+        Args:
+            centroids: Shape (B, K, 2) clue centroid coordinates (row, col)
+            stop_logits: Shape (B, K) stop probability logits (optional)
+            grid_size: (H, W) for normalizing distances (optional)
+            
+        Returns:
+            loss: Scalar diversity loss (lower = more diverse = better)
+        """
+        B, K, _ = centroids.shape
+        
+        if K < 2:
+            return torch.tensor(0.0, device=centroids.device, requires_grad=True)
+        
+        # Compute pairwise distances between all clue centroids
+        # Using cdist for efficiency: (B, K, 2) -> (B, K, K) distances
+        pairwise_dist = torch.cdist(centroids, centroids, p=2)  # (B, K, K)
+        
+        # Normalize distances by grid size if provided
+        if grid_size is not None:
+            H, W = grid_size
+            max_dist = math.sqrt(H**2 + W**2)
+            pairwise_dist = pairwise_dist / max_dist
+            min_dist_normalized = self.min_distance / max_dist
+        else:
+            min_dist_normalized = self.min_distance / 30.0  # Default to 30x30 grid
+        
+        # Mask out self-distances (diagonal)
+        # Set diagonal to large value so it doesn't affect min computation
+        eye_mask = torch.eye(K, device=centroids.device).unsqueeze(0).expand(B, -1, -1)
+        pairwise_dist_masked = pairwise_dist + eye_mask * 1e6
+        
+        # Weight by clue usage if stop_logits provided
+        if self.weight_by_usage and stop_logits is not None:
+            # Compute clue usage probability (how likely each clue is "active")
+            stop_probs = torch.sigmoid(stop_logits)  # (B, K)
+            continue_probs = 1.0 - stop_probs
+            # Probability of reaching clue k = cumulative product of continuing
+            reach_probs = torch.cumprod(
+                torch.cat([torch.ones(B, 1, device=stop_logits.device), continue_probs[:, :-1]], dim=1),
+                dim=1
+            )  # (B, K)
+            
+            # Weight = probability that BOTH clues are active
+            # (B, K, 1) * (B, 1, K) -> (B, K, K)
+            usage_weight = reach_probs.unsqueeze(2) * reach_probs.unsqueeze(1)
+            
+            # Apply weights to distances (emphasize distances between used clues)
+            weighted_dist = pairwise_dist_masked * usage_weight
+            
+            # Find minimum non-zero weighted distance per sample
+            # (Avoid clamp issues by using softmin instead of hard min)
+            # Softmin: sum(d * exp(-d/temp)) / sum(exp(-d/temp))
+            temp = 0.1  # Temperature for softmin
+            dist_weights = F.softmax(-weighted_dist / temp, dim=-1)  # (B, K, K)
+            soft_min_dist = (weighted_dist * dist_weights).sum(dim=-1).mean(dim=-1)  # (B,)
+        else:
+            # Simple min distance per row, then mean
+            min_dist_per_clue, _ = pairwise_dist_masked.min(dim=-1)  # (B, K)
+            soft_min_dist = min_dist_per_clue.mean(dim=-1)  # (B,)
+        
+        # Loss: penalize when min distance is below threshold
+        # Using hinge loss: max(0, min_distance - actual_distance)
+        diversity_loss = F.relu(min_dist_normalized - soft_min_dist).mean()
+        
+        # Alternative: negative mean distance (encourages spreading)
+        # This provides gradient even when above threshold
+        repulsion_loss = -soft_min_dist.mean()
+        
+        # Combine: hinge for hard constraint + repulsion for continuous gradient
+        # Weight repulsion lower to avoid pushing clues to corners
+        total_loss = diversity_loss + 0.1 * repulsion_loss
+        
+        return total_loss.clamp(max=10.0)
+
+
 class PredicateDiversityLoss(nn.Module):
     """
     Predicate diversity loss to decorrelate predicates.
@@ -1066,6 +1184,7 @@ class RLANLoss(nn.Module):
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_weighted', 'focal_stablemax', or 'focal'
         bg_weight_cap: float = 2.0,  # Max weight for BG in weighted losses
         fg_weight_cap: float = 5.0,  # Max weight for FG in weighted losses
+        lambda_centroid_diversity: float = 0.1,  # NEW: Weight for centroid diversity loss
     ):
         """
         Args:
@@ -1162,10 +1281,16 @@ class RLANLoss(nn.Module):
             entropy_ponder_weight=entropy_ponder_weight,  # Extra cost for diffuse attention
         )
         self.predicate_diversity = PredicateDiversityLoss()
+        self.centroid_diversity = CentroidDiversityLoss(min_distance=2.0, weight_by_usage=True)
         self.curriculum_penalty = CurriculumPenalty(max_clues=max_clues)
+        
+        # Centroid diversity weight (CRITICAL for DSC health)
+        # Configurable via YAML, default 0.1 is enough to prevent collapse
+        self.lambda_centroid_diversity = lambda_centroid_diversity
         
         # Print sparsity config for debugging
         print(f"  Clue Regularization: min_clues={min_clues}, min_clue_weight={min_clue_weight}, ponder_weight={ponder_weight}, entropy_weight={entropy_ponder_weight}")
+        print(f"  Centroid Diversity: lambda={self.lambda_centroid_diversity} (prevents DSC clue collapse)")
         
         self.lambda_entropy = lambda_entropy
         self.lambda_sparsity = lambda_sparsity
@@ -1185,6 +1310,7 @@ class RLANLoss(nn.Module):
         max_epochs: int = 250,
         all_logits: Optional[list] = None,
         act_outputs: Optional[dict] = None,
+        centroids: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Compute all RLAN losses.
@@ -1201,6 +1327,7 @@ class RLANLoss(nn.Module):
             act_outputs: Optional dict with ACT outputs for halt loss computation
                 - 'q_halt_logits': List of (B,) Q-values for halting at each step
                 - 'q_continue_logits': List of (B,) Q-values for continuing
+            centroids: Optional shape (B, K, 2) clue centroid coordinates for diversity loss
             
         Returns:
             Dict with keys:
@@ -1212,6 +1339,7 @@ class RLANLoss(nn.Module):
                 - curriculum_loss: Complexity penalty
                 - deep_supervision_loss: Intermediate step losses (if all_logits provided)
                 - act_loss: ACT halting loss (if act_outputs provided)
+                - centroid_diversity_loss: Clue spatial diversity loss (if centroids provided)
         """
         # FAST PATH: Minimal mode - just compute task loss
         if self.minimal_mode:
@@ -1227,6 +1355,7 @@ class RLANLoss(nn.Module):
                 "curriculum_loss": zero,
                 "deep_supervision_loss": zero,
                 "act_loss": zero,
+                "centroid_diversity_loss": zero,  # DSC spatial diversity
                 "loss_mode": self.loss_mode,
                 "sparsity_min_clue_penalty": 0.0,
                 "sparsity_base_pondering": 0.0,
@@ -1336,6 +1465,19 @@ class RLANLoss(nn.Module):
                 
                 act_loss = sum(act_losses) / len(act_losses) if act_losses else act_loss
         
+        # Centroid diversity loss (if centroids provided)
+        # This is CRITICAL for preventing DSC collapse where all clues attend same location
+        if centroids is not None and self.centroid_diversity is not None:
+            # Get grid size from attention maps for distance normalization
+            _, _, H, W = attention_maps.shape
+            centroid_diversity_loss = self.centroid_diversity(
+                centroids=centroids,
+                stop_logits=stop_logits,
+                grid_size=(H, W),
+            )
+        else:
+            centroid_diversity_loss = torch.tensor(0.0, device=logits.device)
+        
         # Combine losses
         total_loss = (
             task_loss
@@ -1345,6 +1487,7 @@ class RLANLoss(nn.Module):
             + self.lambda_curriculum * curriculum_loss
             + self.lambda_deep_supervision * deep_supervision_loss
             + self.lambda_act * act_loss
+            + self.lambda_centroid_diversity * centroid_diversity_loss
         )
         
         # Get sparsity loss component breakdown for diagnostics
@@ -1360,6 +1503,7 @@ class RLANLoss(nn.Module):
             "curriculum_loss": curriculum_loss,
             "deep_supervision_loss": deep_supervision_loss,
             "act_loss": act_loss,
+            "centroid_diversity_loss": centroid_diversity_loss,  # DSC spatial diversity
             "loss_mode": self.loss_mode,  # Include mode for logging
             # Sparsity component breakdown (for debugging clue usage)
             "sparsity_min_clue_penalty": sparsity_components.get('min_clue_penalty', 0.0),

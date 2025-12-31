@@ -533,6 +533,7 @@ class RLAN(nn.Module):
         
         # 2. Encode training context if provided and enabled
         context = None  # (B, D) for FiLM mode
+        dsc_task_context = None  # (B, D) for DSC stop predictor (ALWAYS computed when context available)
         support_features = None  # (B, N, D, H, W) for cross-attention mode (for solver)
         if self.use_context_encoder and self.context_encoder is not None:
             if train_inputs is not None and train_outputs is not None:
@@ -544,6 +545,12 @@ class RLAN(nn.Module):
                 if self.context_encoder.use_spatial_features:
                     # Spatial features mode: (B, N, D, H, W)
                     support_features = context_output  # Keep for solver cross-attention
+                    
+                    # CRITICAL FIX: Always compute a pooled task context for DSC
+                    # Even when cross-attention injection is used for features, DSC's stop
+                    # predictor needs a task embedding to make task-dependent stop decisions.
+                    # Without this, DSC gets task_context=None -> zero vector -> frozen stop probs.
+                    dsc_task_context = self.pool_context_from_support(context_output)  # (B, D)
                     
                     # STAGED CROSS-ATTENTION: Check if cross-attention is active
                     # During early epochs, cross-attention injects random noise from untrained
@@ -558,7 +565,7 @@ class RLAN(nn.Module):
                         # FiLM fallback: pool spatial features to context vector
                         # Used when: 1) use_solver_context=True but use_cross_attention_context=False
                         #            2) Early epochs when cross_attention_active=False
-                        context = self.pool_context_from_support(context_output)  # (B, D)
+                        context = dsc_task_context  # Reuse already-pooled context
                         # Use dedicated fallback injector if available, else main injector
                         fallback_injector = getattr(self, 'film_fallback_injector', None) or self.context_injector
                         if fallback_injector is not None:
@@ -566,6 +573,7 @@ class RLAN(nn.Module):
                 else:
                     # FiLM mode: compressed context vector
                     context = context_output  # (B, D)
+                    dsc_task_context = context  # Same as FiLM context
                     features = self.context_injector(features, context)
         
         # 2.5. Hierarchical Primitive Memory (HPM v2) - enhance context with memory (if enabled)
@@ -614,8 +622,9 @@ class RLAN(nn.Module):
         
         # 3. Dynamic Saliency Controller - find clue anchors (if enabled)
         if self.use_dsc and self.dsc is not None:
+            # CRITICAL: Use dsc_task_context (always pooled) instead of context (may be None in cross-attn mode)
             centroids, attention_maps, stop_logits = self.dsc(
-                features, temperature=temperature, mask=valid_mask
+                features, temperature=temperature, mask=valid_mask, task_context=dsc_task_context
             )  # (B, K, 2), (B, K, H, W), (B, K)
         else:
             # Default: single centered anchor, uniform attention

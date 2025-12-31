@@ -125,7 +125,7 @@ class TaskConditionedDSC(nn.Module):
     def forward(
         self,
         features: torch.Tensor,  # (B, D, H, W) encoded grid features
-        context: torch.Tensor,   # (B, context_dim) task context
+        task_context: torch.Tensor = None,   # (B, context_dim) task context
         temperature: float = 0.5,
     ):
         """
@@ -133,6 +133,9 @@ class TaskConditionedDSC(nn.Module):
         """
         B, D, H, W = features.shape
         K = self.max_clues
+        
+        # Backward compat: accept task_context kwarg
+        context = task_context if task_context is not None else torch.zeros(B, self.hidden_dim, device=features.device)
         
         # Get task-conditioned queries
         clue_queries = self.get_clue_queries(context)  # (B, K, D)
@@ -225,7 +228,7 @@ def test_gradient_flow():
     context = torch.randn(4, 64, requires_grad=True)
     
     # Forward
-    centroids, attention_maps, stop_logits = dsc(features, context)
+    centroids, attention_maps, stop_logits = dsc(features, task_context=context)
     
     # Compute loss
     loss = attention_maps.sum() + stop_logits.sum()
@@ -261,7 +264,7 @@ def test_output_stability():
     all_stable = True
     for name, features, context in test_cases:
         try:
-            centroids, attention_maps, stop_logits = dsc(features, context)
+            centroids, attention_maps, stop_logits = dsc(features, task_context=context)
             
             is_finite = (
                 torch.isfinite(centroids).all() and
@@ -326,7 +329,7 @@ def test_stop_predictor_integration():
     features = torch.randn(8, 64, 10, 10)
     context = torch.randn(8, 64)
     
-    centroids, attention_maps, stop_logits = dsc(features, context)
+    centroids, attention_maps, stop_logits = dsc(features, task_context=context)
     
     # Stop logits should be in reasonable range
     stop_in_range = (stop_logits.abs() <= 4.0).all().item()

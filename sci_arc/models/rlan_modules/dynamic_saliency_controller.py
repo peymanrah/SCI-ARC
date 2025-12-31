@@ -130,6 +130,7 @@ class DynamicSaliencyController(nn.Module):
         max_clues: int = 5,
         num_heads: int = 4,
         dropout: float = 0.1,
+        context_dim: Optional[int] = None,
     ):
         """
         Args:
@@ -143,10 +144,27 @@ class DynamicSaliencyController(nn.Module):
         self.hidden_dim = hidden_dim
         self.max_clues = max_clues
         self.num_heads = num_heads
+        self.context_dim = context_dim if context_dim is not None else hidden_dim
         
         # Learnable clue queries - each query learns to attend to different patterns
+        # IMPROVED: Initialize with spatial diversity to prevent centroid collapse
+        # Each query gets a different "spatial bias" encoded in the feature space
         self.clue_queries = nn.Parameter(torch.randn(max_clues, hidden_dim))
         nn.init.xavier_uniform_(self.clue_queries.unsqueeze(0))
+        
+        # Add spatial diversity: use sinusoidal position encoding over query index
+        # This gives each query a unique "identity" that helps them specialize
+        with torch.no_grad():
+            for k in range(max_clues):
+                # Encode query index as phase offset in sinusoidal encoding
+                # This spreads queries in the learned feature space
+                phase = 2 * 3.14159 * k / max_clues
+                for d in range(hidden_dim):
+                    freq = d / hidden_dim
+                    if d % 2 == 0:
+                        self.clue_queries.data[k, d] += 0.1 * math.sin(phase + freq * 10)
+                    else:
+                        self.clue_queries.data[k, d] += 0.1 * math.cos(phase + freq * 10)
         
         # Query projection for attention
         self.query_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -161,12 +179,15 @@ class DynamicSaliencyController(nn.Module):
         # CRITICAL: Initialize with negative bias to default to "continue" not "stop"
         # sigmoid(-2.0) ≈ 0.12, so model starts by using most clues
         # 
-        # Input: attended_features (D) + attention_entropy (1) = D+1 dimensions
+        # Input: attended_features (D) + attention_entropy (1) + task_context (C)
+        # task_context is a pooled global summary of the support set (task embedding)
+        # used elsewhere for FiLM/HyperLoRA. Feeding it into the stop predictor
+        # allows task-specific clue count decisions (fixes frozen uniform stop probs).
         # The entropy input creates coupling between attention sharpness and stopping:
         # - Sharp attention (low entropy) → model can stop (found good anchor)
         # - Diffuse attention (high entropy) → need more clues (uncertain)
         self.stop_predictor = nn.Sequential(
-            nn.Linear(hidden_dim + 1, hidden_dim // 2),  # +1 for attention entropy
+            nn.Linear(hidden_dim + 1 + self.context_dim, hidden_dim // 2),  # +1 entropy, +C task context
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
@@ -201,16 +222,17 @@ class DynamicSaliencyController(nn.Module):
         """
         Initialize stop predictor with proper entropy coupling.
         
-        The stop predictor receives [attended_features (D), entropy (1)].
-        We want entropy to have strong influence on stopping:
-        - Low entropy (sharp attention) → higher stop probability
-        - High entropy (diffuse attention) → lower stop probability
+        The stop predictor receives [attended_features (D), confidence (1), task_context (C)].
+        We want confidence (= 1 - normalized_entropy) to have strong influence on stopping:
+        - High confidence (sharp attention) → higher stop probability
+        - Low confidence (diffuse attention) → lower stop probability
         
-        Key insight: entropy is normalized to [0,1] and negated, so:
-        - Good focus: entropy_norm ≈ -0.8 to -1.0 (sharp → should stop)
-        - Poor focus: entropy_norm ≈ -0.2 to -0.4 (diffuse → continue)
+        Key insight: confidence = 1 - entropy_norm, so:
+        - Good focus: confidence ≈ 0.8 to 1.0 (sharp → should stop)
+        - Poor focus: confidence ≈ 0.2 to 0.4 (diffuse → continue)
         
-        The weight on entropy should be ~1-2 to have meaningful impact on logit.
+        The weight on confidence should be ~1-2 to have meaningful impact on logit.
+        With this convention, POSITIVE correlation between confidence and stop = HEALTHY.
         
         Args:
             init_bias: Initial bias value. Less negative = easier to learn to stop.
@@ -222,16 +244,23 @@ class DynamicSaliencyController(nn.Module):
         if len(layers) >= 2:
             first_layer, last_layer = layers[0], layers[-1]
             
-            # First layer: Give entropy input (last dimension) strong weight
+            # First layer: Give entropy input strong weight
             # This creates real coupling between attention quality and stopping
             in_features = first_layer.in_features
-            hidden_dim = in_features - 1  # All but last dim is attended_features
+            feature_dim = self.hidden_dim
+            entropy_idx = feature_dim
+            context_start = feature_dim + 1
+            context_dim = in_features - context_start
             
-            # Initialize with kaiming for feature part, stronger for entropy
-            nn.init.kaiming_normal_(first_layer.weight[:, :hidden_dim], mode='fan_in')
-            # Entropy weight: stronger initialization (std ≈ 1.5)
-            # Positive weight: low entropy (negative after negation) → higher activation
-            nn.init.normal_(first_layer.weight[:, hidden_dim:], mean=1.5, std=0.5)
+            # Initialize with kaiming for attended feature part
+            nn.init.kaiming_normal_(first_layer.weight[:, :feature_dim], mode='fan_in')
+            # Confidence weight: stronger initialization (std ≈ 1.5)
+            # Positive weight: high confidence (sharp attention) → higher stop activation
+            nn.init.normal_(first_layer.weight[:, entropy_idx:entropy_idx + 1], mean=1.5, std=0.5)
+            # Task context: moderate initialization (so it can learn task-specificity
+            # without overwhelming attended features at start)
+            if context_dim > 0:
+                nn.init.normal_(first_layer.weight[:, context_start:], mean=0.0, std=0.2)
             nn.init.zeros_(first_layer.bias)
             
             # Last layer: reasonable initialization with less aggressive bias
@@ -241,10 +270,16 @@ class DynamicSaliencyController(nn.Module):
             # Single layer case
             layer = layers[0]
             in_features = layer.in_features
-            hidden_dim = in_features - 1
+            feature_dim = self.hidden_dim
+            entropy_idx = feature_dim
+            context_start = feature_dim + 1
+            context_dim = in_features - context_start
             
-            nn.init.kaiming_normal_(layer.weight[:, :hidden_dim], mode='fan_in')
-            nn.init.normal_(layer.weight[:, hidden_dim:], mean=1.5, std=0.5)
+            nn.init.kaiming_normal_(layer.weight[:, :feature_dim], mode='fan_in')
+            # Confidence weight: high confidence → higher stop probability
+            nn.init.normal_(layer.weight[:, entropy_idx:entropy_idx + 1], mean=1.5, std=0.5)
+            if context_dim > 0:
+                nn.init.normal_(layer.weight[:, context_start:], mean=0.0, std=0.2)
             nn.init.constant_(layer.bias, init_bias)
     
     def _init_coord_grids(self, max_size: int):
@@ -291,6 +326,7 @@ class DynamicSaliencyController(nn.Module):
         features: torch.Tensor,
         temperature: float = 1.0,
         mask: Optional[torch.Tensor] = None,
+        task_context: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Extract clue anchors from encoded features.
@@ -305,8 +341,44 @@ class DynamicSaliencyController(nn.Module):
             attention_maps: Shape (B, K, H, W) soft attention per clue
             stop_logits: Shape (B, K) stop probability logits
         """
+        # Backward/utility compatibility:
+        # Some diagnostic scripts call dsc(features, context) positionally.
+        # If the second arg is a Tensor of shape (B, C), treat it as task_context.
+        if task_context is None and isinstance(temperature, torch.Tensor):
+            if temperature.dim() == 2:
+                task_context = temperature
+                temperature = 1.0
+
         B, D, H, W = features.shape
         K = self.max_clues
+
+        # Prepare task context vector once per forward (used for every clue)
+        if task_context is None:
+            task_context_vec = torch.zeros(
+                B, self.context_dim, device=features.device, dtype=features.dtype
+            )
+        else:
+            # Accept a few reasonable shapes and pool down to (B, C)
+            if task_context.dim() == 2:
+                task_context_vec = task_context
+            elif task_context.dim() == 3:
+                # e.g., (B, N, C) -> mean over N
+                task_context_vec = task_context.mean(dim=1)
+            elif task_context.dim() == 4:
+                # e.g., (B, C, H, W) -> mean over spatial
+                task_context_vec = task_context.mean(dim=(2, 3))
+            else:
+                raise ValueError(
+                    f"task_context must be 2D/3D/4D, got {task_context.dim()}D"
+                )
+            if task_context_vec.shape[0] != B:
+                raise ValueError(
+                    f"task_context batch mismatch: {task_context_vec.shape[0]} vs {B}"
+                )
+            if task_context_vec.shape[1] != self.context_dim:
+                raise ValueError(
+                    f"task_context dim mismatch: got {task_context_vec.shape[1]}, expected {self.context_dim}"
+                )
         
         # Reshape features: (B, D, H, W) -> (B, H*W, D)
         features_flat = features.permute(0, 2, 3, 1).reshape(B, H * W, D)
@@ -393,9 +465,16 @@ class DynamicSaliencyController(nn.Module):
             max_entropy = math.log(H * W + 1e-6)
             attn_entropy_normalized = attn_entropy / max_entropy  # (B, 1)
             
-            # Concatenate attended features with normalized entropy
-            # The entropy provides a "confidence" signal to the stop predictor
-            stop_input = torch.cat([attended_features, attn_entropy_normalized], dim=-1)  # (B, D+1)
+            # CRITICAL FIX: Convert entropy to CONFIDENCE = 1 - entropy_norm
+            # This makes the coupling intuitive: high confidence → should stop
+            # And ensures POSITIVE correlation between confidence and stop = HEALTHY
+            attn_confidence = 1.0 - attn_entropy_normalized  # (B, 1): sharp=high, diffuse=low
+            
+            # Concatenate attended features with confidence and global task context
+            # The confidence provides a "sharpness" signal to the stop predictor
+            stop_input = torch.cat(
+                [attended_features, attn_confidence, task_context_vec], dim=-1
+            )  # (B, D+1+C)
             
             # Predict stop probability with entropy-aware input
             stop_logit_raw = self.stop_predictor(stop_input).squeeze(-1)  # (B,)
@@ -415,7 +494,11 @@ class DynamicSaliencyController(nn.Module):
             
             # Update cumulative mask (reduce weight of attended regions)
             # Use soft masking to allow gradients to flow
-            mask_update = 1.0 - 0.9 * attention.detach()
+            # IMPROVED: Increase from 0.9 to 0.98 to force stronger spatial diversity
+            # With 0.9: if attention=1.0, mask becomes 0.1 (still allows overlap)
+            # With 0.98: if attention=1.0, mask becomes 0.02 (forces clues apart)
+            # This is critical for preventing centroid collapse
+            mask_update = 1.0 - 0.98 * attention.detach()
             cumulative_mask = cumulative_mask * mask_update
             # Ensure mask doesn't become too small
             cumulative_mask = cumulative_mask.clamp(min=1e-6)
@@ -424,7 +507,7 @@ class DynamicSaliencyController(nn.Module):
             all_centroids.append(centroid)
             all_attention_maps.append(attention)
             all_stop_logits.append(stop_logit)
-            all_entropy_inputs.append(attn_entropy_normalized.squeeze(-1))  # (B,)
+            all_entropy_inputs.append(attn_confidence.squeeze(-1))  # (B,) - now confidence, not entropy
         
         # Stack outputs
         centroids = torch.stack(all_centroids, dim=1)  # (B, K, 2)
@@ -438,7 +521,11 @@ class DynamicSaliencyController(nn.Module):
         return centroids, attention_maps, stop_logits
     
     def get_last_entropy_inputs(self) -> torch.Tensor:
-        """Get the normalized entropy inputs used in last forward pass for diagnostics."""
+        """Get the confidence inputs (1 - normalized_entropy) used in last forward pass for diagnostics.
+        
+        Note: Despite the method name (kept for backward compatibility), this now returns
+        CONFIDENCE values, not entropy. High value = sharp attention = confident.
+        """
         return getattr(self, '_last_entropy_inputs', None)
     
     def get_active_clues(

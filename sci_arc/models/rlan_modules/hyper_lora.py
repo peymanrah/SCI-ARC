@@ -286,13 +286,20 @@ class HyperLoRA(nn.Module):
     
     def pool_context(self, support_features: torch.Tensor) -> torch.Tensor:
         """
-        Pool support features to a single context vector.
+        Pool support features to a single context vector with DIHEDRAL INVARIANCE.
+        
+        This is critical for TTA consensus: the context must be the same
+        regardless of how the input is oriented (rotated/reflected).
+        
+        We achieve this by averaging over all 8 D4 group transformations:
+        - 4 rotations: 0°, 90°, 180°, 270°
+        - 2 reflections: horizontal, vertical
         
         Args:
             support_features: (B, N, D, H, W) spatial features from ContextEncoder
             
         Returns:
-            context: (B, D) pooled context vector
+            context: (B, D) dihedral-invariant pooled context vector
         """
         B, N, D, H, W = support_features.shape
         
@@ -300,14 +307,53 @@ class HyperLoRA(nn.Module):
         # Use .reshape() instead of .view() to handle non-contiguous tensors
         # (can happen after augmentation transforms like rotate/flip)
         features_flat = support_features.reshape(B * N, D, H, W)
-        pooled = self.context_pool(features_flat)  # (B*N, D, 1, 1)
-        pooled = pooled.reshape(B, N, D)  # (B, N, D)
         
-        # Average across pairs
-        context = pooled.mean(dim=1)  # (B, D)
+        # DIHEDRAL INVARIANCE: Average context over all D4 transformations
+        # This makes HyperLoRA produce the SAME deltas for rotated/flipped inputs
+        contexts = []
         
-        # Fuse context with MLP
-        context = self.context_fuse(context)  # (B, D)
+        # Original
+        pooled_orig = self.context_pool(features_flat)  # (B*N, D, 1, 1)
+        pooled_orig = pooled_orig.reshape(B, N, D).mean(dim=1)  # (B, D)
+        contexts.append(self.context_fuse(pooled_orig))
+        
+        # 90° rotation
+        rot90 = torch.rot90(features_flat, k=1, dims=[2, 3])
+        pooled_rot90 = self.context_pool(rot90).reshape(B, N, D).mean(dim=1)
+        contexts.append(self.context_fuse(pooled_rot90))
+        
+        # 180° rotation
+        rot180 = torch.rot90(features_flat, k=2, dims=[2, 3])
+        pooled_rot180 = self.context_pool(rot180).reshape(B, N, D).mean(dim=1)
+        contexts.append(self.context_fuse(pooled_rot180))
+        
+        # 270° rotation
+        rot270 = torch.rot90(features_flat, k=3, dims=[2, 3])
+        pooled_rot270 = self.context_pool(rot270).reshape(B, N, D).mean(dim=1)
+        contexts.append(self.context_fuse(pooled_rot270))
+        
+        # Horizontal flip
+        flip_h = torch.flip(features_flat, dims=[3])
+        pooled_flip_h = self.context_pool(flip_h).reshape(B, N, D).mean(dim=1)
+        contexts.append(self.context_fuse(pooled_flip_h))
+        
+        # Vertical flip
+        flip_v = torch.flip(features_flat, dims=[2])
+        pooled_flip_v = self.context_pool(flip_v).reshape(B, N, D).mean(dim=1)
+        contexts.append(self.context_fuse(pooled_flip_v))
+        
+        # Horizontal flip + 90° rotation (diagonal flip)
+        flip_h_rot90 = torch.rot90(flip_h, k=1, dims=[2, 3])
+        pooled_flip_h_rot90 = self.context_pool(flip_h_rot90).reshape(B, N, D).mean(dim=1)
+        contexts.append(self.context_fuse(pooled_flip_h_rot90))
+        
+        # Horizontal flip + 270° rotation (anti-diagonal flip)
+        flip_h_rot270 = torch.rot90(flip_h, k=3, dims=[2, 3])
+        pooled_flip_h_rot270 = self.context_pool(flip_h_rot270).reshape(B, N, D).mean(dim=1)
+        contexts.append(self.context_fuse(pooled_flip_h_rot270))
+        
+        # Average over all 8 transformations for dihedral invariance
+        context = torch.stack(contexts, dim=0).mean(dim=0)  # (B, D)
         
         return context
     
