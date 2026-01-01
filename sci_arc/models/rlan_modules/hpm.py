@@ -697,12 +697,27 @@ class HierarchicalPrimitiveMemory(nn.Module):
                 if dynamic_buffers and bank_type.name in dynamic_buffers:
                     keys, values = dynamic_buffers[bank_type.name]
                     query_proj = getattr(self, f'{bank_type.name.lower()}_query_proj')
-                    query = query_proj(z)
+                    query = query_proj(z)  # [B, D]
                     
-                    # Attention over retrieved neighbors
-                    scores = torch.matmul(query, keys.T) / math.sqrt(self.d_model)
-                    alpha = F.softmax(scores, dim=-1)
-                    output = torch.matmul(alpha, values)
+                    # TODO 1 FIX: Handle both [k, D] (legacy) and [B, k, D] (per-sample) shapes
+                    # [B, k, D] is the correct per-sample retrieval from retrieve_batch()
+                    if keys.dim() == 2:
+                        # Legacy path: [k, D] shared across batch (backward compat)
+                        # Attention over retrieved neighbors
+                        scores = torch.matmul(query, keys.T) / math.sqrt(self.d_model)
+                        alpha = F.softmax(scores, dim=-1)
+                        output = torch.matmul(alpha, values)
+                    elif keys.dim() == 3:
+                        # Per-sample path: [B, k, D] - each sample has its own neighbors
+                        # query: [B, D], keys: [B, k, D]
+                        # Compute per-sample attention: query @ keys^T -> [B, 1, k]
+                        query_expanded = query.unsqueeze(1)  # [B, 1, D]
+                        scores = torch.bmm(query_expanded, keys.transpose(1, 2)) / math.sqrt(self.d_model)  # [B, 1, k]
+                        alpha = F.softmax(scores, dim=-1)  # [B, 1, k]
+                        # Weighted sum: [B, 1, k] @ [B, k, D] -> [B, 1, D]
+                        output = torch.bmm(alpha, values).squeeze(1)  # [B, D]
+                    else:
+                        output = torch.zeros_like(z)
                 else:
                     # No buffer available: return zeros
                     output = torch.zeros_like(z)

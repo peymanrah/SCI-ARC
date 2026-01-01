@@ -226,7 +226,7 @@ def set_seed(seed: int, deterministic: bool = False):
 # MEMORY DEBUGGING UTILITIES
 # ============================================================================
 
-def get_tensor_memory_breakdown(model, outputs: dict = None, batch: dict = None) -> Dict[str, float]:
+def get_tensor_memory_breakdown(model, outputs: dict = None, batch: dict = None, optimizer=None) -> Dict[str, Any]:
     """
     Get detailed memory breakdown by category.
     
@@ -252,13 +252,30 @@ def get_tensor_memory_breakdown(model, outputs: dict = None, batch: dict = None)
     )
     breakdown['model_grads_mb'] = grad_bytes / 1024 / 1024
     
-    # Optimizer states estimate (AdamW stores m and v = 2x param size in fp32)
-    # This is an estimate since we don't have optimizer reference here
+    # Optimizer states estimate
+    # NOTE: This is an estimate and depends heavily on optimizer implementation.
+    breakdown['optimizer_states_estimate_note'] = 'estimate (assumes AdamW fp32 states)'
     try:
         first_param = next(model.parameters())
-        breakdown['optimizer_states_estimate_mb'] = (param_bytes * 2 * 4 / first_param.element_size()) / 1024 / 1024
+
+        if optimizer is not None:
+            opt_mod = getattr(optimizer.__class__, '__module__', '') or ''
+            opt_name = optimizer.__class__.__name__
+            is_bitsandbytes = ('bitsandbytes' in opt_mod) or ('8bit' in opt_name.lower())
+
+            if is_bitsandbytes:
+                # Rough estimate for 8-bit Adam variants: quantized states + small fp32 scalars.
+                # We keep this conservative and annotate it.
+                breakdown['optimizer_states_estimate_mb'] = (param_bytes * 0.75) / 1024 / 1024
+                breakdown['optimizer_states_estimate_note'] = f'estimate (8-bit optimizer: {opt_name})'
+            else:
+                breakdown['optimizer_states_estimate_mb'] = (param_bytes * 2 * 4 / first_param.element_size()) / 1024 / 1024
+                breakdown['optimizer_states_estimate_note'] = f'estimate (Adam-like: {opt_name})'
+        else:
+            breakdown['optimizer_states_estimate_mb'] = (param_bytes * 2 * 4 / first_param.element_size()) / 1024 / 1024
     except StopIteration:
         breakdown['optimizer_states_estimate_mb'] = 0
+        breakdown['optimizer_states_estimate_note'] = 'estimate (no params)'
     
     # Batch data memory
     if batch is not None:
@@ -329,6 +346,9 @@ def format_memory_breakdown(breakdown: Dict[str, Any], prefix: str = "      ") -
     # Core metrics
     lines.append(f"{prefix}Model params: {breakdown.get('model_params_mb', 0):.1f}MB")
     lines.append(f"{prefix}Model grads:  {breakdown.get('model_grads_mb', 0):.1f}MB")
+    opt_est = breakdown.get('optimizer_states_estimate_mb', 0.0)
+    opt_note = breakdown.get('optimizer_states_estimate_note', 'estimate')
+    lines.append(f"{prefix}Optimizer:    {opt_est:.1f}MB ({opt_note})")
     lines.append(f"{prefix}Batch data:   {breakdown.get('batch_data_mb', 0):.1f}MB")
     lines.append(f"{prefix}Activations:  {breakdown.get('activations_total_mb', 0):.1f}MB")
     
@@ -399,7 +419,7 @@ class MemoryTracker:
         self.baseline_allocated = torch.cuda.memory_allocated() / 1024 / 1024
         self.baseline_reserved = torch.cuda.memory_reserved() / 1024 / 1024
         
-    def checkpoint(self, name: str, model=None, outputs: dict = None, batch: dict = None):
+    def checkpoint(self, name: str, model=None, outputs: dict = None, batch: dict = None, optimizer=None):
         """Record memory at a named checkpoint with optional tensor breakdown."""
         if not self.enabled:
             return
@@ -417,7 +437,7 @@ class MemoryTracker:
         # Capture detailed breakdown if we have model/outputs/batch
         if model is not None or outputs is not None or batch is not None:
             try:
-                breakdown = get_tensor_memory_breakdown(model, outputs, batch) if model else {}
+                breakdown = get_tensor_memory_breakdown(model, outputs, batch, optimizer=optimizer) if model else {}
                 checkpoint_data['breakdown'] = breakdown
             except Exception as e:
                 checkpoint_data['breakdown_error'] = str(e)
@@ -1286,6 +1306,16 @@ def train_epoch(
         'per_clue_entropy': [],        # Per-clue entropy breakdown (K values)
         'centroid_spread': 0.0,        # How spread out are clue centroids
         'all_logits_count': 0,         # Verify deep supervision is receiving steps
+
+        # =============================================================
+        # ATTENTION COLLAPSE EVENTS (for meta-escalation stability gating)
+        # =============================================================
+        # Count batches where attention becomes near-uniform (diffuse).
+        # This directly targets the observed late-epoch collapse mode:
+        # attn_max_mean ~ 0.005 (≈ uniform over H*W) preceding FG/BG nosedive.
+        'attention_collapse_events_epoch': 0,
+        'attention_collapse_consecutive': 0,
+        'attention_collapse_consecutive_max': 0,
         
         # Attention statistics (is attention focusing or diffuse?)
         'attn_max_mean': 0.0,          # Mean of max attention values (higher = sharper)
@@ -1376,6 +1406,34 @@ def train_epoch(
         'hpm_batch_count': 0,                     # Number of batches with HPM routing
         'equiv_consistency_sum': 0.0,             # Avg consistency of LoRA across augmentations
         'equiv_batch_count': 0,                   # Number of batches with equivariance computed
+        
+        # =============================================================
+        # HPM DEDUPLICATION TRACKING
+        # =============================================================
+        # Prevent the same task from being added to HPM buffers multiple times
+        # per epoch (which would pollute the memory with redundant entries)
+        'hpm_tasks_added_this_epoch': set(),      # Task IDs already added to HPM this epoch
+        'hpm_duplicate_skipped': 0,               # Count of duplicate adds prevented
+        
+        # =============================================================
+        # HPM RETRIEVAL STATS (for monitoring memory quality)
+        # =============================================================
+        'hpm_retrieval_count': 0,                 # Number of batches with HPM retrieval
+        'hpm_instance_similarity_sum': 0.0,       # Sum of avg similarities from instance bank
+        'hpm_procedural_similarity_sum': 0.0,     # Sum of avg similarities from procedural bank
+        'hpm_instance_retrieved_sum': 0,          # Total entries retrieved from instance bank
+        'hpm_procedural_retrieved_sum': 0,        # Total entries retrieved from procedural bank
+        
+        # =============================================================
+        # HPM SOLVER-CONTEXT COUPLING STATS (Jan 2026)
+        # =============================================================
+        # Track how HPM memory tokens are being used by the solver
+        'hpm_solver_tokens_used': 0,              # Total HPM tokens injected into solver
+        'hpm_solver_batches_with_tokens': 0,      # Batches that had HPM tokens
+        'hpm_solver_gate_sum': 0.0,               # Sum of gate values for averaging
+        'hpm_solver_proj_norm_max': 0.0,          # Max projected token norm (for explosion detection)
+        'hpm_solver_proj_norm_sum': 0.0,          # Sum of projected token norms
+        'hpm_solver_explosion_count': 0,          # Batches where projection exceeded clamp
     }
     
     temperature = get_temperature(epoch, config)
@@ -1425,10 +1483,16 @@ def train_epoch(
     centroid_spread_critical = monitoring_cfg.get('centroid_spread_critical', 0.5)
     # NaN abort threshold (per-epoch total)
     nan_batches_abort = monitoring_cfg.get('nan_batches_abort', 20)
+
+    # Attention collapse threshold (diffuse attention detector)
+    # Default 0.02: uniform over 30x30 is ~0.0011; healthy sharp attention is typically >> 0.1.
+    attn_max_collapse_threshold = monitoring_cfg.get('attn_max_collapse_threshold', 0.02)
     # LoRA thresholds (also used in batch loop)
-    lora_norm_warn_threshold = monitoring_cfg.get('lora_norm_warn', 10.0)
-    lora_norm_critical_threshold = monitoring_cfg.get('lora_norm_critical', 30.0)
-    lora_norm_kill_threshold = monitoring_cfg.get('lora_norm_kill', 50.0)
+    # Defaults tightened (Jan 2026): earlier versions used 10/30/50 which would not
+    # trip on the 1.3→1.8 runaway seen in the epoch-55+ collapse logs.
+    lora_norm_warn_threshold = monitoring_cfg.get('lora_norm_warn', 2.0)
+    lora_norm_critical_threshold = monitoring_cfg.get('lora_norm_critical', 5.0)
+    lora_norm_kill_threshold = monitoring_cfg.get('lora_norm_kill', 10.0)
     lora_kill_consecutive_limit = 3  # Abort after this many consecutive kill-threshold breaches
     
     # Wrap dataloader with CUDA prefetcher for async data transfer
@@ -1474,7 +1538,7 @@ def train_epoch(
         total_samples += batch_size
         
         # MEMORY CHECKPOINT: After batch data is on GPU
-        mem_tracker.checkpoint("01_batch_on_gpu", batch=batch)
+        mem_tracker.checkpoint("01_batch_on_gpu", batch=batch, optimizer=optimizer)
         
         # Batch already on device (prefetcher handles transfer asynchronously)
         test_inputs = batch['test_inputs']
@@ -1496,7 +1560,7 @@ def train_epoch(
                 )
                 
                 # MEMORY CHECKPOINT: After main forward pass
-                mem_tracker.checkpoint("02_after_forward", model=model, outputs=outputs, batch=batch)
+                mem_tracker.checkpoint("02_after_forward", model=model, outputs=outputs, batch=batch, optimizer=optimizer)
                 
                 losses = loss_fn(
                     logits=outputs['logits'],
@@ -1721,7 +1785,7 @@ def train_epoch(
             # Loss is finite - but only reset consecutive counter after successful optimizer step
             
             # MEMORY CHECKPOINT: Before backward pass
-            mem_tracker.checkpoint("03_before_backward", model=model)
+            mem_tracker.checkpoint("03_before_backward", model=model, optimizer=optimizer)
             
             # Wrap backward pass in try-catch to handle CUDA errors gracefully
             # CUDA kernel errors (e.g., launch failures) can occur with memory fragmentation
@@ -1771,7 +1835,7 @@ def train_epoch(
                     raise
             
             # MEMORY CHECKPOINT: After backward pass (peak memory usually here)
-            mem_tracker.checkpoint("04_after_backward", model=model)
+            mem_tracker.checkpoint("04_after_backward", model=model, optimizer=optimizer)
             
             # Step optimizer after accumulation
             if (batch_idx + 1) % grad_accumulation_steps == 0:
@@ -1985,7 +2049,7 @@ def train_epoch(
                 optimizer.zero_grad()
                 
                 # MEMORY CHECKPOINT: After optimizer step (gradients cleared)
-                mem_tracker.checkpoint("05_after_optim_step", model=model)
+                mem_tracker.checkpoint("05_after_optim_step", model=model, optimizer=optimizer)
                 
                 # Update EMA after optimizer step
                 if ema is not None:
@@ -2356,6 +2420,27 @@ def train_epoch(
                     logits = outputs['logits']
             else:
                 logits = outputs['logits']  # (B, C, H, W)
+
+            # =============================================================
+            # ATTENTION COLLAPSE DETECTION (every batch)
+            # =============================================================
+            # Use mean of per-sample-per-clue max attention as a cheap proxy.
+            # Near-uniform attention yields max ~1/(H*W); sharp yields much larger.
+            if 'attention_maps' in outputs and outputs['attention_maps'] is not None:
+                attn = outputs['attention_maps']  # (B, K, H, W)
+                if isinstance(attn, torch.Tensor) and attn.numel() > 0:
+                    B_attn, K_attn, H_attn, W_attn = attn.shape
+                    attn_flat = attn.view(B_attn, K_attn, -1)
+                    attn_max_batch = attn_flat.max(dim=-1)[0].mean().item()
+                    if attn_max_batch < attn_max_collapse_threshold:
+                        epoch_diagnostics['attention_collapse_events_epoch'] += 1
+                        epoch_diagnostics['attention_collapse_consecutive'] += 1
+                        epoch_diagnostics['attention_collapse_consecutive_max'] = max(
+                            epoch_diagnostics.get('attention_collapse_consecutive_max', 0),
+                            epoch_diagnostics['attention_collapse_consecutive']
+                        )
+                    else:
+                        epoch_diagnostics['attention_collapse_consecutive'] = 0
             preds = logits.argmax(dim=1)  # (B, H, W)
             targets = test_outputs  # (B, H, W)
             
@@ -2417,21 +2502,49 @@ def train_epoch(
                         # HPM DYNAMIC BUFFER POPULATION:
                         # When a sample is solved exactly, store its context in dynamic banks
                         # for future retrieval-augmented reasoning on similar tasks.
-                        if hasattr(model, 'hpm_add_solved_task') and hasattr(model, 'use_hpm') and model.use_hpm:
-                            # Get context embedding for this sample
-                            if 'support_features' in outputs:
-                                # support_features: (B, N, D, H, W) -> pool to (D,)
-                                z_context = outputs['support_features'][i].mean(dim=(0, 2, 3))  # (D,)
-                                # Get task embedding if HyperLoRA available
-                                z_task = None
-                                if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
-                                    # lora_deltas contains the HyperLoRA output
-                                    # We use support_features mean as task embedding
-                                    z_task = z_context  # Same context serves as task signature
-                                # Add to dynamic buffers
-                                task_id = f"epoch{epoch}_batch{batch_idx}_sample{i}"
-                                model.hpm_add_solved_task(z_context.unsqueeze(0), z_task.unsqueeze(0) if z_task is not None else None, task_id)
-                                epoch_diagnostics['hpm_tasks_added'] = epoch_diagnostics.get('hpm_tasks_added', 0) + 1
+                        # TODO 2 FIX: Check hpm_memory_enabled OR use_hpm (decouple write vs use)
+                        hpm_memory_enabled = getattr(model, 'hpm_memory_enabled', False)
+                        if hasattr(model, 'hpm_add_solved_task') and (model.use_hpm or hpm_memory_enabled):
+                            # Prefer a stable task id so retrieval isn't polluted by per-sample ids
+                            task_id = sample_task_id if sample_task_id is not None else f"epoch{epoch}_batch{batch_idx}_sample{i}"
+                            
+                            # TODO 3 FIX: GLOBAL DEDUPLICATION (not just per-epoch)
+                            # Check if task already exists in buffer across ALL epochs
+                            already_in_buffer = False
+                            if hasattr(model, 'hpm_buffer_contains_task'):
+                                already_in_buffer = model.hpm_buffer_contains_task(task_id)
+                            
+                            if already_in_buffer:
+                                epoch_diagnostics['hpm_global_duplicate_skipped'] = epoch_diagnostics.get('hpm_global_duplicate_skipped', 0) + 1
+                            elif task_id in epoch_diagnostics['hpm_tasks_added_this_epoch']:
+                                # Per-epoch dedup (multiple augmentations of same task in one epoch)
+                                epoch_diagnostics['hpm_duplicate_skipped'] += 1
+                            else:
+                                # Get context embedding for this sample
+                                support_features = outputs.get('support_features')
+                                if support_features is None:
+                                    epoch_diagnostics['hpm_add_skipped_no_support_features'] = epoch_diagnostics.get('hpm_add_skipped_no_support_features', 0) + 1
+                                else:
+                                    # support_features: (B, N, D, H, W) -> pool to (D,)
+                                    z_context = support_features[i].mean(dim=(0, 2, 3))  # (D,)
+
+                                    # Procedural embedding: use HyperLoRA pooled context if available
+                                    z_task = None
+                                    lora_deltas = outputs.get('lora_deltas')
+                                    if isinstance(lora_deltas, dict):
+                                        lora_ctx = lora_deltas.get('context')
+                                        if isinstance(lora_ctx, torch.Tensor) and lora_ctx.dim() == 2 and lora_ctx.shape[0] > i:
+                                            z_task = lora_ctx[i]
+
+                                    # Add to dynamic buffers (force_write allows writes during staged-off period)
+                                    model.hpm_add_solved_task(
+                                        z_context.unsqueeze(0),
+                                        z_task.unsqueeze(0) if z_task is not None else None,
+                                        task_id,
+                                        force_write=hpm_memory_enabled,  # TODO 2: force write during staging
+                                    )
+                                    epoch_diagnostics['hpm_tasks_added'] = epoch_diagnostics.get('hpm_tasks_added', 0) + 1
+                                    epoch_diagnostics['hpm_tasks_added_this_epoch'].add(task_id)
                     
                     # High accuracy (>=90% correct)
                     if sample_acc >= 0.9:
@@ -2620,6 +2733,21 @@ def train_epoch(
                 routing_entropy = -(routing * (routing + 1e-10).log()).sum(dim=-1).mean().item()
                 epoch_diagnostics['hpm_routing_entropy_sum'] += routing_entropy
                 epoch_diagnostics['hpm_batch_count'] += 1
+            
+            # HPM retrieval stats (shows memory quality and retrieval effectiveness)
+            if 'hpm_retrieval_stats' in outputs and outputs['hpm_retrieval_stats']:
+                retrieval_stats = outputs['hpm_retrieval_stats']
+                epoch_diagnostics['hpm_retrieval_count'] += 1
+                
+                if 'instance' in retrieval_stats:
+                    inst_stats = retrieval_stats['instance']
+                    epoch_diagnostics['hpm_instance_similarity_sum'] += inst_stats.get('avg_similarity', 0.0)
+                    epoch_diagnostics['hpm_instance_retrieved_sum'] += inst_stats.get('retrieved', 0)
+                
+                if 'procedural' in retrieval_stats:
+                    proc_stats = retrieval_stats['procedural']
+                    epoch_diagnostics['hpm_procedural_similarity_sum'] += proc_stats.get('avg_similarity', 0.0)
+                    epoch_diagnostics['hpm_procedural_retrieved_sum'] += proc_stats.get('retrieved', 0)
         
         # Log progress
         if batch_idx % log_every == 0:
@@ -3361,28 +3489,18 @@ def save_checkpoint(
         'config': config,
     }
     
-    # Save HPM dynamic buffers (not part of state_dict since they're not nn.Module)
+    # Save HPM dynamic buffers using canonical state_dict API (P1 patch)
     # These are critical for continual learning - they store solved task memories!
     if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
         if len(model.hpm_instance_buffer) > 0:
-            checkpoint['hpm_instance_buffer'] = {
-                'd_model': model.hpm_instance_buffer.d_model,
-                'max_size': model.hpm_instance_buffer.max_size,
-                'keys': list(model.hpm_instance_buffer._keys),
-                'values': list(model.hpm_instance_buffer._values),
-                'task_ids': list(model.hpm_instance_buffer._task_ids),
-            }
+            # Use canonical state_dict for consistency
+            checkpoint['hpm_instance_buffer'] = model.hpm_instance_buffer.state_dict()
             print(f"  HPM Instance Buffer: {len(model.hpm_instance_buffer)} entries saved")
     
     if hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None:
         if len(model.hpm_procedural_buffer) > 0:
-            checkpoint['hpm_procedural_buffer'] = {
-                'd_model': model.hpm_procedural_buffer.d_model,
-                'max_size': model.hpm_procedural_buffer.max_size,
-                'keys': list(model.hpm_procedural_buffer._keys),
-                'values': list(model.hpm_procedural_buffer._values),
-                'task_ids': list(model.hpm_procedural_buffer._task_ids),
-            }
+            # Use canonical state_dict for consistency
+            checkpoint['hpm_procedural_buffer'] = model.hpm_procedural_buffer.state_dict()
             print(f"  HPM Procedural Buffer: {len(model.hpm_procedural_buffer)} entries saved")
     
     torch.save(checkpoint, path)
@@ -3416,34 +3534,38 @@ def load_checkpoint(
     """
     checkpoint = torch.load(path, map_location='cpu')
     
-    # Always load model weights
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Load model weights
+    # Use strict=False when reset_optimizer=True (warm-starting from old checkpoint)
+    # This allows loading weights even if new parameters were added to the model
+    if reset_optimizer:
+        missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        if missing:
+            print(f"  [Warm-start] New parameters (randomly initialized): {len(missing)}")
+            for k in missing[:10]:  # Show first 10
+                print(f"    - {k}")
+            if len(missing) > 10:
+                print(f"    ... and {len(missing) - 10} more")
+        if unexpected:
+            print(f"  [Warm-start] Old parameters (ignored): {len(unexpected)}")
+            for k in unexpected[:5]:
+                print(f"    - {k}")
+    else:
+        model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Restore HPM dynamic buffers (critical for continual learning)
+    # Restore HPM dynamic buffers using canonical load_state_dict API (P1 patch)
+    # Backward compatible: handles both old format and new state_dict format
     if 'hpm_instance_buffer' in checkpoint:
         if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
             buf_data = checkpoint['hpm_instance_buffer']
-            model.hpm_instance_buffer.clear()
-            for key, value, task_id in zip(buf_data['keys'], buf_data['values'], buf_data['task_ids']):
-                model.hpm_instance_buffer._keys.append(key)
-                model.hpm_instance_buffer._values.append(value)
-                model.hpm_instance_buffer._task_ids.append(task_id)
-            # Rebuild FAISS index if applicable
-            if model.hpm_instance_buffer.use_faiss and model.hpm_instance_buffer._faiss_index is not None:
-                model.hpm_instance_buffer._rebuild_faiss_index()
+            # Use canonical API - handles both old and new formats
+            model.hpm_instance_buffer.load_state_dict(buf_data)
             print(f"  HPM Instance Buffer: {len(model.hpm_instance_buffer)} entries restored")
     
     if 'hpm_procedural_buffer' in checkpoint:
         if hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None:
             buf_data = checkpoint['hpm_procedural_buffer']
-            model.hpm_procedural_buffer.clear()
-            for key, value, task_id in zip(buf_data['keys'], buf_data['values'], buf_data['task_ids']):
-                model.hpm_procedural_buffer._keys.append(key)
-                model.hpm_procedural_buffer._values.append(value)
-                model.hpm_procedural_buffer._task_ids.append(task_id)
-            # Rebuild FAISS index if applicable
-            if model.hpm_procedural_buffer.use_faiss and model.hpm_procedural_buffer._faiss_index is not None:
-                model.hpm_procedural_buffer._rebuild_faiss_index()
+            # Use canonical API - handles both old and new formats
+            model.hpm_procedural_buffer.load_state_dict(buf_data)
             print(f"  HPM Procedural Buffer: {len(model.hpm_procedural_buffer)} entries restored")
     
     epoch = checkpoint['epoch']
@@ -4151,12 +4273,18 @@ Config Overrides:
     meta_escalation_start_epoch = meta_escalation_config.get('start_epoch', 25)
     meta_escalation_ramp_epochs = meta_escalation_config.get('ramp_epochs', 12)
     meta_escalation_schedule = meta_escalation_config.get('schedule', 'linear')
+
+    # Model feature flags used by meta-escalation logging/targets
+    use_hpm = config.get('model', {}).get('use_hpm', False)
     
     # Target values (what we ramp toward)
     meta_escalation_targets = meta_escalation_config.get('targets', {})
     target_hyperlora_delta_scale = meta_escalation_targets.get('hyperlora_delta_scale', 0.30)
     target_equiv_weight = meta_escalation_targets.get('equiv_loss_weight', 0.05)
     target_loo_weight = meta_escalation_targets.get('loo_loss_weight', 0.10)
+    # Optional: ramp HPM balance loss weight too (kept backward compatible)
+    base_hpm_balance_weight = config.get('model', {}).get('hpm_balance_weight', 0.01)
+    target_hpm_balance_weight = meta_escalation_targets.get('hpm_balance_weight', base_hpm_balance_weight)
     
     # Stability gating (controls pause/resume behavior)
     meta_escalation_require_stability = meta_escalation_config.get('require_stability', True)
@@ -4185,11 +4313,13 @@ Config Overrides:
         'hyperlora_delta_scale_current': hyperlora_warmup_end_scale,  # Start from warmup end
         'equiv_weight_current': equiv_weight,  # Start from config baseline
         'loo_weight_current': loo_weight,      # Start from config baseline
+        'hpm_balance_weight_current': base_hpm_balance_weight,  # Start from config baseline
         
         # Scheduled values (what we're ramping toward, may be paused)
         'hyperlora_delta_scale_scheduled': hyperlora_warmup_end_scale,
         'equiv_weight_scheduled': equiv_weight,
         'loo_weight_scheduled': loo_weight,
+        'hpm_balance_weight_scheduled': base_hpm_balance_weight,
         
         # Progress tracking
         'escalation_active': False,  # Whether we've started escalation phase
@@ -4205,8 +4335,127 @@ Config Overrides:
         'grad_explosion_events_epoch': 0,
         'lr_backoff_events_epoch': 0,
         'max_nan_streak_epoch': 0,
+        'attention_collapse_events_epoch': 0,
         'max_nan_streak_in_window': 0,  # Track max NaN streak across escalation window
     }
+    
+    # ==========================================================================
+    # ATTENTION COLLAPSE BACKOFF POLICY (Jan 2026)
+    # ==========================================================================
+    # When attention collapse is detected, actively reduce delta_scale and LR
+    # (not just pause escalation). This helps late-epoch stability (50-200).
+    # ==========================================================================
+    monitoring_config = config.get('monitoring', {})
+    collapse_backoff_config = monitoring_config.get('collapse_backoff', {})
+    collapse_backoff_enabled = collapse_backoff_config.get('enabled', True)
+    collapse_backoff_cooldown = collapse_backoff_config.get('cooldown_epochs', 3)
+    collapse_backoff_delta_factor = collapse_backoff_config.get('delta_scale_factor', 0.5)
+    collapse_backoff_lr_factor = collapse_backoff_config.get('lr_factor', 0.5)
+    collapse_backoff_restore_rate = collapse_backoff_config.get('restore_rate', 0.2)
+    
+    # Attention collapse thresholds (Jan 2026)
+    attn_max_collapse_threshold = monitoring_config.get('attn_max_collapse_threshold', 0.02)
+    attention_collapse_consecutive_threshold = monitoring_config.get('attention_collapse_consecutive_threshold', 2)
+    
+    collapse_backoff_state = {
+        'active': False,              # Whether backoff is currently in effect
+        'cooldown_remaining': 0,      # Epochs remaining in cooldown
+        'delta_scale_factor': 1.0,    # Current multiplier for delta_scale (0.5 when backed off)
+        'lr_factor': 1.0,             # Current multiplier for LR (0.5 when backed off)
+        'pre_backoff_delta_scale': None,  # Saved value before backoff
+        'pre_backoff_lr': None,       # Saved LR before backoff
+        'consecutive_collapse_count': 0,  # Track consecutive collapse epochs
+    }
+    
+    if collapse_backoff_enabled:
+        print(f"\n{'='*60}")
+        print(f"ATTENTION COLLAPSE BACKOFF ENABLED (Jan 2026)")
+        print(f"{'='*60}")
+        print(f"  Trigger: {attention_collapse_consecutive_threshold}+ consecutive epochs with attn_max < {attn_max_collapse_threshold}")
+        print(f"  On collapse: delta_scale *= {collapse_backoff_delta_factor}, LR *= {collapse_backoff_lr_factor}")
+        print(f"  Cooldown: {collapse_backoff_cooldown} epochs before restore begins")
+        print(f"  Restore rate: +{collapse_backoff_restore_rate*100:.0f}% per stable epoch")
+        print(f"{'='*60}\n")
+    
+    # ==========================================================================
+    # LATE-PHASE META-ESCALATION (Jan 2026)
+    # ==========================================================================
+    # After epoch 50, use stricter stability gates to maintain high accuracy.
+    # Also implements late-phase LR decay for fine-grained convergence.
+    # ==========================================================================
+    late_phase_config = meta_escalation_config.get('late_phase', {})
+    late_phase_enabled = late_phase_config.get('enabled', True)
+    late_phase_start_epoch = late_phase_config.get('start_epoch', 50)
+    
+    # Stricter gates for late phase
+    late_phase_max_grad_events = late_phase_config.get('max_grad_explosion_events_per_epoch', 0)
+    late_phase_max_lr_events = late_phase_config.get('max_lr_backoff_events_per_epoch', 0)
+    late_phase_max_nan_streak = late_phase_config.get('max_consecutive_nan_streak_per_epoch', 0)
+    late_phase_max_collapse_events = late_phase_config.get('max_attention_collapse_events_per_epoch', 0)
+    
+    # Late-phase LR decay settings
+    lr_decay_config = late_phase_config.get('lr_decay', {})
+    late_phase_lr_decay_enabled = lr_decay_config.get('enabled', True)
+    late_phase_lr_decay_start_epoch = lr_decay_config.get('start_epoch', 50)
+    late_phase_lr_decay_end_epoch = lr_decay_config.get('end_epoch', 200)
+    late_phase_lr_decay_min_factor = lr_decay_config.get('min_factor', 0.1)
+    late_phase_lr_decay_schedule = lr_decay_config.get('schedule', 'cosine')
+    
+    late_phase_state = {
+        'active': False,              # Whether we're in late phase
+        'lr_decay_factor': 1.0,       # Current LR decay factor (1.0 → min_factor)
+    }
+    
+    # ==========================================================================
+    # HPM SOLVER-CONTEXT COUPLING (Jan 2026)
+    # ==========================================================================
+    # Injects HPM memory tokens into solver cross-attention. Gated warmup
+    # prevents gradient disruption. Auto-disable if instability detected.
+    # ==========================================================================
+    model_config = config.get('model', {})
+    hpm_solver_context_enabled = model_config.get('hpm_solver_context_enabled', False)
+    hpm_solver_context_start_epoch = model_config.get('hpm_solver_context_start_epoch', 45)
+    hpm_solver_context_gate_warmup_epochs = model_config.get('hpm_solver_context_gate_warmup_epochs', 15)
+    hpm_solver_context_gate_max = model_config.get('hpm_solver_context_gate_max', 0.5)
+    hpm_solver_context_logit_clamp = model_config.get('hpm_solver_context_logit_clamp', 10.0)
+    hpm_solver_context_disable_on_instability = model_config.get('hpm_solver_context_disable_on_instability', True)
+    
+    hpm_solver_context_state = {
+        'active': False,              # Whether coupling is currently active
+        'gate_value': 0.0,            # Current gate value (0.0 → gate_max)
+        'disabled_by_instability': False,  # If True, was disabled due to explosion
+        'explosion_count': 0,         # How many times explosion detected
+        'tokens_used_epoch': 0,       # Total HPM tokens used this epoch
+        'batches_with_tokens': 0,     # Batches that had HPM tokens
+    }
+    
+    if hpm_solver_context_enabled and use_hpm:
+        print(f"\n{'='*60}")
+        print(f"HPM SOLVER-CONTEXT COUPLING ENABLED (Jan 2026)")
+        print(f"{'='*60}")
+        print(f"  Start epoch: {hpm_solver_context_start_epoch + 1}")
+        print(f"  Gate warmup: {hpm_solver_context_gate_warmup_epochs} epochs")
+        print(f"  Gate max: {hpm_solver_context_gate_max}")
+        print(f"  Logit clamp: {hpm_solver_context_logit_clamp}")
+        print(f"  Auto-disable on instability: {hpm_solver_context_disable_on_instability}")
+        print(f"{'='*60}\n")
+    
+    if late_phase_enabled:
+        print(f"\n{'='*60}")
+        print(f"LATE-PHASE META-ESCALATION ENABLED (Jan 2026)")
+        print(f"{'='*60}")
+        print(f"  Start epoch: {late_phase_start_epoch + 1}")
+        print(f"  Stricter stability gates:")
+        print(f"    Max grad events/epoch: {late_phase_max_grad_events}")
+        print(f"    Max LR backoff events/epoch: {late_phase_max_lr_events}")
+        print(f"    Max NaN streak/epoch: {late_phase_max_nan_streak}")
+        print(f"    Max attention collapse events/epoch: {late_phase_max_collapse_events}")
+        if late_phase_lr_decay_enabled:
+            print(f"  LR Decay:")
+            print(f"    Schedule: {late_phase_lr_decay_schedule}")
+            print(f"    Range: epochs {late_phase_lr_decay_start_epoch + 1} - {late_phase_lr_decay_end_epoch}")
+            print(f"    Factor: 1.0 → {late_phase_lr_decay_min_factor}")
+        print(f"{'='*60}\n")
     
     if meta_escalation_enabled:
         print(f"\n{'='*60}")
@@ -4219,6 +4468,8 @@ Config Overrides:
         print(f"    HyperLoRA delta_scale: {hyperlora_warmup_end_scale} → {target_hyperlora_delta_scale}")
         print(f"    Equiv weight: {equiv_weight} → {target_equiv_weight}")
         print(f"    LOO weight: {loo_weight} → {target_loo_weight}")
+        if use_hpm:
+            print(f"    HPM balance weight: {base_hpm_balance_weight} → {target_hpm_balance_weight}")
         print(f"  Stability gating:")
         if meta_escalation_require_stability:
             print(f"    Mode: GATED (pauses on instability, resumes when stable)")
@@ -4249,13 +4500,23 @@ Config Overrides:
     # STAGED HPM: Delay HPM activation to align with meta-learning
     use_hpm = config.get('model', {}).get('use_hpm', False)
     hpm_start_epoch = config.get('model', {}).get('hpm_start_epoch', 3)
+    # TODO 2: hpm_memory_start_epoch allows memory collection before HPM activation
+    hpm_memory_start_epoch = config.get('model', {}).get('hpm_memory_start_epoch', 0)  # Default: collect from epoch 0
+    
+    # BUG FIX: Always initialize hpm_memory_enabled (not just in conditional block)
+    # This flag enables buffer writes independently of HPM activation
+    model.hpm_memory_enabled = (start_epoch >= hpm_memory_start_epoch)
+    if model.hpm_memory_enabled:
+        print(f"[HPM Memory] Buffer population ENABLED from epoch 0 (hpm_memory_start_epoch={hpm_memory_start_epoch})")
+    
     if use_hpm and hpm_start_epoch > 0:
         print(f"\n{'='*60}")
         print(f"STAGED HPM ENABLED")
         print(f"{'='*60}")
-        print(f"  Phase 1 (epochs 1-{hpm_start_epoch}): HPM inactive")
+        print(f"  Phase 1 (epochs 1-{hpm_start_epoch}): HPM inactive, memory collection active")
         print(f"    - HPM module exists but use_hpm=False during forward")
         print(f"    - No HPM load balancing loss added")
+        print(f"    - TODO 2: Dynamic buffers ARE populated for solved tasks")
         print(f"  Phase 2 (epochs {hpm_start_epoch + 1}+): HPM activated")
         print(f"    - HPM contributes to features (gated residual)")
         print(f"    - Load balancing loss ensures all banks utilized")
@@ -4268,6 +4529,15 @@ Config Overrides:
             else:
                 model.use_hpm = False
                 print(f"  [HPM] Temporarily disabled until epoch {hpm_start_epoch + 1}")
+            
+            # TODO 2 FIX: Enable memory collection from epoch 0 (or hpm_memory_start_epoch)
+            # This allows buffers to grow before HPM activation
+            if hasattr(model, 'hpm_memory_enabled'):
+                model.hpm_memory_enabled = (start_epoch >= hpm_memory_start_epoch)
+            else:
+                model.hpm_memory_enabled = (start_epoch >= hpm_memory_start_epoch)
+            if model.hpm_memory_enabled and not model.use_hpm:
+                print(f"  [HPM] Memory collection ENABLED (buffers grow before activation)")
     
     # STAGED HYPERLORA AND SOLVER CROSS-ATTENTION
     # These modules exist in the model but should not CONTRIBUTE during early epochs
@@ -4393,6 +4663,12 @@ Config Overrides:
         # HPM epoch start callback: reset routing statistics for load balancing
         if hasattr(model, 'hpm_on_epoch_start'):
             model.hpm_on_epoch_start()
+        
+        # BUG FIX: Update hpm_memory_enabled at epoch boundary (for staged activation)
+        # This ensures buffers start populating at hpm_memory_start_epoch even when resuming
+        if not model.hpm_memory_enabled and epoch >= hpm_memory_start_epoch:
+            model.hpm_memory_enabled = True
+            print(f"  [HPM Memory] Buffer population NOW ENABLED at epoch {epoch + 1}")
         
         print(f"\nEpoch {epoch + 1}/{max_epochs}")
         print("-" * 40)
@@ -4539,6 +4815,79 @@ Config Overrides:
                 print(f"  [HyperLoRA Warmup Complete] delta_scale = {hyperlora_warmup_end_scale}")
         
         # ======================================================================
+        # LATE-PHASE LR DECAY (Jan 2026)
+        # ======================================================================
+        # Apply cosine LR decay after late_phase_lr_decay_start_epoch to help
+        # fine-grained convergence when accuracy is already high.
+        # ======================================================================
+        if late_phase_lr_decay_enabled and epoch >= late_phase_lr_decay_start_epoch:
+            import math
+            decay_total_epochs = max(1, late_phase_lr_decay_end_epoch - late_phase_lr_decay_start_epoch)
+            decay_progress = min(1.0, (epoch - late_phase_lr_decay_start_epoch) / decay_total_epochs)
+            
+            if late_phase_lr_decay_schedule == 'cosine':
+                # Cosine decay: 1.0 → min_factor
+                decay_factor = late_phase_lr_decay_min_factor + (1.0 - late_phase_lr_decay_min_factor) * 0.5 * (1 + math.cos(math.pi * decay_progress))
+            else:
+                # Linear decay
+                decay_factor = 1.0 - decay_progress * (1.0 - late_phase_lr_decay_min_factor)
+            
+            late_phase_state['lr_decay_factor'] = decay_factor
+            
+            # Apply decay factor to optimizer LRs (composable with other factors)
+            for i, param_group in enumerate(optimizer.param_groups):
+                base_lr = activation_lr_state['base_lrs'][i]
+                total_factor = (activation_lr_state['activation_factor'] * 
+                               activation_lr_state['explosion_factor'] *
+                               collapse_backoff_state['lr_factor'] *
+                               decay_factor)
+                param_group['lr'] = base_lr * total_factor
+            
+            if epoch == late_phase_lr_decay_start_epoch or (epoch - late_phase_lr_decay_start_epoch) % 10 == 0:
+                print(f"  [Late-Phase LR Decay] epoch {epoch + 1}: factor={decay_factor:.3f}, LR={optimizer.param_groups[0]['lr']:.2e}")
+        
+        # ======================================================================
+        # HPM SOLVER-CONTEXT COUPLING WARMUP (Jan 2026)
+        # ======================================================================
+        # Activate HPM solver coupling at hpm_solver_context_start_epoch with 
+        # gradual gate warmup. Auto-disable if instability detected.
+        # ======================================================================
+        if hpm_solver_context_enabled and use_hpm and not hpm_solver_context_state['disabled_by_instability']:
+            if epoch >= hpm_solver_context_start_epoch:
+                # Mark as active
+                if not hpm_solver_context_state['active']:
+                    hpm_solver_context_state['active'] = True
+                    print(f"\n{'='*60}")
+                    print(f"HPM SOLVER-CONTEXT COUPLING ACTIVATED (epoch {epoch + 1})")
+                    print(f"{'='*60}")
+                    print(f"  Gate warmup over {hpm_solver_context_gate_warmup_epochs} epochs")
+                    print(f"  Gate max: {hpm_solver_context_gate_max}")
+                    print(f"{'='*60}\n")
+                
+                # Compute gate value based on warmup progress
+                warmup_progress = min(1.0, (epoch - hpm_solver_context_start_epoch) / max(1, hpm_solver_context_gate_warmup_epochs))
+                gate_value = warmup_progress * hpm_solver_context_gate_max
+                hpm_solver_context_state['gate_value'] = gate_value
+                
+                # Apply to model's solver cross-attention
+                if hasattr(model, 'solver') and hasattr(model.solver, 'solver_cross_attn'):
+                    if model.solver.solver_cross_attn is not None and hasattr(model.solver.solver_cross_attn, 'set_hpm_gate'):
+                        # Convert gate_value to logit (inverse sigmoid)
+                        # gate_value = sigmoid(logit) => logit = log(g/(1-g))
+                        import math
+                        clamped_gate = min(0.999, max(0.001, gate_value))
+                        gate_logit = math.log(clamped_gate / (1 - clamped_gate))
+                        model.solver.solver_cross_attn.set_hpm_gate(gate_logit)
+                
+                # Reset epoch counters
+                hpm_solver_context_state['tokens_used_epoch'] = 0
+                hpm_solver_context_state['batches_with_tokens'] = 0
+                
+                if epoch == hpm_solver_context_start_epoch or (epoch - hpm_solver_context_start_epoch) % 5 == 0:
+                    print(f"  [HPM Solver Coupling] epoch {epoch + 1}: gate={gate_value:.3f} (warmup {warmup_progress*100:.0f}%)")
+        
+        
+        # ======================================================================
         # META ESCALATION: Stability-gated late-phase weight increase (Dec 2025)
         # ======================================================================
         # After start_epoch, gradually increase meta-learning weights toward targets
@@ -4573,10 +4922,12 @@ Config Overrides:
             scheduled_hyperlora = hyperlora_warmup_end_scale + scheduled_progress * (target_hyperlora_delta_scale - hyperlora_warmup_end_scale)
             scheduled_equiv = equiv_weight + scheduled_progress * (target_equiv_weight - equiv_weight)
             scheduled_loo = loo_weight + scheduled_progress * (target_loo_weight - loo_weight)
+            scheduled_hpm_balance = base_hpm_balance_weight + scheduled_progress * (target_hpm_balance_weight - base_hpm_balance_weight)
             
             meta_escalation_state['hyperlora_delta_scale_scheduled'] = scheduled_hyperlora
             meta_escalation_state['equiv_weight_scheduled'] = scheduled_equiv
             meta_escalation_state['loo_weight_scheduled'] = scheduled_loo
+            meta_escalation_state['hpm_balance_weight_scheduled'] = scheduled_hpm_balance
             meta_escalation_state['escalation_progress'] = scheduled_progress
             
             # Check stability: use info from previous epoch
@@ -4584,25 +4935,126 @@ Config Overrides:
             prev_nan_streak = meta_escalation_state['max_nan_streak_epoch']
             prev_grad_events = meta_escalation_state['grad_explosion_events_epoch']
             prev_lr_events = meta_escalation_state['lr_backoff_events_epoch']
+            prev_attn_collapse_events = meta_escalation_state.get('attention_collapse_events_epoch', 0)
             
             if meta_escalation_require_stability:
+                # Jan 2026: Use stricter gates in late phase (epoch 50+)
+                if late_phase_enabled and epoch >= late_phase_start_epoch:
+                    # Late-phase mode: stricter thresholds
+                    effective_max_nan_streak = late_phase_max_nan_streak
+                    effective_max_grad_events = late_phase_max_grad_events
+                    effective_max_lr_events = late_phase_max_lr_events
+                    effective_max_collapse_events = late_phase_max_collapse_events
+                    late_phase_state['active'] = True
+                else:
+                    # Normal phase: use original thresholds
+                    effective_max_nan_streak = meta_escalation_max_nan_streak
+                    effective_max_grad_events = meta_escalation_max_grad_events
+                    effective_max_lr_events = meta_escalation_max_lr_events
+                    effective_max_collapse_events = 0  # Any collapse = instability in normal phase
+                
                 # Stability-gated mode: check previous epoch for instability events
                 is_stable = (
-                    prev_nan_streak <= meta_escalation_max_nan_streak and
-                    prev_grad_events <= meta_escalation_max_grad_events and
-                    prev_lr_events <= meta_escalation_max_lr_events
+                    prev_nan_streak <= effective_max_nan_streak and
+                    prev_grad_events <= effective_max_grad_events and
+                    prev_lr_events <= effective_max_lr_events and
+                    # Jan 2026: treat DSC attention collapse as instability.
+                    # This directly targets the observed failure mode: attention max→0.005,
+                    # entropy→6+, followed by FG/BG accuracy nosedive.
+                    prev_attn_collapse_events <= effective_max_collapse_events
                 )
             else:
                 # Force-schedule mode: always considered stable (for ablations)
                 is_stable = True
             meta_escalation_state['is_stable'] = is_stable
             
+            # ================================================================
+            # ATTENTION COLLAPSE BACKOFF (Jan 2026)
+            # ================================================================
+            # When consecutive collapse epochs exceed threshold, actively reduce
+            # delta_scale and LR (not just pause escalation). This addresses
+            # the late-epoch instability where attention max→0.005 precedes accuracy drops.
+            # ================================================================
+            if collapse_backoff_enabled:
+                if prev_attn_collapse_events > 0:
+                    collapse_backoff_state['consecutive_collapse_count'] += 1
+                else:
+                    collapse_backoff_state['consecutive_collapse_count'] = 0
+                
+                # Trigger backoff if consecutive collapse threshold exceeded
+                if (collapse_backoff_state['consecutive_collapse_count'] >= attention_collapse_consecutive_threshold 
+                    and not collapse_backoff_state['active']):
+                    print(f"\n  ⚠️  ATTENTION COLLAPSE BACKOFF TRIGGERED!")
+                    print(f"      {collapse_backoff_state['consecutive_collapse_count']} consecutive epochs with collapse (threshold={attention_collapse_consecutive_threshold})")
+                    
+                    # Save pre-backoff values
+                    collapse_backoff_state['pre_backoff_delta_scale'] = meta_escalation_state['hyperlora_delta_scale_current']
+                    collapse_backoff_state['pre_backoff_lr'] = optimizer.param_groups[0]['lr']
+                    
+                    # Apply backoff
+                    collapse_backoff_state['delta_scale_factor'] = collapse_backoff_delta_factor
+                    collapse_backoff_state['lr_factor'] = collapse_backoff_lr_factor
+                    collapse_backoff_state['active'] = True
+                    collapse_backoff_state['cooldown_remaining'] = collapse_backoff_cooldown
+                    
+                    # Apply reduced delta_scale immediately
+                    backed_off_delta = meta_escalation_state['hyperlora_delta_scale_current'] * collapse_backoff_delta_factor
+                    meta_escalation_state['hyperlora_delta_scale_current'] = backed_off_delta
+                    if hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                        model.hyper_lora.delta_scale = backed_off_delta
+                    
+                    # Apply reduced LR
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = pg['lr'] * collapse_backoff_lr_factor
+                    
+                    print(f"      delta_scale: {collapse_backoff_state['pre_backoff_delta_scale']:.4f} → {backed_off_delta:.4f}")
+                    print(f"      LR: {collapse_backoff_state['pre_backoff_lr']:.2e} → {optimizer.param_groups[0]['lr']:.2e}")
+                    print(f"      Cooldown: {collapse_backoff_cooldown} epochs before restore begins")
+                
+                # Restore logic after cooldown if stable
+                elif collapse_backoff_state['active']:
+                    if prev_attn_collapse_events == 0:
+                        if collapse_backoff_state['cooldown_remaining'] > 0:
+                            collapse_backoff_state['cooldown_remaining'] -= 1
+                        else:
+                            # Gradually restore delta_scale and LR
+                            old_delta_factor = collapse_backoff_state['delta_scale_factor']
+                            old_lr_factor = collapse_backoff_state['lr_factor']
+                            
+                            new_delta_factor = min(1.0, old_delta_factor + collapse_backoff_restore_rate)
+                            new_lr_factor = min(1.0, old_lr_factor + collapse_backoff_restore_rate)
+                            
+                            collapse_backoff_state['delta_scale_factor'] = new_delta_factor
+                            collapse_backoff_state['lr_factor'] = new_lr_factor
+                            
+                            # Apply restored values
+                            if collapse_backoff_state['pre_backoff_delta_scale'] is not None:
+                                restored_delta = collapse_backoff_state['pre_backoff_delta_scale'] * new_delta_factor
+                                meta_escalation_state['hyperlora_delta_scale_current'] = restored_delta
+                                if hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+                                    model.hyper_lora.delta_scale = restored_delta
+                            
+                            if collapse_backoff_state['pre_backoff_lr'] is not None:
+                                for i, pg in enumerate(optimizer.param_groups):
+                                    base_lr = activation_lr_state['base_lrs'][i]
+                                    pg['lr'] = base_lr * new_lr_factor
+                            
+                            if new_delta_factor >= 1.0 and new_lr_factor >= 1.0:
+                                collapse_backoff_state['active'] = False
+                                collapse_backoff_state['consecutive_collapse_count'] = 0
+                                print(f"  [Collapse Backoff] Fully restored - delta_scale and LR back to normal")
+                            else:
+                                print(f"  [Collapse Backoff] Restoring: delta_factor={new_delta_factor:.2f}, lr_factor={new_lr_factor:.2f}")
+                    else:
+                        # Collapse still happening, reset cooldown
+                        collapse_backoff_state['cooldown_remaining'] = collapse_backoff_cooldown
+            
             if not is_stable:
                 meta_escalation_state['escalation_paused'] = True
                 meta_escalation_state['stable_epochs_count'] = 0
                 # Don't increase weights, but don't decrease either (backoff handles that)
                 if meta_escalation_log_every_epoch:
-                    print(f"  [Meta Escalation] PAUSED due to instability (nan={prev_nan_streak}, grad={prev_grad_events}, lr={prev_lr_events})")
+                    print(f"  [Meta Escalation] PAUSED due to instability (nan={prev_nan_streak}, grad={prev_grad_events}, lr={prev_lr_events}, attn_collapse={prev_attn_collapse_events})")
             else:
                 meta_escalation_state['stable_epochs_count'] = meta_escalation_state.get('stable_epochs_count', 0) + 1
                 
@@ -4636,6 +5088,7 @@ Config Overrides:
                     meta_escalation_state['hyperlora_delta_scale_current'] = scheduled_hyperlora
                     meta_escalation_state['equiv_weight_current'] = scheduled_equiv
                     meta_escalation_state['loo_weight_current'] = scheduled_loo
+                    meta_escalation_state['hpm_balance_weight_current'] = scheduled_hpm_balance
             
             # Apply HyperLoRA delta_scale now (model attribute, not loss fn)
             if hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
@@ -4652,11 +5105,14 @@ Config Overrides:
                 print(f"    HyperLoRA: {meta_escalation_state['hyperlora_delta_scale_current']:.4f} (target={scheduled_hyperlora:.4f})")
                 print(f"    Equiv: {meta_escalation_state['equiv_weight_current']:.4f} (target={scheduled_equiv:.4f})")
                 print(f"    LOO: {meta_escalation_state['loo_weight_current']:.4f} (target={scheduled_loo:.4f})")
+                if use_hpm:
+                    print(f"    HPM balance: {meta_escalation_state['hpm_balance_weight_current']:.4f} (target={scheduled_hpm_balance:.4f})")
             
             # Reset per-epoch counters for next epoch
             meta_escalation_state['grad_explosion_events_epoch'] = 0
             meta_escalation_state['lr_backoff_events_epoch'] = 0
             meta_escalation_state['max_nan_streak_epoch'] = 0
+            meta_escalation_state['attention_collapse_events_epoch'] = 0
         
         # STAGED EQUIVARIANCE LOSS: Activate at equiv_start_epoch
         if use_equivariance and epoch == equiv_start_epoch:
@@ -4783,6 +5239,10 @@ Config Overrides:
                 
                 if effective_loo_fn is not None and hasattr(effective_loo_fn, 'config'):
                     effective_loo_fn.config.loss_weight = meta_escalation_state['loo_weight_current'] * nan_backoff_state['loo_weight_factor']
+
+                # Apply HPM balance weight (used inside train_epoch when HPM is active)
+                if use_hpm and 'model' in config:
+                    config['model']['hpm_balance_weight'] = float(meta_escalation_state.get('hpm_balance_weight_current', base_hpm_balance_weight))
         
         # Record memory before training epoch for comparison
         if device.type == 'cuda':
@@ -4796,6 +5256,14 @@ Config Overrides:
             epoch, config, scaler, global_step, ema, effective_loo_fn, effective_equiv_fn,
             loo_start_epoch=loo_start_epoch, equiv_start_epoch=equiv_start_epoch,
         )
+
+        # ================================================================
+        # Meta-escalation stability gating: capture attention collapse events
+        # ================================================================
+        if meta_escalation_enabled:
+            meta_escalation_state['attention_collapse_events_epoch'] = int(
+                train_losses.get('diagnostics', {}).get('attention_collapse_events_epoch', 0)
+            )
         
         # ================================================================
         # P0.1: HARD-STOP ENFORCEMENT FOR FATAL EVENTS (Dec 2025)
@@ -4954,6 +5422,45 @@ Config Overrides:
             scheduler.step()
         
         # ================================================================
+        # LATE-PHASE LR DECAY (Jan 2026)
+        # ================================================================
+        # After late_phase_start_epoch, apply cosine LR decay for fine-grained
+        # convergence in high-accuracy regime. This is ADDITIONAL to the
+        # scheduler (which may have already finished) and collapse backoff.
+        # ================================================================
+        if late_phase_lr_decay_enabled and epoch >= late_phase_lr_decay_start_epoch:
+            # Calculate decay progress (0 at start, 1 at end)
+            decay_total_epochs = late_phase_lr_decay_end_epoch - late_phase_lr_decay_start_epoch
+            decay_progress = min(1.0, (epoch - late_phase_lr_decay_start_epoch) / max(1, decay_total_epochs))
+            
+            # Compute decay factor based on schedule
+            if late_phase_lr_decay_schedule == 'cosine':
+                # Cosine decay: smooth transition from 1.0 to min_factor
+                import math
+                decay_factor = late_phase_lr_decay_min_factor + (1.0 - late_phase_lr_decay_min_factor) * 0.5 * (1 + math.cos(math.pi * decay_progress))
+            else:
+                # Linear decay (fallback)
+                decay_factor = 1.0 - decay_progress * (1.0 - late_phase_lr_decay_min_factor)
+            
+            late_phase_state['lr_decay_factor'] = decay_factor
+            
+            # Apply decay to base LRs (composes with other factors)
+            for i, param_group in enumerate(optimizer.param_groups):
+                base_lr = activation_lr_state['base_lrs'][i]
+                # Compose with activation factor, explosion factor, and collapse backoff
+                total_factor = (
+                    activation_lr_state['activation_factor'] * 
+                    activation_lr_state['explosion_factor'] * 
+                    collapse_backoff_state['lr_factor'] *
+                    decay_factor
+                )
+                param_group['lr'] = base_lr * total_factor
+            
+            # Log at key epochs
+            if epoch == late_phase_lr_decay_start_epoch or epoch % 10 == 0:
+                print(f"\n  [Late-Phase LR Decay] epoch {epoch + 1}: factor={decay_factor:.4f}, LR={optimizer.param_groups[0]['lr']:.2e}")
+        
+        # ================================================================
         # GRADIENT EXPLOSION BACKOFF (Safety mechanism)
         # ================================================================
         # Patch 2 (Dec 2025): Use max_grad_norm_before_clip (whole epoch max)
@@ -5029,17 +5536,99 @@ Config Overrides:
                 print(f"  HPM Balance Loss: {hpm_balance_loss:.4f} (weight={config['model'].get('hpm_balance_weight', 0.01)})")
                 print(f"  HPM Gate Value: {gate_value:.4f} (0=no contribution, 1=full)")
                 # Show buffer sizes if dynamic banks enabled
+                instance_buf_size = hpm_stats.get('instance_buffer_size', 0)
+                procedural_buf_size = hpm_stats.get('procedural_buffer_size', 0)
                 if 'instance_buffer_size' in hpm_stats:
-                    print(f"  HPM Instance Buffer: {hpm_stats['instance_buffer_size']} entries")
+                    print(f"  HPM Instance Buffer: {instance_buf_size} entries")
                 if 'procedural_buffer_size' in hpm_stats:
-                    print(f"  HPM Procedural Buffer: {hpm_stats['procedural_buffer_size']} entries")
+                    print(f"  HPM Procedural Buffer: {procedural_buf_size} entries")
+                    # Explain why procedural buffer may be empty (expected before HyperLoRA active)
+                    if procedural_buf_size == 0:
+                        hyperlora_start = config['model'].get('hyperlora_start_epoch', 3)
+                        if epoch < hyperlora_start:
+                            print(f"    (Expected: procedural bank requires HyperLoRA, active at epoch {hyperlora_start + 1}+)")
                 # Show tasks added this epoch (from exact matches)
                 diagnostics = train_losses.get('diagnostics', {})
                 tasks_added = diagnostics.get('hpm_tasks_added', 0)
-                if tasks_added > 0:
+                skipped_no_support = diagnostics.get('hpm_add_skipped_no_support_features', 0)
+                duplicates_skipped = diagnostics.get('hpm_duplicate_skipped', 0)
+                if tasks_added > 0 or skipped_no_support > 0 or duplicates_skipped > 0:
                     print(f"  HPM Tasks Added (exact matches): {tasks_added}")
+                    if duplicates_skipped > 0:
+                        print(f"    Duplicates skipped (same task, multiple matches): {duplicates_skipped}")
+                    if skipped_no_support > 0:
+                        print(f"    Skipped (no support_features): {skipped_no_support}")
+                
+                # Show HPM retrieval quality stats (P1 observability patch)
+                hpm_retrieval_count = diagnostics.get('hpm_retrieval_count', 0)
+                if hpm_retrieval_count > 0:
+                    inst_sim_avg = diagnostics.get('hpm_instance_similarity_sum', 0) / hpm_retrieval_count
+                    proc_sim_avg = diagnostics.get('hpm_procedural_similarity_sum', 0) / hpm_retrieval_count
+                    inst_retrieved = diagnostics.get('hpm_instance_retrieved_sum', 0)
+                    proc_retrieved = diagnostics.get('hpm_procedural_retrieved_sum', 0)
+                    print(f"  HPM Retrieval Stats ({hpm_retrieval_count} batches):")
+                    print(f"    Instance: avg_sim={inst_sim_avg:.3f}, total_retrieved={inst_retrieved}")
+                    print(f"    Procedural: avg_sim={proc_sim_avg:.3f}, total_retrieved={proc_retrieved}")
+                    # Quality warning: low similarity may indicate stale memory or poor query alignment
+                    if inst_sim_avg > 0 and inst_sim_avg < 0.3:
+                        print(f"    ⚠️ Low instance similarity - memory may be stale or queries misaligned")
         
         print(f"  Time: {epoch_time:.1f}s, LR: {optimizer.param_groups[0]['lr']:.2e}{stage_str}")
+        
+        # ================================================================
+        # HYPERLORA CLAMP STATS (Jan 2026 observability)
+        # ================================================================
+        # Log LoRA clamp hit-rate to detect if clamping is too aggressive or too weak
+        if hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+            if hasattr(model.hyper_lora, 'get_clamp_stats'):
+                clamp_stats = model.hyper_lora.get_clamp_stats()
+                if clamp_stats['total_count'] > 0:
+                    hit_rate = clamp_stats['hit_rate']
+                    max_norm = clamp_stats['max_pre_norm']
+                    threshold = clamp_stats['threshold']
+                    print(f"  HyperLoRA Clamp: hit_rate={hit_rate:.1%} ({clamp_stats['hit_count']}/{clamp_stats['total_count']}), max_norm={max_norm:.2f} (threshold={threshold:.1f})")
+                    # Warn if hit rate is too high (clamping too often → losing signal)
+                    if hit_rate > 0.3:
+                        print(f"    ⚠️ High clamp rate - consider increasing lora_max_norm or reducing delta_scale")
+                    # Warn if max norm is very close to threshold (near explosion)
+                    if max_norm > threshold * 0.9:
+                        print(f"    ⚠️ Max norm near threshold - LoRA may be saturating")
+                # Reset stats for next epoch
+                model.hyper_lora.reset_clamp_stats()
+        
+        # ================================================================
+        # HPM SOLVER-CONTEXT COUPLING SUMMARY (Jan 2026)
+        # ================================================================
+        if hpm_solver_context_enabled and use_hpm and hpm_solver_context_state['active']:
+            # Get stats from model
+            solver_coupling_stats = {}
+            if hasattr(model, 'solver') and hasattr(model.solver, 'solver_cross_attn'):
+                if model.solver.solver_cross_attn is not None and hasattr(model.solver.solver_cross_attn, 'get_hpm_stats'):
+                    solver_coupling_stats = model.solver.solver_cross_attn.get_hpm_stats()
+            
+            # Get stats from diagnostics
+            hpm_solver_batches = diagnostics.get('hpm_solver_batches_with_tokens', 0)
+            hpm_solver_tokens = diagnostics.get('hpm_solver_tokens_used', 0)
+            hpm_solver_explosions = diagnostics.get('hpm_solver_explosion_count', 0)
+            hpm_proj_norm_max = diagnostics.get('hpm_solver_proj_norm_max', 0.0)
+            
+            gate_value = solver_coupling_stats.get('gate_value', hpm_solver_context_state['gate_value'])
+            logit_clamp = solver_coupling_stats.get('logit_clamp', hpm_solver_context_logit_clamp)
+            
+            print(f"  HPM Solver Coupling: gate={gate_value:.3f}, batches={hpm_solver_batches}, tokens={hpm_solver_tokens}")
+            if hpm_proj_norm_max > 0:
+                print(f"    Proj norm max: {hpm_proj_norm_max:.2f} (clamp={logit_clamp:.1f})")
+            if hpm_solver_explosions > 0:
+                print(f"    ⚠️ Projection explosions: {hpm_solver_explosions} batches exceeded clamp")
+            
+            # Check for instability and auto-disable if configured
+            if hpm_solver_context_disable_on_instability and hpm_solver_explosions > 10:
+                hpm_solver_context_state['explosion_count'] += hpm_solver_explosions
+                if hpm_solver_context_state['explosion_count'] > 50:
+                    hpm_solver_context_state['disabled_by_instability'] = True
+                    hpm_solver_context_state['active'] = False
+                    print(f"    ⚠️ HPM SOLVER COUPLING DISABLED - too many explosions ({hpm_solver_context_state['explosion_count']})")
+        
         
         # ================================================================
         # META ESCALATION SUMMARY (Dec 2025)
@@ -5049,6 +5638,9 @@ Config Overrides:
             print(f"    HyperLoRA: {meta_escalation_state['hyperlora_delta_scale_current']:.4f}/{meta_escalation_state['hyperlora_delta_scale_scheduled']:.4f}")
             print(f"    Equiv: {meta_escalation_state['equiv_weight_current']:.4f}/{meta_escalation_state['equiv_weight_scheduled']:.4f}")
             print(f"    LOO: {meta_escalation_state['loo_weight_current']:.4f}/{meta_escalation_state['loo_weight_scheduled']:.4f}")
+            # Show HPM balance weight if HPM is enabled
+            if use_hpm and 'hpm_balance_weight_current' in meta_escalation_state:
+                print(f"    HPM Balance: {meta_escalation_state['hpm_balance_weight_current']:.4f}/{meta_escalation_state.get('hpm_balance_weight_scheduled', meta_escalation_state['hpm_balance_weight_current']):.4f}")
             if meta_escalation_state['escalation_paused']:
                 print(f"    ⚠️ PAUSED (nan={meta_escalation_state['max_nan_streak_epoch']}, grad={meta_escalation_state['grad_explosion_events_epoch']})")
             
@@ -5491,11 +6083,10 @@ Config Overrides:
                     avg_equiv_loss = equiv_loss_sum / equiv_batch_count
                     print(f"  Equivariance Loss (avg): {avg_equiv_loss:.4f}")
                     
-                    # P1.5: Check if equiv=0 is real success or silent failure
-                    if avg_equiv_loss < 0.001 and equiv_batch_count < 10:
-                        # Suspiciously low with few samples - likely failed silently
-                        print(f"    ⚠️ SUSPICIOUS: equiv≈0 with only {equiv_batch_count} batches")
-                        print(f"    [!] Check if equivariance path is working (may be silent failures)")
+                    # NOTE: In this codebase HyperLoRA pooling is dihedral-invariant (D4).
+                    # That can make equivariance loss near-zero by design, even early.
+                    if avg_equiv_loss < 0.001 and equiv_failures == 0:
+                        print(f"    ✓ EXPECTED: equiv≈0 (HyperLoRA uses D4-invariant pooling; aug contexts match by design)")
                     elif avg_equiv_loss < 0.05 and equiv_failures == 0:
                         print(f"    ✓ EXCELLENT: LoRA predictions consistent across augmentations")
                     elif avg_equiv_loss < 0.05 and equiv_failures > 0:

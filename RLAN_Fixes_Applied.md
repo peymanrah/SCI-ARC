@@ -162,6 +162,43 @@ For tasks like "fill region with majority color inside boundary", global counts 
 
 ---
 
+## Fix 7: HPM Dynamic Buffer Correctness (P1 - Stability/Scientific Correctness)
+
+### Problem
+HPM retrieval and memory population had several issues that could silently degrade performance and make results non-reproducible:
+
+- Metric inconsistency: FAISS retrieval used cosine similarity (via normalized vectors), while the brute-force fallback used raw dot product.
+- Mixed-task batch issue: retrieval averaged queries across a batch, which can corrupt retrieval when a batch contains multiple task IDs.
+- Duplicate writes: the same task could be added multiple times per epoch when multiple samples hit exact match, polluting the memory with redundant entries.
+- Procedural bank confusion: the procedural buffer may legitimately remain empty until HyperLoRA-derived embeddings are available.
+
+### Solution
+
+**File: `sci_arc/models/rlan_modules/dynamic_buffer.py`**
+- Standardized retrieval to cosine similarity in both FAISS and brute-force paths (query L2 normalization + normalized dot product).
+- Changed batch handling to use a single query sample (first element) instead of averaging across potentially mixed tasks.
+- Extended `retrieve()` return signature to include debug `stats` (buffer size, retrieved count, average similarity, retrieval method).
+
+**File: `sci_arc/models/rlan.py`**
+- Updated HPM retrieval call sites to consume the 3-tuple return (`keys, values, stats`).
+- Aggregated and optionally exposed `hpm_retrieval_stats` via `return_intermediates=True`.
+
+**File: `scripts/train_rlan.py`**
+- Added per-epoch deduplication: `hpm_tasks_added_this_epoch` prevents repeated HPM writes for the same task ID.
+- Added epoch-summary logging to clarify when an empty procedural buffer is expected (pre-HyperLoRA).
+
+### Result
+- Reproducible retrieval behavior across FAISS-enabled and FAISS-disabled environments.
+- More scientifically valid retrieval in the presence of multi-task batching.
+- Cleaner, less redundant memory banks (less buffer pollution).
+- Clearer logs for procedural-bank staging.
+
+### Deferred (Explicitly)
+- Tight HPM procedural coupling to HyperLoRA beyond the current optional embedding pass-through (architectural change).
+- Checkpoint format unification for HPM buffers (engineering hygiene; current checkpoint persistence already works).
+
+---
+
 ## Summary of Changed Files
 
 | File | Changes |
@@ -173,6 +210,8 @@ For tasks like "fill region with majority color inside boundary", global counts 
 | `dataset.py` | PAD_COLOR=10 for input padding |
 | `grid_encoder.py` | 11 embeddings + helper methods |
 | `rlan.py` | Compute and pass valid_mask, grid_sizes, attention_maps |
+| `rlan_modules/dynamic_buffer.py` | HPM retrieval: cosine metric consistency + stats |
+| `scripts/train_rlan.py` | HPM dedup + procedural staging log |
 
 ---
 

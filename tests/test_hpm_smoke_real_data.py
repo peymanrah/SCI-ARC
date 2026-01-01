@@ -437,7 +437,8 @@ class TestMemoryQuality:
         
         # Query with same embedding - should retrieve itself with high similarity
         query = embeddings[sample_arc_tasks[0]['task_id']]
-        keys, values = model.hpm_instance_buffer.retrieve(query.unsqueeze(0), k=1)
+        result = model.hpm_instance_buffer.retrieve(query.unsqueeze(0), k=1)
+        keys, values = result[:2]  # Unpack first 2 values (keys, values), ignore stats
         
         assert keys is not None
         # Similarity should be high for exact match

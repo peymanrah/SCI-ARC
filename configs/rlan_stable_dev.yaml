@@ -241,6 +241,28 @@ model:
   # ENABLED: These grow during training as tasks are solved correctly
   hpm_use_procedural_bank: true       # HyperLoRA codes (requires HyperLoRA enabled)
   hpm_use_instance_bank: true         # ContextEncoder cache (retrieval-augmented reasoning)
+  
+  # =============================================================
+  # HPM SOLVER-CONTEXT COUPLING (Jan 2026)
+  # =============================================================
+  # Injects retrieved HPM embeddings as extra tokens into solver 
+  # cross-attention. This directly helps iterative correction loop
+  # leverage memory for faster exact match.
+  #
+  # MINIMAL DESIGN: Uses existing solver-context path + gated warmup
+  # to avoid architecture changes and gradient disruption.
+  #
+  # STABILITY: Gate warmup prevents sudden gradient spikes. If instability
+  # detected (logit explosion), coupling is auto-disabled for that epoch.
+  # =============================================================
+  hpm_solver_context_enabled: true     # Enable HPM→solver coupling
+  hpm_solver_context_start_epoch: 45   # Activate after HPM is stable + enough exact matches
+  hpm_solver_context_gate_init: 0.0    # Start with zero contribution
+  hpm_solver_context_gate_warmup_epochs: 15  # Ramp up over 15 epochs (epoch 45-60)
+  hpm_solver_context_max_tokens: 8     # Max memory tokens per sample (keep small)
+  hpm_solver_context_gate_max: 0.5     # Max gate value (cap influence)
+  hpm_solver_context_logit_clamp: 10.0 # Clamp projected memory token norms
+  hpm_solver_context_disable_on_instability: true  # Auto-disable if causes explosion
 
 training:
   max_epochs: 200  # Enough for hard tasks (~130 epochs for 3x3→9x9 expansion)
@@ -335,9 +357,10 @@ training:
   
   # MEMORY FIX (Dec 2025): Reduced from 80 to 64 due to +5GB VRAM spill after HyperLoRA activation
   # Peak was ~29GB (24+5), now targeting ~23GB peak with 20% batch reduction
-  # Effective batch unchanged: 64×5 = 320 (same as previous 80×4 = 320)
-  batch_size: 64    # Reduced for HyperLoRA activation headroom (was 80)
-  grad_accumulation_steps: 5  # Increased to maintain effective_batch_size = 64 × 5 = 320
+  # Effective batch unchanged: 50×7 = 350 (same as previous 80×4 = 320)
+  # UPDATE (Dec 2025): Reduced to 50 with grad_accum=7 for prod parity (logs from epoch 34 used this)
+  batch_size: 50    # Reduced for HyperLoRA activation headroom (was 64)
+  grad_accumulation_steps: 7  # Increased to maintain effective_batch_size = 50 × 7 = 350
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -609,10 +632,11 @@ training:
     
     # Target values (conservative but impactful)
     # These are what we ramp TOWARD, not what we jump to
+    # UPDATE (Dec 2025): Reduced targets for stability based on epoch 34 logs
     targets:
-      hyperlora_delta_scale: 0.30    # Current: 0.1 → Target: 0.3 (3x increase)
-      equiv_loss_weight: 0.05        # Current: 0.01 → Target: 0.05 (5x increase)
-      loo_loss_weight: 0.10          # Current: 0.05 → Target: 0.10 (2x increase)
+      hyperlora_delta_scale: 0.20    # Current: 0.1 → Target: 0.2 (2x increase, was 0.3)
+      equiv_loss_weight: 0.03        # Current: 0.01 → Target: 0.03 (3x increase, was 0.05)
+      loo_loss_weight: 0.08          # Current: 0.05 → Target: 0.08 (1.6x increase, was 0.10)
     
     # Stability gating (controls whether escalation pauses on instability)
     # When true: escalation pauses if previous epoch had instability events
@@ -621,9 +645,11 @@ training:
     
     # Per-epoch thresholds (gating checks previous epoch's counters)
     # These are NOT rolling windows - counters reset each epoch
-    max_grad_explosion_events_per_epoch: 0    # Must be zero for stability
-    max_lr_backoff_events_per_epoch: 0        # Must be zero for stability  
-    max_consecutive_nan_streak_per_epoch: 0   # Must be zero for stability
+    # UPDATE (Dec 2025): Allow 1-2 NaN batches per epoch (observed in epoch 34 logs)
+    # Setting to 0 was too strict - any random NaN paused escalation permanently
+    max_grad_explosion_events_per_epoch: 2    # Allow 2 grad explosions (was 0)
+    max_lr_backoff_events_per_epoch: 2        # Allow 2 LR backoffs (was 0)
+    max_consecutive_nan_streak_per_epoch: 3   # Allow streak of 3 (was 0)
     
     # Recovery after backoff (prevents permanent suppression)
     # If NaN/explosion causes weight reduction, this restores toward target once stable
@@ -632,6 +658,33 @@ training:
     
     # Logging
     log_every_epoch: true            # Log escalation state every epoch
+    
+    # =============================================================
+    # LATE-PHASE STABILIZATION (Jan 2026)
+    # =============================================================
+    # After epoch 50, training is in "precision mode" chasing exact match.
+    # We tighten stability gates and optionally decay targets to prevent
+    # catastrophic forgetting of already-solved tasks.
+    late_phase:
+      enabled: true
+      start_epoch: 50                # When to switch to late-phase mode
+      
+      # Stricter stability gates (any instability pauses escalation)
+      max_grad_explosion_events: 0   # Zero tolerance in late phase
+      max_lr_backoff_events: 0       # Zero tolerance in late phase
+      max_attention_collapse_events: 0  # Zero tolerance for collapse
+      
+      # Target decay (optional - reduces meta-learning pressure late)
+      decay_targets: false           # If true, decay toward lower values
+      target_decay_factor: 0.8       # Multiply targets by this in late phase
+      
+      # LR decay policy for late phase
+      lr_decay:
+        enabled: true
+        start_epoch: 50              # Begin LR decay (same as late phase)
+        end_epoch: 200               # End of decay schedule
+        decay_factor: 0.1            # Final LR = initial * decay_factor
+        schedule: cosine             # cosine | linear | step
 
 data:
   train_path: "./data/arc-agi/data/training"
@@ -859,6 +912,26 @@ monitoring:
   # Based on 821b111 failure: centroid spread 0.19 indicates collapsed attention
   centroid_spread_warning: 2.0   # Warn if spread < 2.0
   centroid_spread_critical: 0.5  # Critical if spread < 0.5 (complete collapse)
+  
+  # =============================================================
+  # ATTENTION COLLAPSE DETECTION (Jan 2026)
+  # =============================================================
+  # Detects when attention becomes near-uniform (diffuse), which precedes
+  # accuracy cliff. Uniform over 30x30 grid ≈ 0.0011; healthy sharp ≈ 0.1+
+  attn_max_collapse_threshold: 0.02          # Batch flagged if attn_max_mean < this
+  attention_collapse_consecutive_threshold: 2 # Trigger backoff after N consecutive
+  
+  # =============================================================
+  # ATTENTION COLLAPSE BACKOFF POLICY (Jan 2026)
+  # =============================================================
+  # When collapse detected, actively reduce instability sources
+  # (not just pause escalation). This reverses the collapse chain.
+  collapse_backoff:
+    enabled: true
+    cooldown_epochs: 3              # How long to apply backoff
+    delta_scale_factor: 0.5         # Multiply HyperLoRA delta_scale by this
+    lr_factor: 0.5                  # Multiply LR by this during cooldown
+    restore_rate: 0.2               # Restore 20% of gap per stable epoch
 
 logging:
   log_every: 1

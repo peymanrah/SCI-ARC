@@ -579,6 +579,7 @@ class RLAN(nn.Module):
         # 2.5. Hierarchical Primitive Memory (HPM v2) - enhance context with memory (if enabled)
         # MEMORY EFFICIENT: Gated residual starts at 0, Top-K routing only queries k banks
         hpm_routing_weights = None
+        hpm_retrieval_stats = {}  # Track retrieval stats for debugging
         if self.use_hpm and self.hpm is not None:
             # Get context vector for HPM query (pool if spatial features)
             if support_features is not None:
@@ -592,20 +593,25 @@ class RLAN(nn.Module):
             
             if z_context_flat is not None:
                 # Prepare dynamic buffers if available
+                # TODO 1 FIX: Use retrieve_batch for per-sample retrieval (not first-sample only)
                 dynamic_buffers = {}
                 if self.hpm_instance_buffer is not None and len(self.hpm_instance_buffer) > 0:
-                    keys, values = self.hpm_instance_buffer.retrieve(
+                    keys, values, stats = self.hpm_instance_buffer.retrieve_batch(
                         z_context_flat, k=self._hpm_config.dynamic_retrieval_k
                     )
                     if keys is not None:
-                        dynamic_buffers['INSTANCE'] = (keys, values)
+                        dynamic_buffers['INSTANCE'] = (keys, values)  # [B, k, D]
+                    if stats:
+                        hpm_retrieval_stats['instance'] = stats
                 
                 if self.hpm_procedural_buffer is not None and len(self.hpm_procedural_buffer) > 0:
-                    keys, values = self.hpm_procedural_buffer.retrieve(
+                    keys, values, stats = self.hpm_procedural_buffer.retrieve_batch(
                         z_context_flat, k=self._hpm_config.dynamic_retrieval_k
                     )
                     if keys is not None:
-                        dynamic_buffers['PROCEDURAL'] = (keys, values)
+                        dynamic_buffers['PROCEDURAL'] = (keys, values)  # [B, k, D]
+                    if stats:
+                        hpm_retrieval_stats['procedural'] = stats
                 
                 # Enhance context with HPM
                 z_context_enhanced, hpm_routing_weights = self.hpm(
@@ -780,9 +786,11 @@ class RLAN(nn.Module):
                 result["lora_deltas"] = lora_deltas
             if act_outputs is not None:
                 result["act_outputs"] = act_outputs
-            # Add HPM routing weights if available
+            # Add HPM routing weights and retrieval stats if available
             if hpm_routing_weights is not None:
                 result["hpm_routing_weights"] = hpm_routing_weights
+            if hpm_retrieval_stats:
+                result["hpm_retrieval_stats"] = hpm_retrieval_stats
             # Add DSC diagnostics if available
             if self.use_dsc and self.dsc is not None:
                 entropy_inputs = self.dsc.get_last_entropy_inputs()
@@ -1498,31 +1506,71 @@ class RLAN(nn.Module):
         z_context: torch.Tensor,
         z_task: Optional[torch.Tensor] = None,
         task_id: Optional[str] = None,
+        force_write: bool = False,
     ):
         """Call after successfully completing a task for continual learning.
         
         This:
-        1. Freezes stable primitives in static banks
+        1. Freezes stable primitives in static banks (if HPM active)
         2. Stores embeddings in dynamic buffers for future retrieval
+        
+        TODO 2 FIX: Allow buffer writes even when use_hpm is staged off.
+        The `force_write` parameter or `hpm_memory_enabled` attribute allows
+        populating buffers before HPM activation (hpm_start_epoch).
         
         Args:
             z_context: Context embedding from ContextEncoder [B, D] or [D]
             z_task: Optional task embedding from HyperLoRA [B, D] or [D]
             task_id: Optional task identifier for debugging
+            force_write: If True, write to buffers even if use_hpm=False
         """
-        if not self.use_hpm or self.hpm is None:
+        # Check if memory writing is allowed
+        hpm_memory_enabled = getattr(self, 'hpm_memory_enabled', self.use_hpm)
+        if not (self.use_hpm or force_write or hpm_memory_enabled):
             return
         
-        # Freeze stable primitives
-        self.hpm.freeze_stable_primitives()
+        # Freeze stable primitives only if HPM is active (not just memory writing)
+        if self.use_hpm and self.hpm is not None:
+            self.hpm.freeze_stable_primitives()
         
-        # Store in Instance buffer
+        # Store in Instance buffer (always if buffer exists and memory enabled)
         if self.hpm_instance_buffer is not None:
             self.hpm_instance_buffer.add(z_context, z_context, task_id)
         
         # Store in Procedural buffer (if HyperLoRA available)
         if self.hpm_procedural_buffer is not None and z_task is not None:
             self.hpm_procedural_buffer.add(z_context, z_task, task_id)
+    
+    # Alias for backward compatibility with training script
+    def hpm_add_solved_task(
+        self,
+        z_context: torch.Tensor,
+        z_task: Optional[torch.Tensor] = None,
+        task_id: Optional[str] = None,
+        force_write: bool = False,
+    ):
+        """Alias for hpm_on_task_complete - called by training script when a task is solved.
+        
+        TODO 2: Added force_write parameter for staged HPM memory population.
+        """
+        return self.hpm_on_task_complete(z_context, z_task, task_id, force_write=force_write)
+    
+    def hpm_buffer_contains_task(self, task_id: str) -> bool:
+        """Check if a task_id already exists in any HPM buffer (for global dedup).
+        
+        TODO 3: Global dedup across epochs - check before adding to prevent duplicates.
+        
+        Args:
+            task_id: Task identifier to check
+            
+        Returns:
+            True if task_id is already in either buffer
+        """
+        if self.hpm_instance_buffer is not None and self.hpm_instance_buffer.contains_task(task_id):
+            return True
+        if self.hpm_procedural_buffer is not None and self.hpm_procedural_buffer.contains_task(task_id):
+            return True
+        return False
     
     def hpm_get_stats(self) -> dict:
         """Get HPM statistics for logging.
@@ -1542,6 +1590,115 @@ class RLAN(nn.Module):
             stats['procedural_buffer_size'] = len(self.hpm_procedural_buffer)
         
         return stats
+    
+    def get_hpm_state(self) -> dict:
+        """Get canonical HPM state for serialization.
+        
+        This is the single source of truth for HPM memory persistence.
+        Use for both training checkpoints and inference export.
+        
+        Returns:
+            Dict with instance and procedural buffer states + metadata
+        """
+        state = {
+            'version': '2.0',
+            'use_hpm': self.use_hpm,
+            'instance': None,
+            'procedural': None,
+        }
+        
+        if self.hpm_instance_buffer is not None and len(self.hpm_instance_buffer) > 0:
+            state['instance'] = self.hpm_instance_buffer.state_dict()
+        
+        if self.hpm_procedural_buffer is not None and len(self.hpm_procedural_buffer) > 0:
+            state['procedural'] = self.hpm_procedural_buffer.state_dict()
+        
+        return state
+    
+    def load_hpm_state(self, state: dict, force_load: bool = False) -> None:
+        """Load HPM state from canonical format.
+        
+        TODO 5 FIX: Allow loading memory even when use_hpm is temporarily disabled.
+        This supports staged HPM activation and inference-time toggles.
+        
+        Args:
+            state: Dict from get_hpm_state() or checkpoint
+            force_load: If True, load memory even if use_hpm=False (for inference/staging)
+        """
+        # TODO 5: Relaxed gating - allow loading if force_load or buffers exist
+        if not (self.use_hpm or force_load):
+            # Only skip if both HPM is disabled AND we're not forcing
+            # Still try to load if buffers exist (created from config)
+            if self.hpm_instance_buffer is None and self.hpm_procedural_buffer is None:
+                return
+        
+        if state.get('instance') is not None and self.hpm_instance_buffer is not None:
+            self.hpm_instance_buffer.load_state_dict(state['instance'])
+        
+        if state.get('procedural') is not None and self.hpm_procedural_buffer is not None:
+            self.hpm_procedural_buffer.load_state_dict(state['procedural'])
+    
+    def export_hpm_memory(
+        self, 
+        path: str, 
+        split_tag: str = 'train',
+        epoch_range: Optional[tuple] = None,
+        config_hash: Optional[str] = None,
+        dataset_hash: Optional[str] = None,
+        solved_criterion: str = 'exact_match',
+    ) -> None:
+        """Export HPM memory as a standalone artifact for inference.
+        
+        This creates a versioned, auditable memory artifact that can be
+        loaded independently of model weights for inference-time adaptation.
+        
+        TODO 8: Enhanced provenance metadata for auditability.
+        
+        Args:
+            path: Output file path (e.g., 'hpm_memory.pt')
+            split_tag: Dataset split this memory was trained on (for provenance)
+            epoch_range: (start_epoch, end_epoch) tuple for training range
+            config_hash: Hash of training config for reproducibility
+            dataset_hash: Hash of dataset used for training
+            solved_criterion: Criterion used for adding tasks ('exact_match', 'high_accuracy', etc.)
+        """
+        import time
+        
+        state = self.get_hpm_state()
+        state['metadata'] = {
+            # Core provenance
+            'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'split_tag': split_tag,
+            'instance_size': len(self.hpm_instance_buffer) if self.hpm_instance_buffer else 0,
+            'procedural_size': len(self.hpm_procedural_buffer) if self.hpm_procedural_buffer else 0,
+            # TODO 8: Extended provenance for auditability
+            'epoch_range': epoch_range,
+            'config_hash': config_hash,
+            'dataset_hash': dataset_hash,
+            'solved_criterion': solved_criterion,
+            # Unique task counts for dedup verification
+            'unique_instance_tasks': len(self.hpm_instance_buffer.get_unique_task_ids()) if self.hpm_instance_buffer else 0,
+            'unique_procedural_tasks': len(self.hpm_procedural_buffer.get_unique_task_ids()) if self.hpm_procedural_buffer else 0,
+        }
+        
+        torch.save(state, path)
+    
+    def import_hpm_memory(self, path: str, force_load: bool = True) -> dict:
+        """Import HPM memory from standalone artifact.
+        
+        TODO 4: Explicit inference-time loading path.
+        TODO 5: Uses force_load=True by default to support inference toggles.
+        
+        Args:
+            path: Path to hpm_memory.pt file
+            force_load: If True (default), load even if use_hpm=False
+            
+        Returns:
+            Metadata dict with provenance info
+        """
+        state = torch.load(path, map_location='cpu')
+        self.load_hpm_state(state, force_load=force_load)
+        return state.get('metadata', {})
     
     def hpm_save_buffers(self, directory: str):
         """Save HPM dynamic buffers to disk.

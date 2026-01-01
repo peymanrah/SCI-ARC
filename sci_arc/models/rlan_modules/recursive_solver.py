@@ -77,11 +77,16 @@ def soft_clamp(x: torch.Tensor, threshold: float = 8.0, max_val: float = 10.0) -
     return torch.where(abs_x <= threshold, x, sign_x * compressed)
 
 
-def soft_clamp_logits(x: torch.Tensor, threshold: float = 1000.0, max_val: float = 2000.0) -> torch.Tensor:
+def soft_clamp_logits(x: torch.Tensor, threshold: float = 50.0, max_val: float = 100.0) -> torch.Tensor:
     """
     Soft clamp that allows natural growth up to threshold, then compresses.
     
-    This prevents NaN from extreme logits (10K+) while allowing the model
+    STABILITY FIX (Jan 2026 - P0.3):
+    - Lowered threshold from 1000 to 50 to match DSC's ±50 clamp.
+    - Log analysis showed solver logits reaching ±67, causing softmax saturation.
+    - Tighter bounds prevent attention collapse cascade.
+    
+    This prevents NaN from extreme logits while allowing the model
     to express strong confidence (unlike hard clamp at ±50 which caused collapse).
     
     For |x| <= threshold: returns x unchanged (identity)
@@ -94,8 +99,8 @@ def soft_clamp_logits(x: torch.Tensor, threshold: float = 1000.0, max_val: float
     
     Args:
         x: Input logits
-        threshold: Values below this are unchanged (default 1000)
-        max_val: Maximum output magnitude (default 2000)
+        threshold: Values below this are unchanged (default 50, was 1000)
+        max_val: Maximum output magnitude (default 100, was 2000)
         
     Returns:
         Soft-clamped logits
@@ -353,6 +358,11 @@ class SolverCrossAttention(nn.Module):
     
     Phase 2.5: Removes the information bottleneck identified in Phase 2 analysis.
     
+    Jan 2026 Update: HPM Solver-Context Coupling
+    - Can optionally inject HPM memory tokens as additional context
+    - Memory tokens come from HPM's instance/procedural banks
+    - Gated warmup to gradually introduce memory influence
+    
     Memory Optimization (Dec 2025):
     - ContextEncoder already downsamples to 8×8 (64 tokens per pair)
     - With 4 pairs: 4 × 64 = 256 keys (very efficient)
@@ -361,6 +371,7 @@ class SolverCrossAttention(nn.Module):
     Mathematical Role:
     - DSC-injected features = GLOBAL prior ("what is this task?")
     - Solver cross-attention = LOCAL verification ("does my output match?")
+    - HPM memory tokens = PROCEDURAL guidance ("similar tasks did this")
     - These are COMPLEMENTARY, not interfering
     """
     
@@ -370,12 +381,34 @@ class SolverCrossAttention(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.1,
         pool_size: int = 8,  # Match ContextEncoder's spatial_downsample
+        # Jan 2026: HPM solver-context coupling
+        hpm_context_enabled: bool = False,
+        hpm_context_max_tokens: int = 8,
+        hpm_context_gate_init: float = 0.0,  # Start with no HPM influence
     ):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.pool_size = pool_size
+        
+        # Jan 2026: HPM solver-context coupling
+        self.hpm_context_enabled = hpm_context_enabled
+        self.hpm_context_max_tokens = hpm_context_max_tokens
+        
+        if hpm_context_enabled:
+            # Learnable gate for HPM memory tokens (initialized to gate_init)
+            # This allows the model to learn when to use memory vs support features
+            self.hpm_gate = nn.Parameter(torch.tensor(hpm_context_gate_init))
+            # Project HPM memory vectors to match hidden_dim if needed
+            self.hpm_proj = nn.Linear(hidden_dim, hidden_dim)
+            # Jan 2026: Logit clamp to prevent explosion
+            self.hpm_logit_clamp = 10.0  # Default clamp value
+            # Statistics tracking (reset each forward)
+            self.hpm_last_proj_norm_max = 0.0
+            self.hpm_last_explosion_count = 0
+            self.hpm_last_tokens_used = 0
+            print(f"[SolverCrossAttention] HPM context coupling ENABLED (max_tokens={hpm_context_max_tokens}, gate_init={hpm_context_gate_init:.2f})")
         
         # Adaptive pooling to handle variable input sizes
         # If support features are already 8×8, this is a no-op
@@ -403,10 +436,34 @@ class SolverCrossAttention(nn.Module):
         
         self.dropout = nn.Dropout(dropout)
     
+    def set_hpm_gate(self, gate_value: float):
+        """Set HPM gate value (for warmup scheduling)."""
+        if self.hpm_context_enabled:
+            with torch.no_grad():
+                self.hpm_gate.fill_(gate_value)
+    
+    def set_hpm_logit_clamp(self, clamp_value: float):
+        """Set HPM logit clamp threshold."""
+        if self.hpm_context_enabled:
+            self.hpm_logit_clamp = clamp_value
+    
+    def get_hpm_stats(self) -> dict:
+        """Get HPM solver coupling statistics for diagnostics."""
+        if not self.hpm_context_enabled:
+            return {}
+        return {
+            'gate_value': torch.sigmoid(self.hpm_gate).item(),
+            'proj_norm_max': getattr(self, 'hpm_last_proj_norm_max', 0.0),
+            'explosion_count': getattr(self, 'hpm_last_explosion_count', 0),
+            'tokens_used': getattr(self, 'hpm_last_tokens_used', 0),
+            'logit_clamp': self.hpm_logit_clamp,
+        }
+    
     def forward(
         self,
         hidden_state: torch.Tensor,       # (B, D, H, W) solver's hidden state
         support_features: torch.Tensor,   # (B, N, D, H', W') support pair features (8×8 from ContextEncoder)
+        hpm_memory_tokens: Optional[torch.Tensor] = None,  # (B, M, D) optional HPM memory
     ) -> torch.Tensor:
         """
         Apply cross-attention from solver hidden state to support features.
@@ -416,10 +473,17 @@ class SolverCrossAttention(nn.Module):
         2. Correct mistakes by comparing with ground truth examples
         3. Handle multi-step rules where intermediate states need guidance
         
+        Jan 2026: HPM Solver-Context Coupling
+        If hpm_memory_tokens are provided and hpm_context_enabled:
+        - Concatenate memory tokens to support features as additional keys/values
+        - Gated contribution allows gradual introduction of memory influence
+        - This couples HPM directly to the solver for faster exact-match learning
+        
         Memory cost per step:
         - Query: (B, H*W, D) = (8, 900, 256) = 7.4 MB
         - Key/Value: (B, N*64, D) = (8, 256, 256) = 2.1 MB
-        - Attention: (B, heads, 900, 256) = 7.4 MB
+        - HPM tokens: (B, 8, 256) = 0.07 MB (negligible)
+        - Attention: (B, heads, 900, 264) = 7.6 MB
         - Total: ~17 MB per step × 6 steps = ~100 MB (trivial on 24GB GPU)
         
         Returns:
@@ -440,6 +504,37 @@ class SolverCrossAttention(nn.Module):
         
         # Flatten pooled support features: (B, N*36, D)
         support_flat = support_pooled.permute(0, 1, 3, 4, 2).reshape(B, N * H_p * W_p, D_s)
+        
+        # Jan 2026: HPM Solver-Context Coupling
+        # Concatenate HPM memory tokens to key/value sequence
+        # With norm clamping and statistics tracking for debugging
+        if self.hpm_context_enabled and hpm_memory_tokens is not None and hpm_memory_tokens.shape[1] > 0:
+            # Project and gate HPM memory tokens
+            hpm_proj = self.hpm_proj(hpm_memory_tokens)  # (B, M, D)
+            
+            # Clamp projected token norms to prevent explosion
+            with torch.no_grad():
+                proj_norms = hpm_proj.norm(dim=-1)  # (B, M)
+                max_proj_norm = proj_norms.max().item()
+                explosion_count = (proj_norms > self.hpm_logit_clamp).sum().item()
+                self.hpm_last_proj_norm_max = max_proj_norm
+                self.hpm_last_explosion_count = explosion_count
+            
+            # Apply soft clamp to prevent explosion (gradient-friendly)
+            proj_norms_clamped = hpm_proj.norm(dim=-1, keepdim=True)  # (B, M, 1)
+            scale = torch.clamp(self.hpm_logit_clamp / (proj_norms_clamped + 1e-8), max=1.0)
+            hpm_proj = hpm_proj * scale
+            
+            hpm_gate_value = torch.sigmoid(self.hpm_gate)  # Scalar gate
+            hpm_gated = hpm_proj * hpm_gate_value  # (B, M, D)
+            
+            # Truncate to max_tokens if needed
+            M = min(hpm_memory_tokens.shape[1], self.hpm_context_max_tokens)
+            hpm_gated = hpm_gated[:, :M, :]  # (B, M, D)
+            self.hpm_last_tokens_used = M
+            
+            # Concatenate to support features
+            support_flat = torch.cat([support_flat, hpm_gated], dim=1)  # (B, N*H*W + M, D)
         
         # Pre-norm for stability
         q = self.norm_q(h_flat)
@@ -502,6 +597,10 @@ class RecursiveSolver(nn.Module):
         num_context_heads: int = 4,  # Heads for solver cross-attention
         use_dsc: bool = True,  # Kept for API compatibility but not used for module creation
         gradient_checkpointing: bool = False,  # Enable to reduce memory ~40%
+        # Jan 2026: HPM solver-context coupling parameters
+        hpm_solver_context_enabled: bool = False,
+        hpm_solver_context_max_tokens: int = 8,
+        hpm_solver_context_gate_init: float = 0.0,
     ):
         """
         Args:
@@ -523,6 +622,9 @@ class RecursiveSolver(nn.Module):
             use_dsc: Kept for API compatibility. Mode is determined at runtime.
             gradient_checkpointing: Whether to use gradient checkpointing to reduce memory.
                                    Trades compute for memory by recomputing activations during backward.
+            hpm_solver_context_enabled: Jan 2026 - Enable HPM memory token injection into solver.
+            hpm_solver_context_max_tokens: Max HPM memory tokens to inject per forward pass.
+            hpm_solver_context_gate_init: Initial gate value for HPM influence (0.0 = no influence).
         """
         super().__init__()
         
@@ -536,6 +638,7 @@ class RecursiveSolver(nn.Module):
         self.use_solver_context = use_solver_context
         self.use_dsc = use_dsc
         self.gradient_checkpointing = gradient_checkpointing
+        self.hpm_solver_context_enabled = hpm_solver_context_enabled
         
         if gradient_checkpointing:
             print(f"[RecursiveSolver] Gradient checkpointing ENABLED (memory optimization)")
@@ -603,8 +706,14 @@ class RecursiveSolver(nn.Module):
                 hidden_dim=hidden_dim,
                 num_heads=num_context_heads,
                 dropout=dropout,
+                # Jan 2026: HPM solver-context coupling
+                hpm_context_enabled=hpm_solver_context_enabled,
+                hpm_context_max_tokens=hpm_solver_context_max_tokens,
+                hpm_context_gate_init=hpm_solver_context_gate_init,
             )
             print(f"[RecursiveSolver] Phase 2.5: Solver cross-attention ENABLED ({num_context_heads} heads)")
+            if hpm_solver_context_enabled:
+                print(f"[RecursiveSolver] Jan 2026: HPM solver-context coupling ENABLED (max_tokens={hpm_solver_context_max_tokens})")
         else:
             self.solver_cross_attn = None
         
@@ -846,6 +955,7 @@ class RecursiveSolver(nn.Module):
         h: Optional[torch.Tensor],
         support_features: Optional[torch.Tensor],
         lora_deltas: Optional[Dict[str, torch.Tensor]],
+        hpm_memory_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Full solver step with all optional features.
@@ -856,6 +966,7 @@ class RecursiveSolver(nn.Module):
             h: Optional hidden state from previous step
             support_features: Optional support set for cross-attention
             lora_deltas: Optional HyperLoRA weight deltas
+            hpm_memory_tokens: Optional (B, M, D) HPM memory for solver-context coupling
             
         Returns:
             h_new: Updated hidden state (B, D, H, W)
@@ -864,8 +975,9 @@ class RecursiveSolver(nn.Module):
         h_new = self.gru(combined, h, lora_deltas=lora_deltas)
         
         # Phase 2.5: Cross-attention to support set at each step
+        # Jan 2026: Also passes HPM memory tokens if available
         if self.solver_cross_attn is not None and support_features is not None:
-            h_new = self.solver_cross_attn(h_new, support_features)
+            h_new = self.solver_cross_attn(h_new, support_features, hpm_memory_tokens)
             
         return h_new
     
@@ -879,6 +991,7 @@ class RecursiveSolver(nn.Module):
         stop_logits: Optional[torch.Tensor] = None,
         support_features: Optional[torch.Tensor] = None,  # Phase 2.5: (B, N, D, H', W')
         lora_deltas: Optional[Dict[str, torch.Tensor]] = None,  # HyperLoRA weight deltas
+        hpm_memory_tokens: Optional[torch.Tensor] = None,  # Jan 2026: (B, M, D) HPM memory tokens
         return_all_steps: bool = False,
         return_act_outputs: bool = False,
         num_steps_override: Optional[int] = None,  # Override num_steps at inference
@@ -902,6 +1015,8 @@ class RecursiveSolver(nn.Module):
                         - 'gru_update': (B, D, D) update gate modulation
                         - 'gru_candidate': (B, D, D) candidate modulation
                         - 'output_head': (B, D, D) output head modulation
+            hpm_memory_tokens: Optional (B, M, D) HPM memory vectors for solver-context coupling.
+                              Jan 2026: Concatenated to support features in cross-attention.
             return_all_steps: If True, return predictions at all steps
             return_act_outputs: If True, also return ACT outputs for loss computation
             num_steps_override: If provided, use this many steps instead of self.num_steps.
@@ -1019,11 +1134,13 @@ class RecursiveSolver(nn.Module):
                     )
                 
                 # Apply cross-attention OUTSIDE checkpoint (its own memory is small)
+                # Jan 2026: Pass HPM memory tokens if available
                 if self.solver_cross_attn is not None and support_features is not None:
-                    h_new = self.solver_cross_attn(h_new, support_features)
+                    h_new = self.solver_cross_attn(h_new, support_features, hpm_memory_tokens)
             else:
                 # Standard forward - no checkpointing
-                h_new = self._solver_step(combined, h, support_features, lora_deltas)
+                # Jan 2026: Pass HPM memory tokens
+                h_new = self._solver_step(combined, h, support_features, lora_deltas, hpm_memory_tokens)
             
             # Store initial hidden state for residual connections
             if t == 0:

@@ -50,6 +50,10 @@ class HyperLoRAConfig:
     - Increased init_scale from 0.01 to 0.1 to fix weak initialization coupling.
     - At init_scale=0.01, adaptation effect was only 0.0001 loss delta (negligible).
     - Higher init_scale = stronger initial signal for meta-learning to latch onto.
+    
+    STABILITY FIX (2026-01-01):
+    - Added lora_max_norm to prevent runaway delta growth (P0.1).
+    - Based on log analysis: LoRA norm grew 1.27 → 1.80 causing training collapse.
     """
     enabled: bool = True
     rank: int = 8                          # LoRA rank (8-16 recommended)
@@ -61,6 +65,7 @@ class HyperLoRAConfig:
     target_output_head: bool = True        # Adapt output head weights
     num_gru_gates: int = 3                 # reset, update, candidate (GRU has 3 gates)
     init_scale: float = 0.1               # Stronger init for better adaptation signal (was 0.01)
+    lora_max_norm: float = 3.0            # P0.1: Hard clamp per-sample delta L2 norm (prevents explosion)
 
 
 class LoRAPredictor(nn.Module):
@@ -210,6 +215,18 @@ class HyperLoRA(nn.Module):
         # Memory-neutral: single float, no extra VRAM.
         self.delta_scale = 1.0  # Default: no attenuation (backward compatible)
         
+        # P0.1: LoRA norm clamping (Jan 2026 stability fix)
+        # Hard clamp per-sample LoRA delta L2 norm to prevent runaway growth.
+        # Based on log analysis: LoRA norm grew 1.27 → 1.80 causing collapse.
+        # Default 3.0 is ~2x typical healthy range, allows expressivity but caps explosion.
+        self.lora_max_norm = config.lora_max_norm if config and hasattr(config, 'lora_max_norm') else 3.0
+        
+        # Jan 2026: Clamp hit-rate tracking for diagnostics
+        # These counters are reset each epoch by train_rlan.py to compute hit-rate
+        self.clamp_hit_count = 0      # Number of samples that hit the clamp
+        self.clamp_total_count = 0    # Total number of samples processed
+        self.clamp_max_pre_norm = 0.0  # Max pre-clamp norm seen this epoch
+        
         # Context pooling: (B, N, D, H, W) → (B, D)
         self.context_pool = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),  # Will be applied per-pair
@@ -357,6 +374,71 @@ class HyperLoRA(nn.Module):
         
         return context
     
+    def _clamp_delta_norm(self, delta: torch.Tensor) -> torch.Tensor:
+        """
+        Clamp per-sample LoRA delta to max L2 norm.
+        
+        P0.1 Stability Fix (Jan 2026):
+        - Based on log analysis: LoRA norm grew 1.27 → 1.80 causing training collapse
+        - Hard clamp prevents runaway growth while preserving direction
+        - Gradient-friendly: uses scaling rather than hard truncation
+        - Tracks hit-rate for diagnostics (Jan 2026 observability patch)
+        
+        Args:
+            delta: (B, D1, D2) LoRA weight delta matrix
+            
+        Returns:
+            Clamped delta with same shape, per-sample norm <= lora_max_norm
+        """
+        if self.lora_max_norm is None or self.lora_max_norm <= 0:
+            return delta
+        
+        # Compute per-sample L2 norm
+        norms = delta.norm(dim=(1, 2), keepdim=True)  # (B, 1, 1)
+        
+        # Track hit-rate for diagnostics (Jan 2026)
+        # Count samples where norm exceeds threshold
+        with torch.no_grad():
+            batch_size = delta.shape[0]
+            hits = (norms.squeeze() > self.lora_max_norm).sum().item()
+            self.clamp_hit_count += hits
+            self.clamp_total_count += batch_size
+            max_norm = norms.max().item()
+            if max_norm > self.clamp_max_pre_norm:
+                self.clamp_max_pre_norm = max_norm
+        
+        # Scale down if norm exceeds max (preserve direction)
+        scale = torch.clamp(self.lora_max_norm / (norms + 1e-8), max=1.0)
+        
+        return delta * scale
+    
+    def reset_clamp_stats(self):
+        """Reset clamp hit-rate tracking for new epoch."""
+        self.clamp_hit_count = 0
+        self.clamp_total_count = 0
+        self.clamp_max_pre_norm = 0.0
+    
+    def get_clamp_stats(self) -> dict:
+        """
+        Get clamp hit-rate statistics for diagnostics.
+        
+        Returns:
+            dict with:
+                - hit_rate: fraction of samples that hit the clamp (0.0-1.0)
+                - hit_count: total samples that hit
+                - total_count: total samples processed
+                - max_pre_norm: maximum pre-clamp norm seen
+                - threshold: the clamp threshold
+        """
+        hit_rate = self.clamp_hit_count / max(1, self.clamp_total_count)
+        return {
+            'hit_rate': hit_rate,
+            'hit_count': self.clamp_hit_count,
+            'total_count': self.clamp_total_count,
+            'max_pre_norm': self.clamp_max_pre_norm,
+            'threshold': self.lora_max_norm,
+        }
+    
     def forward(
         self,
         support_features: torch.Tensor,
@@ -383,11 +465,13 @@ class HyperLoRA(nn.Module):
         # Apply delta_scale for warmup (Patch 1: Dec 2025)
         # This multiplicatively attenuates deltas during early training
         scale = self.delta_scale
+        
+        # P0.1: Apply norm clamping to prevent runaway LoRA growth (Jan 2026)
         deltas = {
-            'gru_reset': scale * self.gru_reset_lora.compute_delta_w(context),
-            'gru_update': scale * self.gru_update_lora.compute_delta_w(context),
-            'gru_candidate': scale * self.gru_candidate_lora.compute_delta_w(context),
-            'output_head': scale * self.output_head_lora.compute_delta_w(context),
+            'gru_reset': self._clamp_delta_norm(scale * self.gru_reset_lora.compute_delta_w(context)),
+            'gru_update': self._clamp_delta_norm(scale * self.gru_update_lora.compute_delta_w(context)),
+            'gru_candidate': self._clamp_delta_norm(scale * self.gru_candidate_lora.compute_delta_w(context)),
+            'output_head': self._clamp_delta_norm(scale * self.output_head_lora.compute_delta_w(context)),
             'context': context,  # Keep for other uses
         }
         
@@ -411,11 +495,13 @@ class HyperLoRA(nn.Module):
         # Predict LoRA deltas for each target
         # Apply delta_scale for warmup (Patch 1: Dec 2025)
         scale = self.delta_scale
+        
+        # P0.1: Apply norm clamping to prevent runaway LoRA growth (Jan 2026)
         deltas = {
-            'gru_reset': scale * self.gru_reset_lora.compute_delta_w(context),
-            'gru_update': scale * self.gru_update_lora.compute_delta_w(context),
-            'gru_candidate': scale * self.gru_candidate_lora.compute_delta_w(context),
-            'output_head': scale * self.output_head_lora.compute_delta_w(context),
+            'gru_reset': self._clamp_delta_norm(scale * self.gru_reset_lora.compute_delta_w(context)),
+            'gru_update': self._clamp_delta_norm(scale * self.gru_update_lora.compute_delta_w(context)),
+            'gru_candidate': self._clamp_delta_norm(scale * self.gru_candidate_lora.compute_delta_w(context)),
+            'output_head': self._clamp_delta_norm(scale * self.output_head_lora.compute_delta_w(context)),
         }
         
         return deltas
