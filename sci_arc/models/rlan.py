@@ -128,6 +128,11 @@ class RLANConfig:
     hpm_use_procedural_bank: bool = False    # Dynamic: HyperLoRA codes
     hpm_use_instance_bank: bool = False      # Dynamic: ContextEncoder cache
     
+    # HPM Solver-Context Coupling (Jan 2026)
+    hpm_solver_context_enabled: bool = True      # Enable HPM→solver cross-attention coupling
+    hpm_solver_context_max_tokens: int = 8       # Max HPM memory tokens to inject per step
+    hpm_solver_context_gate_init: float = 0.0    # Initial gate value (0.0 = no influence until warmup)
+    
     # Training parameters
     dropout: float = 0.1
     gradient_checkpointing: bool = False  # Enable to reduce memory ~40%, trade compute for memory
@@ -358,6 +363,13 @@ class RLAN(nn.Module):
         self.use_solver_context = config.use_solver_context if config else True
         self.use_best_step_selection = config.use_best_step_selection if config else False
         self.gradient_checkpointing = config.gradient_checkpointing if config else False
+        # HPM solver-context coupling: only enable if HPM is also enabled
+        hpm_solver_context_enabled = (
+            (config.hpm_solver_context_enabled if config else True) and
+            (config.use_hpm if config else False)
+        )
+        self.hpm_solver_context_enabled = hpm_solver_context_enabled
+        
         self.solver = RecursiveSolver(
             hidden_dim=hidden_dim,
             num_classes=num_classes,
@@ -373,6 +385,10 @@ class RLAN(nn.Module):
             num_context_heads=config.solver_context_heads if config else 4,
             use_dsc=self.use_dsc,  # BUG FIX #5: DSC provides per-clue counts, bypassing count_proj
             gradient_checkpointing=self.gradient_checkpointing,  # Memory optimization
+            # HPM Solver-Context Coupling (Jan 2026)
+            hpm_solver_context_enabled=hpm_solver_context_enabled,
+            hpm_solver_context_max_tokens=config.hpm_solver_context_max_tokens if config else 8,
+            hpm_solver_context_gate_init=config.hpm_solver_context_gate_init if config else 0.0,
         )
         
         # HyperLoRA for meta-learning weight adaptation (optional)
@@ -580,6 +596,7 @@ class RLAN(nn.Module):
         # MEMORY EFFICIENT: Gated residual starts at 0, Top-K routing only queries k banks
         hpm_routing_weights = None
         hpm_retrieval_stats = {}  # Track retrieval stats for debugging
+        hpm_memory_tokens = None  # Jan 2026: For HPM solver-context coupling
         if self.use_hpm and self.hpm is not None:
             # Get context vector for HPM query (pool if spatial features)
             if support_features is not None:
@@ -595,12 +612,15 @@ class RLAN(nn.Module):
                 # Prepare dynamic buffers if available
                 # TODO 1 FIX: Use retrieve_batch for per-sample retrieval (not first-sample only)
                 dynamic_buffers = {}
+                
                 if self.hpm_instance_buffer is not None and len(self.hpm_instance_buffer) > 0:
                     keys, values, stats = self.hpm_instance_buffer.retrieve_batch(
                         z_context_flat, k=self._hpm_config.dynamic_retrieval_k
                     )
                     if keys is not None:
                         dynamic_buffers['INSTANCE'] = (keys, values)  # [B, k, D]
+                        # Collect values for solver-context coupling (Jan 2026)
+                        hpm_memory_tokens = values  # (B, k, D)
                     if stats:
                         hpm_retrieval_stats['instance'] = stats
                 
@@ -610,6 +630,11 @@ class RLAN(nn.Module):
                     )
                     if keys is not None:
                         dynamic_buffers['PROCEDURAL'] = (keys, values)  # [B, k, D]
+                        # Concatenate procedural values if instance already exists
+                        if hpm_memory_tokens is not None:
+                            hpm_memory_tokens = torch.cat([hpm_memory_tokens, values], dim=1)
+                        else:
+                            hpm_memory_tokens = values
                     if stats:
                         hpm_retrieval_stats['procedural'] = stats
                 
@@ -725,6 +750,7 @@ class RLAN(nn.Module):
                 return_act_outputs=return_intermediates and self.use_act,
                 num_steps_override=num_steps_override,
                 lora_deltas=lora_deltas,  # HyperLoRA weight adaptations (None during early epochs)
+                hpm_memory_tokens=hpm_memory_tokens,  # Jan 2026: HPM solver-context coupling
             )
             # Handle ACT outputs if returned
             if isinstance(solver_output, tuple):
@@ -744,6 +770,7 @@ class RLAN(nn.Module):
                 return_all_steps=False,
                 num_steps_override=num_steps_override,
                 lora_deltas=lora_deltas,  # HyperLoRA weight adaptations (None during early epochs)
+                hpm_memory_tokens=hpm_memory_tokens,  # Jan 2026: HPM solver-context coupling
             )
             all_logits = None
         

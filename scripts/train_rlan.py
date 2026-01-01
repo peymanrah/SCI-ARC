@@ -856,6 +856,10 @@ def create_model(config: dict) -> RLAN:
         hpm_use_concept_bank=model_config.get('hpm_use_concept_bank', False),
         hpm_use_procedural_bank=model_config.get('hpm_use_procedural_bank', False),
         hpm_use_instance_bank=model_config.get('hpm_use_instance_bank', False),
+        # HPM Solver-Context Coupling (Jan 2026)
+        hpm_solver_context_enabled=model_config.get('hpm_solver_context_enabled', True),
+        hpm_solver_context_max_tokens=model_config.get('hpm_solver_context_max_tokens', 8),
+        hpm_solver_context_gate_init=model_config.get('hpm_solver_context_gate_init', 0.0),
         # Memory optimization: gradient checkpointing
         gradient_checkpointing=train_config.get('gradient_checkpointing', False),
     )
