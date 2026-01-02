@@ -53,7 +53,10 @@ class HyperLoRAConfig:
     
     STABILITY FIX (2026-01-01):
     - Added lora_max_norm to prevent runaway delta growth (P0.1).
-    - Based on log analysis: LoRA norm grew 1.27 → 1.80 causing training collapse.
+    - Based on log analysis: LoRA norm grew 0.793 → 1.714 causing training collapse at epoch 41.
+    - FIX: Reduced lora_max_norm from 3.0 → 1.0 to prevent GRU gate saturation.
+    - Mathematical basis: When ||ΔW||_F > 1.0 relative to normalized base weights,
+      the adaptation term dominates, causing sigmoid saturation → gradient vanishing.
     """
     enabled: bool = True
     rank: int = 8                          # LoRA rank (8-16 recommended)
@@ -65,7 +68,7 @@ class HyperLoRAConfig:
     target_output_head: bool = True        # Adapt output head weights
     num_gru_gates: int = 3                 # reset, update, candidate (GRU has 3 gates)
     init_scale: float = 0.1               # Stronger init for better adaptation signal (was 0.01)
-    lora_max_norm: float = 3.0            # P0.1: Hard clamp per-sample delta L2 norm (prevents explosion)
+    lora_max_norm: float = 1.0            # P0.1: Hard clamp per-sample delta L2 norm (was 3.0, caused collapse)
 
 
 class LoRAPredictor(nn.Module):
@@ -217,9 +220,10 @@ class HyperLoRA(nn.Module):
         
         # P0.1: LoRA norm clamping (Jan 2026 stability fix)
         # Hard clamp per-sample LoRA delta L2 norm to prevent runaway growth.
-        # Based on log analysis: LoRA norm grew 1.27 → 1.80 causing collapse.
-        # Default 3.0 is ~2x typical healthy range, allows expressivity but caps explosion.
-        self.lora_max_norm = config.lora_max_norm if config and hasattr(config, 'lora_max_norm') else 3.0
+        # Based on log analysis: LoRA norm grew 0.793 → 1.714 causing collapse at epoch 41.
+        # Default 1.0 ensures adaptation never dominates base weights.
+        # Mathematical invariant: ||ΔW||_F ≤ 1.0 prevents GRU gate saturation.
+        self.lora_max_norm = config.lora_max_norm if config and hasattr(config, 'lora_max_norm') else 1.0
         
         # Jan 2026: Clamp hit-rate tracking for diagnostics
         # These counters are reset each epoch by train_rlan.py to compute hit-rate

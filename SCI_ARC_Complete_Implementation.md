@@ -3673,3 +3673,87 @@ load_checkpoint(model, optimizer, scheduler, path, reset_optimizer=True)
 # reset_optimizer=True: Load model weights only, skip optimizer/scheduler state
 ```
 
+---
+
+## 📋 January 2026 Stability Fixes
+
+### Changes Applied to `configs/rlan_stable_dev.yaml`:
+
+1. **Solver Steps Increased**: `num_solver_steps: 7` (was 5)
+   - More iteration capacity for complex tasks
+
+2. **Equivariance Loss Disabled**: `equivariance_training.enabled: false`
+   - **Reason**: Original deltas are DETACHED, causing over-regularization
+   - TTA consensus was only 13% (not achieving equivariance)
+   - Iterative backward causes gradient interference with task loss
+
+3. **HPM Solver Coupling Delayed**: `hpm_solver_context_start_epoch: 80` (was 45)
+   - Ensures buffers have sufficient entries before coupling activates
+   - Safely past the collapse window (epochs 41-61)
+   - Also: `gate_max: 0.3` (was 0.5), `logit_clamp: 5.0` (was 10.0)
+
+4. **HPM Memory Collection Explicit**: `hpm_memory_start_epoch: 0`
+   - Ensures buffer population starts from epoch 0
+   
+5. **HyperLoRA Max Norm Explicit**: `hyperlora_max_norm: 1.0`
+   - Prevents LoRA delta explosion during training
+
+### Changes Applied to `scripts/train_rlan.py`:
+
+1. **HPM Buffer Population Diagnostics**:
+   - New counters: `hpm_skipped_no_method`, `hpm_skipped_not_enabled`
+   - Always log HPM buffer status at epoch end (even if 0 tasks added)
+   - Clear logging of buffer status during checkpoint save
+
+---
+
+## 🔬 Scientific Analysis: Loss Function Cooperation
+
+### The Problem with Iterative Backward
+
+LOO and Equivariance losses use **iterative backward** for memory efficiency:
+```python
+if scaler is not None:
+    scaler.scale(loss).backward()  # Backward happens HERE
+    return loss.detach()  # Returns detached, doesn't add to total_loss
+```
+
+This is **good for memory** (O(1) instead of O(N)) but **problematic for meta-learning**:
+
+1. **Sequential Updates**: Instead of accumulated gradients, we get:
+   - θ ← θ - α∇L_LOO
+   - θ ← θ - α∇L_equiv  
+   - θ ← θ - α∇L_task
+
+2. **True Multi-Task Would Be**:
+   - ∇θ = ∇L_task + λ_LOO·∇L_LOO + λ_equiv·∇L_equiv (single accumulated gradient)
+
+3. **Consequence**: Meta-learning losses don't truly "cooperate" with task loss
+
+### Why Equivariance Was Disabled
+
+The equivariance loss detaches original deltas:
+```python
+original_deltas = self._encode_deltas(...).detach()  # DETACHED!
+augmented_deltas = self._encode_deltas(...)  # Has gradients
+loss = MSE(original_deltas, augmented_deltas)
+```
+
+This only trains HyperLoRA to match a **frozen** target, causing over-regularization.
+
+### HPM Buffer Population Bug Investigation
+
+**Root Cause Analysis**: HPM buffers are populated when:
+1. An exact match occurs (100% pixel accuracy)
+2. `model.use_hpm OR model.hpm_memory_enabled` is True
+3. `support_features` is available in outputs
+4. Task ID is not already in buffer (dedup)
+
+If any condition fails, buffers stay empty. New diagnostics added to track each failure mode.
+
+### Recommendations for Future Improvements
+
+1. **Gradient Accumulation for Meta-Losses**: Accumulate LOO/Equiv gradients with task loss before single backward
+2. **Non-Detached Equivariance**: Keep gradients on original deltas for bidirectional learning
+3. **HPM Buffer Warm Start**: Pre-populate buffers from eval set before training
+

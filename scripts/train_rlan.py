@@ -1492,11 +1492,12 @@ def train_epoch(
     # Default 0.02: uniform over 30x30 is ~0.0011; healthy sharp attention is typically >> 0.1.
     attn_max_collapse_threshold = monitoring_cfg.get('attn_max_collapse_threshold', 0.02)
     # LoRA thresholds (also used in batch loop)
-    # Defaults tightened (Jan 2026): earlier versions used 10/30/50 which would not
-    # trip on the 1.3→1.8 runaway seen in the epoch-55+ collapse logs.
-    lora_norm_warn_threshold = monitoring_cfg.get('lora_norm_warn', 2.0)
-    lora_norm_critical_threshold = monitoring_cfg.get('lora_norm_critical', 5.0)
-    lora_norm_kill_threshold = monitoring_cfg.get('lora_norm_kill', 10.0)
+    # TIGHTENED (Jan 2026): Production run showed collapse at LoRA norm 1.714
+    # Previous thresholds (2.0/5.0/10.0) were too loose and didn't catch the runaway.
+    # New thresholds based on observation: healthy range is 0.3-0.8, collapse at 1.7.
+    lora_norm_warn_threshold = monitoring_cfg.get('lora_norm_warn', 1.0)       # Was 2.0
+    lora_norm_critical_threshold = monitoring_cfg.get('lora_norm_critical', 1.5)  # Was 5.0
+    lora_norm_kill_threshold = monitoring_cfg.get('lora_norm_kill', 2.0)       # Was 10.0
     lora_kill_consecutive_limit = 3  # Abort after this many consecutive kill-threshold breaches
     
     # Wrap dataloader with CUDA prefetcher for async data transfer
@@ -2508,7 +2509,16 @@ def train_epoch(
                         # for future retrieval-augmented reasoning on similar tasks.
                         # TODO 2 FIX: Check hpm_memory_enabled OR use_hpm (decouple write vs use)
                         hpm_memory_enabled = getattr(model, 'hpm_memory_enabled', False)
-                        if hasattr(model, 'hpm_add_solved_task') and (model.use_hpm or hpm_memory_enabled):
+                        has_hpm_method = hasattr(model, 'hpm_add_solved_task')
+                        hpm_enabled_check = model.use_hpm or hpm_memory_enabled
+                        
+                        # DIAGNOSTIC: Track why HPM buffer writes may be skipped
+                        if not has_hpm_method:
+                            epoch_diagnostics['hpm_skipped_no_method'] = epoch_diagnostics.get('hpm_skipped_no_method', 0) + 1
+                        elif not hpm_enabled_check:
+                            epoch_diagnostics['hpm_skipped_not_enabled'] = epoch_diagnostics.get('hpm_skipped_not_enabled', 0) + 1
+                        
+                        if has_hpm_method and hpm_enabled_check:
                             # Prefer a stable task id so retrieval isn't polluted by per-sample ids
                             task_id = sample_task_id if sample_task_id is not None else f"epoch{epoch}_batch{batch_idx}_sample{i}"
                             
@@ -3481,7 +3491,14 @@ def save_checkpoint(
     config: dict,
     path: str,
 ):
-    """Save training checkpoint including HPM dynamic buffers."""
+    """Save training checkpoint including HPM dynamic buffers.
+    
+    HPM buffers are saved in TWO locations:
+    1. Inside the checkpoint file (for atomic resume)
+    2. Separate files at hpm_buffer_path (for clear versioning and inference)
+    """
+    import time
+    
     checkpoint = {
         'epoch': epoch,
         'global_step': global_step,
@@ -3495,17 +3512,58 @@ def save_checkpoint(
     
     # Save HPM dynamic buffers using canonical state_dict API (P1 patch)
     # These are critical for continual learning - they store solved task memories!
-    if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
-        if len(model.hpm_instance_buffer) > 0:
-            # Use canonical state_dict for consistency
-            checkpoint['hpm_instance_buffer'] = model.hpm_instance_buffer.state_dict()
-            print(f"  HPM Instance Buffer: {len(model.hpm_instance_buffer)} entries saved")
+    # Jan 2026: Always log buffer status for debugging
+    hpm_instance_exists = hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None
+    hpm_procedural_exists = hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None
     
-    if hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None:
-        if len(model.hpm_procedural_buffer) > 0:
+    # Get HPM buffer path from config (Jan 2026)
+    hpm_buffer_path = config.get('model', {}).get('hpm_buffer_path', None)
+    hpm_buffer_save_freq = config.get('model', {}).get('hpm_buffer_save_frequency', 1)
+    should_save_separate_buffers = hpm_buffer_path and ((epoch + 1) % hpm_buffer_save_freq == 0)
+    
+    if hpm_instance_exists:
+        buf_len = len(model.hpm_instance_buffer)
+        if buf_len > 0:
             # Use canonical state_dict for consistency
-            checkpoint['hpm_procedural_buffer'] = model.hpm_procedural_buffer.state_dict()
-            print(f"  HPM Procedural Buffer: {len(model.hpm_procedural_buffer)} entries saved")
+            buffer_state = model.hpm_instance_buffer.state_dict()
+            buffer_state['save_timestamp'] = time.time()
+            buffer_state['save_epoch'] = epoch
+            checkpoint['hpm_instance_buffer'] = buffer_state
+            print(f"  HPM Instance Buffer: {buf_len} entries SAVED")
+            
+            # Also save to separate path (Jan 2026)
+            if should_save_separate_buffers:
+                hpm_dir = Path(hpm_buffer_path)
+                hpm_dir.mkdir(parents=True, exist_ok=True)
+                instance_path = hpm_dir / "instance_buffer.pt"
+                torch.save(buffer_state, instance_path)
+                print(f"    → Saved to: {instance_path}")
+        else:
+            print(f"  HPM Instance Buffer: 0 entries (empty, not saved)")
+    else:
+        print(f"  HPM Instance Buffer: NOT INITIALIZED (check use_hpm config)")
+    
+    if hpm_procedural_exists:
+        buf_len = len(model.hpm_procedural_buffer)
+        if buf_len > 0:
+            # Use canonical state_dict for consistency
+            buffer_state = model.hpm_procedural_buffer.state_dict()
+            buffer_state['save_timestamp'] = time.time()
+            buffer_state['save_epoch'] = epoch
+            checkpoint['hpm_procedural_buffer'] = buffer_state
+            print(f"  HPM Procedural Buffer: {buf_len} entries SAVED")
+            
+            # Also save to separate path (Jan 2026)
+            if should_save_separate_buffers:
+                hpm_dir = Path(hpm_buffer_path)
+                hpm_dir.mkdir(parents=True, exist_ok=True)
+                procedural_path = hpm_dir / "procedural_buffer.pt"
+                torch.save(buffer_state, procedural_path)
+                print(f"    → Saved to: {procedural_path}")
+        else:
+            print(f"  HPM Procedural Buffer: 0 entries (empty, not saved)")
+    else:
+        print(f"  HPM Procedural Buffer: NOT INITIALIZED (check use_hpm and use_hyperlora config)")
     
     torch.save(checkpoint, path)
     print(f"  Saved checkpoint to {path}")
@@ -4554,6 +4612,19 @@ Config Overrides:
         print(f"\n{'='*60}")
         print(f"STAGGERED MODULE CONTRIBUTIONS (Prevents Memory Spike)")
         print(f"{'='*60}")
+        
+        # =============================================================
+        # CRITICAL CONFIG VALIDATION (from META_LEARNING_INFERENCE_GUIDE.md)
+        # =============================================================
+        # HyperLoRA REQUIRES support_features from context encoding
+        # Without these, HyperLoRA is loaded but never generates LoRA deltas!
+        if use_hyperlora and not (use_solver_context or use_cross_attention_context):
+            print(f"  [CRITICAL WARNING] HyperLoRA enabled but no context source!")
+            print(f"    use_hyperlora=True BUT use_solver_context=False AND use_cross_attention_context=False")
+            print(f"    HyperLoRA will be SILENTLY INACTIVE - LoRA deltas never generated!")
+            print(f"    FIX: Enable at least one of use_solver_context or use_cross_attention_context")
+            print(f"  " + "="*56)
+        
         if use_hyperlora:
             if start_epoch >= meta_learning_start_epoch:
                 model.hyperlora_active = True
@@ -5556,12 +5627,23 @@ Config Overrides:
                 tasks_added = diagnostics.get('hpm_tasks_added', 0)
                 skipped_no_support = diagnostics.get('hpm_add_skipped_no_support_features', 0)
                 duplicates_skipped = diagnostics.get('hpm_duplicate_skipped', 0)
-                if tasks_added > 0 or skipped_no_support > 0 or duplicates_skipped > 0:
-                    print(f"  HPM Tasks Added (exact matches): {tasks_added}")
-                    if duplicates_skipped > 0:
-                        print(f"    Duplicates skipped (same task, multiple matches): {duplicates_skipped}")
-                    if skipped_no_support > 0:
-                        print(f"    Skipped (no support_features): {skipped_no_support}")
+                skipped_no_method = diagnostics.get('hpm_skipped_no_method', 0)
+                skipped_not_enabled = diagnostics.get('hpm_skipped_not_enabled', 0)
+                
+                # Always show HPM status for debugging (Jan 2026 fix)
+                print(f"  HPM Tasks Added (exact matches): {tasks_added}")
+                if duplicates_skipped > 0:
+                    print(f"    Duplicates skipped (same task, multiple matches): {duplicates_skipped}")
+                if skipped_no_support > 0:
+                    print(f"    ⚠️ Skipped (no support_features): {skipped_no_support}")
+                if skipped_no_method > 0:
+                    print(f"    ⚠️ Skipped (model lacks hpm_add_solved_task): {skipped_no_method}")
+                if skipped_not_enabled > 0:
+                    print(f"    ⚠️ Skipped (use_hpm=False AND hpm_memory_enabled=False): {skipped_not_enabled}")
+                if tasks_added == 0 and (skipped_no_support + skipped_no_method + skipped_not_enabled) == 0:
+                    # No exact matches occurred this epoch
+                    exact_matches = diagnostics.get('exact_match_count', train_losses.get('exact_match', 0))
+                    print(f"    (No exact matches this epoch: {exact_matches})")
                 
                 # Show HPM retrieval quality stats (P1 observability patch)
                 hpm_retrieval_count = diagnostics.get('hpm_retrieval_count', 0)
@@ -6057,6 +6139,14 @@ Config Overrides:
                     print(f"  LOO Accuracy (N-1→Nth): {avg_loo_accuracy:.1%}")
                     print(f"  LOO Holdouts/batch: {avg_holdouts:.1f}")
                     print(f"  LOO Batches: {loo_batch_count} computed, {loo_skipped} skipped")
+                    
+                    # Alert if LOO skipped > 50% of batches (from META_LEARNING_INFERENCE_GUIDE.md)
+                    total_loo_attempts = loo_batch_count + loo_skipped
+                    if total_loo_attempts > 0:
+                        loo_skip_pct = loo_skipped / total_loo_attempts * 100
+                        if loo_skip_pct > 50:
+                            print(f"    [ALERT] LOO skipped {loo_skip_pct:.0f}% of batches! (>50% threshold)")
+                            print(f"    [!] Check: min_pairs_for_loo setting, data loader pair count")
                     
                     # Interpret LOO accuracy
                     if avg_loo_accuracy > 0.8:
@@ -6740,6 +6830,28 @@ Config Overrides:
                 eval_model = eval_model.to(device)
             else:
                 eval_model = model
+            
+            # CRITICAL FIX (Jan 2026): Apply inference staging from YAML config.
+            # This reads from config['inference']['meta_learning'] section and handles:
+            # - Empty HPM buffers gracefully (falls back to static banks)
+            # - Untrained HyperLoRA gracefully (falls back to base model)
+            # - Consistent flags across eval and inference paths
+            try:
+                from sci_arc.utils.inference_staging import apply_inference_staging
+                active_modules = apply_inference_staging(eval_model, config, verbose=False)
+            except ImportError:
+                # Fallback to hardcoded flags if helper not available
+                if hasattr(eval_model, 'hyperlora_active'):
+                    eval_model.hyperlora_active = True
+                if hasattr(eval_model, 'use_hpm'):
+                    eval_model.use_hpm = True
+                if hasattr(eval_model, 'hpm_memory_enabled'):
+                    eval_model.hpm_memory_enabled = True
+                if hasattr(eval_model, 'solver_context_active'):
+                    eval_model.solver_context_active = True
+                if hasattr(eval_model, 'cross_attention_active'):
+                    eval_model.cross_attention_active = True
+                active_modules = {'hyperlora': True, 'hpm': True, 'solver_context': True, 'cross_attention': True}
             
             eval_metrics = evaluate(eval_model, eval_loader, device, temperature=eval_temp)
             

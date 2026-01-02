@@ -111,6 +111,7 @@ class RLANConfig:
     hyperlora_scaling: float = 1.0
     hyperlora_dropout: float = 0.0
     hyperlora_init_scale: float = 0.1  # FIXED: Was 0.01, increased for stronger meta-learning signal
+    hyperlora_max_norm: float = 1.0    # STABILITY FIX: Clamp LoRA delta L2 norm (was 3.0, caused collapse)
     
     # HPM (Hierarchical Primitive Memory v2) settings
     use_hpm: bool = False                    # Enable HPM for continual learning
@@ -399,6 +400,8 @@ class RLAN(nn.Module):
             self._hyperlora_scaling = config.hyperlora_scaling if config else 1.0
             self._hyperlora_dropout = config.hyperlora_dropout if config else 0.0
             self._hyperlora_init_scale = config.hyperlora_init_scale if config else 0.01
+            # STABILITY FIX (Jan 2026): Pass lora_max_norm from YAML to prevent training collapse
+            self._hyperlora_max_norm = config.hyperlora_max_norm if config and hasattr(config, 'hyperlora_max_norm') else 1.0
             hyperlora_config = HyperLoRAConfig(
                 hidden_dim=hidden_dim,
                 context_dim=hidden_dim,
@@ -406,6 +409,7 @@ class RLAN(nn.Module):
                 scaling=self._hyperlora_scaling,
                 dropout=self._hyperlora_dropout,
                 init_scale=self._hyperlora_init_scale,
+                lora_max_norm=self._hyperlora_max_norm,  # Stability fix: clamp LoRA delta norm
             )
             self.hyper_lora = HyperLoRA(config=hyperlora_config)
         else:

@@ -873,20 +873,34 @@ def _format_summary(summary: Dict, correct: int, incorrect: int, use_tta: bool, 
     return '\n'.join(lines)
 
 
-def load_model(checkpoint_path: str, device: torch.device) -> RLAN:
-    """Load RLAN model from checkpoint."""
+def load_model(checkpoint_path: str, device: torch.device, config_override: Optional[Dict] = None) -> Tuple[RLAN, Dict]:
+    """
+    Load RLAN model from checkpoint with full config support.
+    
+    Args:
+        checkpoint_path: Path to model checkpoint
+        device: Device to load model to
+        config_override: Optional config dict to override checkpoint config
+        
+    Returns:
+        Tuple of (model, full_config_dict)
+    """
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
-    # Get model config
+    # Get full config (not just model section)
+    full_config = {}
     if 'config' in checkpoint:
-        model_config = checkpoint['config']
-        if isinstance(model_config, dict) and 'model' in model_config:
-            model_config = model_config['model']
-    else:
-        model_config = {}
+        full_config = checkpoint['config'] if isinstance(checkpoint['config'], dict) else {}
     
-    # Create model
+    # Override with provided config if any
+    if config_override:
+        full_config.update(config_override)
+    
+    # Extract model config section
+    model_config = full_config.get('model', {})
+    
+    # Create model with FULL config (including HyperLoRA, HPM, etc.)
     model = RLAN(
         hidden_dim=model_config.get('hidden_dim', 128),
         num_colors=model_config.get('num_colors', 10),
@@ -895,22 +909,75 @@ def load_model(checkpoint_path: str, device: torch.device) -> RLAN:
         num_predicates=model_config.get('num_predicates', 8),
         num_solver_steps=model_config.get('num_solver_steps', 6),
         use_act=model_config.get('use_act', False),
+        # HyperLoRA config
+        use_hyperlora=model_config.get('use_hyperlora', False),
+        hyperlora_rank=model_config.get('hyperlora_rank', 8),
+        hyperlora_scaling=model_config.get('hyperlora_scaling', 1.0),
+        # HPM config
+        use_hpm=model_config.get('use_hpm', False),
+        hpm_top_k=model_config.get('hpm_top_k', 2),
+        hpm_use_instance_bank=model_config.get('hpm_use_instance_bank', False),
+        hpm_use_procedural_bank=model_config.get('hpm_use_procedural_bank', False),
+        # Solver context
+        use_solver_context=model_config.get('use_solver_context', False),
+        solver_context_heads=model_config.get('solver_context_heads', 4),
+        # Cross-attention
+        use_cross_attention_context=model_config.get('use_cross_attention_context', False),
+        spatial_downsample=model_config.get('spatial_downsample', 8),
+        # DSC/MSRE
+        use_dsc=model_config.get('use_dsc', True),
+        use_msre=model_config.get('use_msre', True),
     )
     
     # Load weights
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     elif 'state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['state_dict'])
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
     else:
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=False)
+    
+    # Load HPM dynamic buffers if present
+    if 'hpm_instance_buffer' in checkpoint:
+        if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
+            try:
+                model.hpm_instance_buffer.load_state_dict(checkpoint['hpm_instance_buffer'])
+                print(f"  Loaded HPM instance buffer ({len(model.hpm_instance_buffer)} entries)")
+            except Exception as e:
+                print(f"  Warning: Could not load HPM instance buffer: {e}")
+    
+    if 'hpm_procedural_buffer' in checkpoint:
+        if hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None:
+            try:
+                model.hpm_procedural_buffer.load_state_dict(checkpoint['hpm_procedural_buffer'])
+                print(f"  Loaded HPM procedural buffer ({len(model.hpm_procedural_buffer)} entries)")
+            except Exception as e:
+                print(f"  Warning: Could not load HPM procedural buffer: {e}")
     
     model = model.to(device)
     model.eval()
     
+    # Apply inference staging from config
+    try:
+        from sci_arc.utils.inference_staging import apply_inference_staging
+        active_modules = apply_inference_staging(model, full_config, verbose=True)
+    except ImportError:
+        print("Warning: inference_staging helper not available, using defaults")
+        # Fallback: enable all meta-learning modules
+        if hasattr(model, 'hyperlora_active'):
+            model.hyperlora_active = True
+        if hasattr(model, 'use_hpm'):
+            model.use_hpm = True
+        if hasattr(model, 'hpm_memory_enabled'):
+            model.hpm_memory_enabled = True
+        if hasattr(model, 'solver_context_active'):
+            model.solver_context_active = True
+        if hasattr(model, 'cross_attention_active'):
+            model.cross_attention_active = True
+    
     print(f"Loaded model from epoch {checkpoint.get('epoch', 'unknown')}")
     
-    return model
+    return model, full_config
 
 
 def main():
@@ -1005,14 +1072,14 @@ def main():
     if torch.cuda.is_available():
         print(f"CUDA device: {torch.cuda.get_device_name(0)}")
     
-    # Load config
+    # Load config from YAML if provided
     config = {}
     if args.config:
         with open(args.config, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
     
-    # Load model
-    model = load_model(args.checkpoint, device)
+    # Load model with full config and HPM buffer restoration
+    model, full_config = load_model(args.checkpoint, device, config_override=config if config else None)
     
     # =============================================================
     # APPLY INFERENCE OVERRIDES (Dec 2025)

@@ -157,6 +157,11 @@ model:
   hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
   hyperlora_dropout: 0.0     # Dropout on LoRA activations
   hyperlora_init_scale: 0.1  # INCREASED: Was 0.01, now 0.1 for stronger meta-learning signal
+  
+  # STABILITY FIX (Jan 2026): LoRA norm clamping to prevent training collapse
+  # Production run showed: LoRA norm 0.793→1.714, accuracy 96%→48% at epoch 41
+  # Mathematical basis: ||ΔW||_F > 1.0 causes GRU gate saturation → vanishing gradients
+  hyperlora_max_norm: 1.0    # Hard clamp per-sample LoRA delta L2 norm (was 3.0, caused collapse)
 
   # =============================================================
   # HIERARCHICAL PRIMITIVE MEMORY (HPM v2) - Dec 2025
@@ -327,10 +332,11 @@ training:
   # Per-module LR boosting
   # NOTE: Set to 1.0 for stable training. Higher values may cause NaN.
   # HyperLoRA benefits from higher LR to learn meta-weight prediction faster.
-  # MIDDLE GROUND (Dec 2025): Reduced from 10.0 to 3.0 for smoother staged training
+  # FIX (Jan 2026): Reduced from 3.0 to 1.0 - caused training collapse at epoch 41
+  # Root cause: LoRA norm grew 0.793→1.714, exceeding stable regime (< 1.0)
   dsc_lr_multiplier: 1.0
   msre_lr_multiplier: 1.0
-  hyperlora_lr_multiplier: 3.0   # 3x base LR (was 10x, caused instability)
+  hyperlora_lr_multiplier: 1.0   # 1x base LR (was 3x, caused training collapse)
   
   # Temperature for DSC attention
   temperature_start: 1.0
@@ -685,6 +691,14 @@ monitoring:
   entropy_ratio_critical: 5.0 # Critical if > 5x
   stop_value_warning: 0.15    # Warn if stop value gap > 0.15
   stop_value_critical: 0.25   # Critical if > 0.25
+  
+  # STABILITY FIX (Jan 2026): Tightened thresholds based on production collapse
+  # Production collapse: LoRA norm grew 0.793→1.714, accuracy 96%→48%
+  # Previous thresholds (2.0/5.0/10.0) were too loose.
+  lora_norm_warn: 1.0         # Warn if LoRA norm EMA > 1.0 (was 2.0)
+  lora_norm_critical: 1.5     # Critical if > 1.5 (was 5.0)
+  lora_norm_kill: 2.0         # Abort if > 2.0 (was 10.0)
+  nan_batches_abort: 30       # Abort epoch if > 30 NaN batches (production had 60-100)
 
 logging:
   log_every: 1

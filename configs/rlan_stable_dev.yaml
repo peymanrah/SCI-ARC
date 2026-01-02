@@ -65,7 +65,7 @@ model:
   
   max_clues: 7
   num_predicates: 32  # More predicates for diversity
-  num_solver_steps: 5   # Reduced from 6 to save ~150MB (logs showed best step was 4 anyway)
+  num_solver_steps: 7   # Increased from 5 for more iteration capacity (user request Jan 2026)
   
   use_act: false       # DISABLED
   dropout: 0.1
@@ -165,6 +165,7 @@ model:
   hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
   hyperlora_dropout: 0.0     # Dropout on LoRA activations
   hyperlora_init_scale: 0.005  # NEAR-ZERO: Start as identity, warmup to 0.1 (was 0.1)
+  hyperlora_max_norm: 1.0    # STABILITY FIX: Clamp LoRA delta L2 norm (prevents collapse)
 
   # =============================================================
   # HIERARCHICAL PRIMITIVE MEMORY (HPM v2) - Dec 2025
@@ -243,25 +244,62 @@ model:
   hpm_use_instance_bank: true         # ContextEncoder cache (retrieval-augmented reasoning)
   
   # =============================================================
+  # HPM BUFFER STORAGE (Jan 2026)
+  # =============================================================
+  # Central path for HPM dynamic buffers. This is the SOURCE OF TRUTH
+  # for training and inference to ensure consistent buffer management.
+  #
+  # Default: checkpoints/{config_name}/hpm/
+  # 
+  # During training:
+  # - Buffers are saved here after each checkpoint
+  # - Separate files: instance_buffer.pt, procedural_buffer.pt
+  # - Includes timestamps for staleness detection
+  #
+  # During inference:
+  # - Pass --hpm-buffer-path or use this default
+  # - Health check warns if buffers are stale (>7 days old)
+  # - Auto-validates buffer format and dimensions
+  #
+  # OVERWRITE BEHAVIOR:
+  # - Training with same YAML OVERWRITES existing buffers
+  # - To preserve old buffers, copy them before retraining
+  # - Buffers include epoch number for versioning
+  # =============================================================
+  hpm_buffer_path: "checkpoints/rlan_stable/hpm"  # Default path for this config
+  hpm_buffer_save_frequency: 1       # Save buffers every N epochs (1=every checkpoint)
+  hpm_buffer_stale_days: 7           # Warn if buffers older than N days at inference
+  hpm_buffer_auto_load: true         # Auto-load from path on resume/inference
+  
+  # =============================================================
+  # HPM MEMORY COLLECTION (Jan 2026)
+  # =============================================================
+  # Allow buffer population before HPM is activated (staged memory build-up).
+  # This ensures buffers have content BEFORE solver-context coupling activates.
+  hpm_memory_start_epoch: 0  # Start collecting solved task memories from epoch 0
+  
+  # =============================================================
   # HPM SOLVER-CONTEXT COUPLING (Jan 2026)
   # =============================================================
   # Injects retrieved HPM embeddings as extra tokens into solver 
   # cross-attention. This directly helps iterative correction loop
   # leverage memory for faster exact match.
   #
+  # STABILITY FIX (Jan 2026): Moved to epoch 80 (was 45) to ensure:
+  # 1. HPM buffers have sufficient entries (exact matches accumulated)
+  # 2. HyperLoRA and base model are stable before adding more signal
+  # 3. Collapse window (epochs 41-61) is safely passed
+  #
   # MINIMAL DESIGN: Uses existing solver-context path + gated warmup
   # to avoid architecture changes and gradient disruption.
-  #
-  # STABILITY: Gate warmup prevents sudden gradient spikes. If instability
-  # detected (logit explosion), coupling is auto-disabled for that epoch.
   # =============================================================
   hpm_solver_context_enabled: true     # Enable HPM→solver coupling
-  hpm_solver_context_start_epoch: 45   # Activate after HPM is stable + enough exact matches
+  hpm_solver_context_start_epoch: 80   # DELAYED: Activate well after collapse window + buffer buildup
   hpm_solver_context_gate_init: 0.0    # Start with zero contribution
-  hpm_solver_context_gate_warmup_epochs: 15  # Ramp up over 15 epochs (epoch 45-60)
-  hpm_solver_context_max_tokens: 8     # Max memory tokens per sample (keep small)
-  hpm_solver_context_gate_max: 0.5     # Max gate value (cap influence)
-  hpm_solver_context_logit_clamp: 10.0 # Clamp projected memory token norms
+  hpm_solver_context_gate_warmup_epochs: 20  # Slower ramp (epoch 80-100)
+  hpm_solver_context_max_tokens: 4     # Reduced from 8 for stability
+  hpm_solver_context_gate_max: 0.3     # Reduced from 0.5 (more conservative)
+  hpm_solver_context_logit_clamp: 5.0  # Tighter clamp (was 10.0)
   hpm_solver_context_disable_on_instability: true  # Auto-disable if causes explosion
 
 training:
@@ -547,18 +585,19 @@ training:
     adjust_grad_accumulation: true  # Auto-adjust grad_accum to maintain effective batch
   
   # =============================================================
-  # AUGMENTATION EQUIVARIANCE LOSS (PHASE 4 - AFTER HYPERLORA WARMUP)
+  # AUGMENTATION EQUIVARIANCE LOSS (DISABLED - Jan 2026)
   # =============================================================
-  # Encourages consistent LoRA predictions across augmented views.
-  # 
-  # DELAYED ACTIVATION (Dec 2025): Activates at epoch 12
-  # This is AFTER HyperLoRA warmup complete (epoch 8+4=12)
-  # So we're regularizing a module that's already learned something.
+  # REASON FOR DISABLING:
+  # 1. Original deltas are DETACHED - only augmented have gradients
+  # 2. This pushes HyperLoRA toward mean behavior (over-regularization)
+  # 3. TTA consensus was only 13% anyway (not achieving equivariance)
+  # 4. Iterative backward causes gradient interference with task loss
   #
-  # GENTLE WEIGHT: Start with 0.01 (was 0.05) to not overwhelm task loss.
+  # Re-enable after fixing gradient flow (non-detached original deltas)
+  # and achieving stable training without collapse.
   # =============================================================
   equivariance_training:
-    enabled: true          # ENABLED: Auto-activates at start_epoch
+    enabled: false         # DISABLED: Causes over-regularization (see above)
     start_epoch: 16        # PHASE 4: After HyperLoRA warmup (8 + 8 = 16)
     loss_weight: 0.01      # GENTLER start (was 0.05)
     num_augmentations: 4   # Number of random augmentations per task
@@ -1005,6 +1044,46 @@ inference:
   # =============================================================
   acw_enabled: true
   acw_num_views: 8     # Number of augmented views to consider
+
+  # =============================================================
+  # INFERENCE-TIME META-LEARNING FLAGS (Jan 2026)
+  # =============================================================
+  # These flags control meta-learning modules at eval/inference time.
+  # CRITICAL: These are SEPARATE from training staging epochs!
+  #
+  # At inference, we always WANT meta-learning active (if trained).
+  # These settings allow:
+  # 1. Explicit control over what's active at eval
+  # 2. Graceful handling if buffers are empty/invalid
+  # 3. Fallback behavior for partial checkpoints
+  #
+  # Each module has:
+  # - enable: Whether to try activating (True = attempt, False = force off)
+  # - require_valid_state: If True, only activate if module has valid state
+  #   (e.g., HPM needs non-empty buffers, HyperLoRA needs trained weights)
+  # =============================================================
+  meta_learning:
+    # HyperLoRA: Task-specific weight adaptation
+    hyperlora:
+      enable: true                # Activate HyperLoRA at inference
+      require_trained: true       # Only if hyperlora params have non-zero weights
+      fallback_on_failure: true   # Fall back to base model if LoRA fails sanity check
+    
+    # HPM: Hierarchical Primitive Memory
+    hpm:
+      enable: true                # Activate HPM at inference
+      require_nonempty_buffers: true  # Only if dynamic buffers have entries
+      min_buffer_entries: 1       # Minimum entries needed to activate
+      use_static_banks: true      # Always use static (learned) banks
+      use_dynamic_banks: true     # Use dynamic (instance/procedural) if available
+    
+    # Solver Cross-Attention: Context injection at each step
+    solver_context:
+      enable: true                # Activate solver cross-attention at inference
+    
+    # Cross-Attention Injector: Spatial context injection  
+    cross_attention:
+      enable: true                # Activate cross-attention injector at inference
 
 hardware:
   device: "cuda"
