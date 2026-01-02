@@ -6061,7 +6061,8 @@ Config Overrides:
             # Stop predictor weight health (variance near zero can indicate freezing/collapse)
             stop_pred_var = diagnostics.get('stop_predictor_weight_variance', 0.0)
             # FIX (Jan 2026): Handle NaN (module missing) vs 0.0 (actual zero variance)
-            if math.isnan(stop_pred_var):
+            import math as _math  # Local import to avoid scope issues
+            if _math.isnan(stop_pred_var):
                 print(f"  StopPred Weight Var: N/A (module not present)")
             else:
                 print(f"  StopPred Weight Var: {stop_pred_var:.2e}")
