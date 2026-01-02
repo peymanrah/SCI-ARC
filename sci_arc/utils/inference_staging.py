@@ -112,8 +112,10 @@ def check_hpm_buffer_validity(model: nn.Module, min_entries: int = 1) -> Tuple[b
         'procedural': 0,
     }
     
-    if not hasattr(model, 'use_hpm') or not model.use_hpm:
-        return False, "HPM not enabled in model", buffer_sizes
+    # NOTE: Do not require model.use_hpm=True here.
+    # Inference staging may be called specifically to decide whether to enable HPM.
+    if not hasattr(model, 'hpm') or model.hpm is None:
+        return False, "HPM module not present", buffer_sizes
     
     if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
         buffer_sizes['instance'] = len(model.hpm_instance_buffer)
@@ -155,6 +157,12 @@ def apply_inference_staging(
         print("\n" + "="*60)
         print("INFERENCE-TIME META-LEARNING CONFIGURATION")
         print("="*60)
+
+    # ===== HyperLoRA Sanity Check (LOO-style) =====
+    # These flags are consumed inside RLAN.forward() when running in eval/inference.
+    inference_cfg = config.get('inference', {})
+    model.loo_sanity_check_enabled = bool(inference_cfg.get('loo_sanity_check', False))
+    model.loo_sanity_threshold = float(inference_cfg.get('loo_threshold', 0.9))
     
     # ===== HyperLoRA =====
     hyperlora_cfg = meta_config['hyperlora']
@@ -186,6 +194,7 @@ def apply_inference_staging(
     # ===== HPM =====
     hpm_cfg = meta_config['hpm']
     if hpm_cfg['enable']:
+        # Allow HPM to be enabled even if model.use_hpm was False (staging override).
         if hpm_cfg['require_nonempty_buffers'] and hpm_cfg['use_dynamic_banks']:
             is_valid, reason, sizes = check_hpm_buffer_validity(model, hpm_cfg['min_buffer_entries'])
             if is_valid:
@@ -223,7 +232,8 @@ def apply_inference_staging(
     
     # ===== Solver Cross-Attention =====
     solver_ctx_cfg = meta_config['solver_context']
-    if solver_ctx_cfg['enable'] and hasattr(model, 'solver') and hasattr(model.solver, 'use_context'):
+    # FIX: Check for use_solver_context (the actual attribute name in RecursiveSolver)
+    if solver_ctx_cfg['enable'] and hasattr(model, 'solver') and getattr(model.solver, 'use_solver_context', False):
         model.solver_context_active = True
         active_modules['solver_context'] = True
         if verbose:
@@ -237,7 +247,14 @@ def apply_inference_staging(
     
     # ===== Cross-Attention Injector =====
     cross_attn_cfg = meta_config['cross_attention']
-    if cross_attn_cfg['enable'] and hasattr(model, 'cross_attention_injector'):
+    # FIX: Check for context_injector (the actual attribute name in RLAN)
+    # Also check if it's specifically a CrossAttentionInjector (not FiLM ContextInjector)
+    has_cross_attn_injector = (
+        hasattr(model, 'context_injector') and 
+        model.context_injector is not None and
+        type(model.context_injector).__name__ == 'CrossAttentionInjector'
+    )
+    if cross_attn_cfg['enable'] and has_cross_attn_injector:
         model.cross_attention_active = True
         active_modules['cross_attention'] = True
         if verbose:
@@ -246,7 +263,7 @@ def apply_inference_staging(
         model.cross_attention_active = False
         active_modules['cross_attention'] = False
         if verbose:
-            reason = "config: enable=False" if not cross_attn_cfg['enable'] else "module not present"
+            reason = "config: enable=False" if not cross_attn_cfg['enable'] else "module not present (using FiLM)"
             print(f"[✗] Cross-Attention Injector: DISABLED ({reason})")
     
     if verbose:

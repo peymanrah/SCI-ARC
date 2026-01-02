@@ -38,7 +38,7 @@ import yaml
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from sci_arc.models import RLAN
+from sci_arc.models import RLAN, RLANConfig
 from sci_arc.data import ARCDataset
 from sci_arc.data.dataset import collate_sci_arc  # CRITICAL: Use same collate as training!
 from sci_arc.evaluation import (
@@ -900,8 +900,9 @@ def load_model(checkpoint_path: str, device: torch.device, config_override: Opti
     # Extract model config section
     model_config = full_config.get('model', {})
     
-    # Create model with FULL config (including HyperLoRA, HPM, etc.)
-    model = RLAN(
+    # Create model using RLANConfig for proper constructor compatibility
+    # FIX (Jan 2026): RLAN.__init__ expects config=RLANConfig, not individual kwargs
+    rlan_config = RLANConfig(
         hidden_dim=model_config.get('hidden_dim', 128),
         num_colors=model_config.get('num_colors', 10),
         num_classes=model_config.get('num_classes', 10),
@@ -928,6 +929,7 @@ def load_model(checkpoint_path: str, device: torch.device, config_override: Opti
         use_dsc=model_config.get('use_dsc', True),
         use_msre=model_config.get('use_msre', True),
     )
+    model = RLAN(config=rlan_config)
     
     # Load weights
     if 'model_state_dict' in checkpoint:
@@ -957,10 +959,14 @@ def load_model(checkpoint_path: str, device: torch.device, config_override: Opti
     model = model.to(device)
     model.eval()
     
-    # Apply inference staging from config
+    # Apply inference staging from config with HPM buffer loading and staleness checks
+    # This honors hpm_buffer_auto_load, hpm_buffer_path, and hpm_buffer_stale_days from YAML
     try:
-        from sci_arc.utils.inference_staging import apply_inference_staging
-        active_modules = apply_inference_staging(model, full_config, verbose=True)
+        from sci_arc.utils.inference_staging import apply_inference_staging_with_hpm_loading
+        staging_results = apply_inference_staging_with_hpm_loading(
+            model, full_config, checkpoint=checkpoint, verbose=True
+        )
+        active_modules = staging_results.get('staging', {})
     except ImportError:
         print("Warning: inference_staging helper not available, using defaults")
         # Fallback: enable all meta-learning modules
@@ -992,8 +998,10 @@ def main():
                         help='Path to evaluation data')
     parser.add_argument('--output', type=str, default='./evaluation_results',
                         help='Output directory for results')
-    parser.add_argument('--use-tta', action='store_true',
-                        help='Use test-time augmentation (8 dihedral transforms)')
+    parser.add_argument('--use-tta', action='store_true', default=None,
+                        help='Use test-time augmentation (default: from YAML inference.use_tta, or False)')
+    parser.add_argument('--no-tta', action='store_true',
+                        help='Force disable TTA (overrides YAML)')
     parser.add_argument('--detailed-output', action='store_true',
                         help='Save detailed prediction vs reference for each task')
     parser.add_argument('--visualize', action='store_true',
@@ -1004,8 +1012,8 @@ def main():
                         help='Device to use (cuda/cpu)')
     parser.add_argument('--batch-size', type=int, default=16,
                         help='Batch size for evaluation')
-    parser.add_argument('--temperature', type=float, default=0.5,
-                        help='Temperature for softmax (default 0.5 matches training/inference defaults)')
+    parser.add_argument('--temperature', type=float, default=None,
+                        help='Temperature for softmax (default: from YAML inference.temperature, or 0.5)')
     
     # =============================================================
     # BEST-STEP SELECTION & SOLVER OVERRIDE (Dec 2025)
@@ -1021,15 +1029,44 @@ def main():
     # TTA CONFIGURATION (Dec 2025)
     # =============================================================
     # Match training evaluation settings for consistent results
-    parser.add_argument('--num-dihedral', type=int, default=8,
-                        help='Number of dihedral transforms for TTA (1-8, default 8 = full D4 group)')
-    parser.add_argument('--num-color-perms', type=int, default=4,
-                        help='Number of color permutations per dihedral (default 4 to match training)')
+    parser.add_argument('--num-dihedral', type=int, default=None,
+                        help='Number of dihedral transforms for TTA (default: from YAML, or 8)')
+    parser.add_argument('--num-color-perms', type=int, default=None,
+                        help='Number of color permutations per dihedral (default: from YAML, or 4)')
     parser.add_argument('--no-color-perms', action='store_true',
                         help='Disable color permutations in TTA (only use dihedral transforms)')
     args = parser.parse_args()
     
-    # Determine TTA settings
+    # =========================================================================
+    # YAML FALLBACK FOR INFERENCE SETTINGS (Jan 2026 Fix)
+    # =========================================================================
+    # Load YAML config first to get inference defaults
+    # NOTE: If no --config provided, we'll also try checkpoint's embedded config later
+    yaml_config = {}
+    if args.config:
+        with open(args.config, 'r', encoding='utf-8') as f:
+            yaml_config = yaml.safe_load(f) or {}
+    inference_cfg = yaml_config.get('inference', {})
+    
+    # Apply YAML defaults when CLI args are None
+    if args.temperature is None:
+        args.temperature = float(inference_cfg.get('temperature', 0.5))
+    if args.num_dihedral is None:
+        args.num_dihedral = int(inference_cfg.get('num_dihedral', 8))
+    if args.num_color_perms is None:
+        args.num_color_perms = int(inference_cfg.get('num_color_perms', 4))
+    if args.num_steps is None:
+        args.num_steps = inference_cfg.get('num_steps_override', None)
+    
+    # TTA: CLI takes priority, then YAML, then default False
+    # --no-tta forces disable; --use-tta forces enable; otherwise use YAML
+    if args.no_tta:
+        args.use_tta = False
+    elif args.use_tta is None:
+        args.use_tta = bool(inference_cfg.get('use_tta', False))
+    # else: args.use_tta was explicitly set via --use-tta (True)
+    
+    # Determine TTA settings (after YAML fallback applied)
     num_color_perms = 1 if args.no_color_perms else args.num_color_perms
     num_dihedral = args.num_dihedral
     total_views = num_dihedral * num_color_perms if args.use_tta else 1
@@ -1072,14 +1109,34 @@ def main():
     if torch.cuda.is_available():
         print(f"CUDA device: {torch.cuda.get_device_name(0)}")
     
-    # Load config from YAML if provided
-    config = {}
-    if args.config:
-        with open(args.config, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+    # Use the yaml_config we already loaded for inference fallback
+    config = yaml_config
     
     # Load model with full config and HPM buffer restoration
     model, full_config = load_model(args.checkpoint, device, config_override=config if config else None)
+    
+    # =========================================================================
+    # POST-LOAD FALLBACK: Use checkpoint's config when no --config provided
+    # =========================================================================
+    # FIX (Jan 2026): If user didn't pass --config, we should still honor the
+    # inference settings that were used during training (stored in checkpoint).
+    # This ensures evaluate_rlan.py without --config uses training's temperature.
+    # =========================================================================
+    if not args.config and full_config:
+        ckpt_inference_cfg = full_config.get('inference', {})
+        # Only update if we used hardcoded defaults (0.5, 8, 4)
+        # These magic numbers match the argparse defaults in YAML fallback section
+        if args.temperature == 0.5 and 'temperature' in ckpt_inference_cfg:
+            args.temperature = float(ckpt_inference_cfg.get('temperature', 0.5))
+            print(f"[CHECKPOINT] Using temperature from checkpoint: {args.temperature}")
+        if args.num_dihedral == 8 and 'num_dihedral' in ckpt_inference_cfg:
+            args.num_dihedral = int(ckpt_inference_cfg.get('num_dihedral', 8))
+        if args.num_color_perms == 4 and 'num_color_perms' in ckpt_inference_cfg:
+            args.num_color_perms = int(ckpt_inference_cfg.get('num_color_perms', 4))
+        # Recalculate TTA views if updated
+        num_color_perms = 1 if args.no_color_perms else args.num_color_perms
+        num_dihedral = args.num_dihedral
+        total_views = num_dihedral * num_color_perms if args.use_tta else 1
     
     # =============================================================
     # APPLY INFERENCE OVERRIDES (Dec 2025)

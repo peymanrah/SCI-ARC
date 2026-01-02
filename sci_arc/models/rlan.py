@@ -614,10 +614,12 @@ class RLAN(nn.Module):
             
             if z_context_flat is not None:
                 # Prepare dynamic buffers if available
-                # TODO 1 FIX: Use retrieve_batch for per-sample retrieval (not first-sample only)
+                # FIX: Check hpm_memory_enabled to support STATIC-ONLY mode from inference staging
+                # When hpm_memory_enabled=False, we skip dynamic buffer retrieval but still use static banks
+                hpm_memory_enabled = getattr(self, 'hpm_memory_enabled', True)
                 dynamic_buffers = {}
                 
-                if self.hpm_instance_buffer is not None and len(self.hpm_instance_buffer) > 0:
+                if hpm_memory_enabled and self.hpm_instance_buffer is not None and len(self.hpm_instance_buffer) > 0:
                     keys, values, stats = self.hpm_instance_buffer.retrieve_batch(
                         z_context_flat, k=self._hpm_config.dynamic_retrieval_k
                     )
@@ -628,7 +630,7 @@ class RLAN(nn.Module):
                     if stats:
                         hpm_retrieval_stats['instance'] = stats
                 
-                if self.hpm_procedural_buffer is not None and len(self.hpm_procedural_buffer) > 0:
+                if hpm_memory_enabled and self.hpm_procedural_buffer is not None and len(self.hpm_procedural_buffer) > 0:
                     keys, values, stats = self.hpm_procedural_buffer.retrieve_batch(
                         z_context_flat, k=self._hpm_config.dynamic_retrieval_k
                     )
@@ -713,6 +715,45 @@ class RLAN(nn.Module):
             if support_features is not None:
                 # HyperLoRA expects (B, N, D, H, W) and returns weight deltas
                 lora_deltas = self.hyper_lora(support_features)
+
+                # Optional inference-time LOO sanity check (Jan 2026)
+                # If predicted LoRA deltas cannot solve support pairs, mask them out.
+                # This avoids silent degradation when HyperLoRA is loaded but misbehaving.
+                if (not self.training) and getattr(self, 'loo_sanity_check_enabled', False):
+                    threshold = float(getattr(self, 'loo_sanity_threshold', 0.9))
+                    try:
+                        pass_mask, sanity_metrics = self.verify_lora_on_support(
+                            support_inputs=train_inputs,
+                            support_targets=train_outputs,
+                            support_features=support_features,
+                            lora_deltas=lora_deltas,
+                            threshold=threshold,
+                        )
+                        self._last_lora_sanity_metrics = sanity_metrics
+
+                        # Mask out LoRA deltas for failing samples (keep base model for those)
+                        if (pass_mask is not None) and (not bool(pass_mask.all().item())):
+                            # Only warn once per process to avoid log spam.
+                            if not hasattr(self, '_loo_sanity_warned'):
+                                import warnings
+                                warnings.warn(
+                                    f"[HyperLoRA] LOO sanity check failed for some samples: "
+                                    f"acc={sanity_metrics.get('sanity_check_accuracy', 0.0):.3f}, "
+                                    f"pass_rate={sanity_metrics.get('sanity_check_pass_rate', 0.0):.3f}, "
+                                    f"threshold={sanity_metrics.get('sanity_check_threshold', threshold):.2f}. "
+                                    "Masking LoRA deltas for failing samples.",
+                                    UserWarning,
+                                )
+                                self._loo_sanity_warned = True
+
+                            mask = pass_mask.to(support_features.device).float()
+                            for k, v in list(lora_deltas.items()):
+                                if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.shape[0] == mask.shape[0]:
+                                    view_shape = [mask.shape[0]] + [1] * (v.dim() - 1)
+                                    lora_deltas[k] = v * mask.view(*view_shape)
+                    except Exception:
+                        # Safety: never crash inference if sanity check fails.
+                        pass
             else:
                 # HyperLoRA is enabled but no spatial support features available
                 # This can happen if:

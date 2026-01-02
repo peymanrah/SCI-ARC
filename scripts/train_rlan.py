@@ -794,6 +794,74 @@ def get_temperature(epoch: int, config: dict) -> float:
     return temperature
 
 
+def validate_meta_learning_config(config: dict) -> None:
+    """Validate meta-learning configuration for silent failure conditions.
+    
+    FIX (Jan 2026): Add startup validation to detect config combinations
+    that will silently disable features (e.g., HyperLoRA without support features).
+    
+    Raises:
+        ValueError: If config has a fatal misconfiguration.
+    
+    Warns:
+        UserWarning: If config has a suboptimal configuration.
+    """
+    import warnings
+    
+    model_config = config.get('model', {})
+    
+    use_hyperlora = model_config.get('use_hyperlora', False)
+    use_solver_context = model_config.get('use_solver_context', False)
+    use_cross_attention_context = model_config.get('use_cross_attention_context', False)
+    use_hpm = model_config.get('use_hpm', False)
+    
+    # Check 1: HyperLoRA requires support features to work
+    if use_hyperlora and not (use_solver_context or use_cross_attention_context):
+        warnings.warn(
+            "[CONFIG WARNING] HyperLoRA is enabled but neither use_solver_context nor "
+            "use_cross_attention_context is enabled. HyperLoRA requires support features "
+            "from the context encoder to produce LoRA deltas. Without these, HyperLoRA "
+            "will be loaded (~2.8M params) but produce NO adaptation (lora_deltas=None). "
+            "Enable use_solver_context: true or use_cross_attention_context: true.",
+            UserWarning,
+            stacklevel=2
+        )
+    
+    # Check 2: HPM requires context features for queries
+    if use_hpm and not (use_solver_context or use_cross_attention_context):
+        warnings.warn(
+            "[CONFIG WARNING] HPM is enabled but neither use_solver_context nor "
+            "use_cross_attention_context is enabled. HPM requires z_context_flat "
+            "from the context encoder to query memory banks. Without these, HPM "
+            "queries will be skipped entirely.",
+            UserWarning,
+            stacklevel=2
+        )
+    
+    # Check 3: HPM dynamic banks require corresponding features
+    use_instance_bank = model_config.get('hpm_use_instance_bank', False)
+    use_procedural_bank = model_config.get('hpm_use_procedural_bank', False)
+    
+    if use_procedural_bank and not use_hyperlora:
+        warnings.warn(
+            "[CONFIG WARNING] hpm_use_procedural_bank is enabled but use_hyperlora is false. "
+            "Procedural bank stores HyperLoRA latent codes, which won't be generated.",
+            UserWarning,
+            stacklevel=2
+        )
+    
+    if use_instance_bank and not (use_solver_context or use_cross_attention_context):
+        warnings.warn(
+            "[CONFIG WARNING] hpm_use_instance_bank is enabled but context encoder won't "
+            "produce support_features. Instance bank stores context embeddings which "
+            "require use_solver_context or use_cross_attention_context.",
+            UserWarning,
+            stacklevel=2
+        )
+    
+    print("[CONFIG] Meta-learning validation: PASSED")
+
+
 def create_model(config: dict) -> RLAN:
     """Create RLAN model from config.
     
@@ -1223,8 +1291,43 @@ def compute_module_grad_norms(model: RLAN) -> Dict[str, float]:
                 msre_grad += safe_grad_norm(param)
                 msre_count += 1
         grad_norms['msre'] = (msre_grad ** 0.5) if msre_count > 0 else 0.0
-    
+
     return grad_norms
+
+
+def compute_stop_predictor_weight_variance(model: RLAN) -> float:
+    """Variance of stop predictor Linear weights.
+
+    Used to detect silent "frozen" stop predictor behavior.
+    
+    Returns:
+        float: Weight variance if module exists and variance is finite.
+               float('nan') if module is missing (to distinguish from actual zero variance).
+               0.0 if variance computation fails or is non-finite.
+    
+    FIX (Jan 2026): Return NaN when module is missing to distinguish from
+    genuine near-zero variance (which would indicate weight collapse).
+    """
+    try:
+        if not hasattr(model, 'dsc') or model.dsc is None:
+            return float('nan')  # Module missing - return NaN
+        stop_predictor = getattr(model.dsc, 'stop_predictor', None)
+        if stop_predictor is None:
+            return float('nan')  # Stop predictor missing - return NaN
+
+        weights = []
+        for module in stop_predictor.modules():
+            if isinstance(module, nn.Linear):
+                weights.append(module.weight.detach().float().reshape(-1))
+
+        if not weights:
+            return float('nan')  # No Linear layers found - return NaN
+
+        w = torch.cat(weights, dim=0)
+        var = w.var(unbiased=False).item()
+        return var if math.isfinite(var) else 0.0
+    except Exception:
+        return 0.0
 
 
 def train_epoch(
@@ -1301,6 +1404,7 @@ def train_epoch(
         'max_grad_norm_before_clip': 0.0,  # Max grad norm seen this epoch (for backoff)
         'dsc_grad_norm_sum': 0.0,           # Gradient norm flowing to DSC
         'stop_predictor_grad_norm_sum': 0.0, # Gradient norm to stop_predictor specifically
+        'stop_predictor_weight_variance': 0.0, # Variance of stop predictor weights (0 = frozen/not learning)
         'encoder_grad_norm_sum': 0.0,        # Gradient norm to encoder
         'solver_grad_norm_sum': 0.0,         # Gradient norm to solver
         'context_encoder_grad_norm_sum': 0.0, # Gradient norm to context encoder
@@ -2922,6 +3026,9 @@ def train_epoch(
     
     # Add augmentation diversity stats (CRITICAL for debugging)
     total_losses['aug_stats'] = epoch_aug_stats
+
+    # Stop predictor health diagnostic: weight variance (near-zero can indicate freezing)
+    epoch_diagnostics['stop_predictor_weight_variance'] = compute_stop_predictor_weight_variance(model)
     
     # Add training diagnostics (CRITICAL for debugging training dynamics)
     total_losses['diagnostics'] = epoch_diagnostics
@@ -3803,6 +3910,9 @@ Config Overrides:
         config['model']['num_classes'] = 10
     else:
         print(f"\nnum_classes validation: OK (10 classes for colors 0-9)")
+    
+    # Validate meta-learning config for silent failure conditions (Jan 2026)
+    validate_meta_learning_config(config)
     
     # Create model
     model = create_model(config)
@@ -5947,6 +6057,16 @@ Config Overrides:
             print(f"  Grad Norms: DSC={dsc_grad:.4f}, StopPred={stop_pred_grad:.4f}, Encoder={enc_grad:.4f}, Solver={solver_grad:.4f}")
             if ctx_grad > 0 or msre_grad > 0:
                 print(f"              ContextEnc={ctx_grad:.4f}, MSRE={msre_grad:.4f}")
+
+            # Stop predictor weight health (variance near zero can indicate freezing/collapse)
+            stop_pred_var = diagnostics.get('stop_predictor_weight_variance', 0.0)
+            # FIX (Jan 2026): Handle NaN (module missing) vs 0.0 (actual zero variance)
+            if math.isnan(stop_pred_var):
+                print(f"  StopPred Weight Var: N/A (module not present)")
+            else:
+                print(f"  StopPred Weight Var: {stop_pred_var:.2e}")
+                if stop_pred_var > 0 and stop_pred_var < 1e-10:
+                    print(f"    [!] Stop predictor weight variance near zero - may be frozen/degenerate")
             
             # Gradient flow warnings
             if dsc_grad < 0.001 and enc_grad > 0:
@@ -6836,9 +6956,13 @@ Config Overrides:
             # - Empty HPM buffers gracefully (falls back to static banks)
             # - Untrained HyperLoRA gracefully (falls back to base model)
             # - Consistent flags across eval and inference paths
+            # - HPM buffer auto-loading and staleness checks from YAML
             try:
-                from sci_arc.utils.inference_staging import apply_inference_staging
-                active_modules = apply_inference_staging(eval_model, config, verbose=False)
+                from sci_arc.utils.inference_staging import apply_inference_staging_with_hpm_loading
+                staging_results = apply_inference_staging_with_hpm_loading(
+                    eval_model, config, checkpoint=None, verbose=False
+                )
+                active_modules = staging_results.get('staging', {})
             except ImportError:
                 # Fallback to hardcoded flags if helper not available
                 if hasattr(eval_model, 'hyperlora_active'):
