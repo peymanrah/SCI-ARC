@@ -236,13 +236,16 @@ training:
   grad_explosion_cooldown_epochs: 2
   
   # LOO Training
+  # NOTE (Jan 2026): Increased divisor from 2.0 to 2.5 for 512 hidden dim.
+  # LOO does N forward passes per sample, and 512 activations are 2× heavier.
+  # With batch=28 and divisor=2.5: LOO batch ≈ 11, with grad_accum auto-adjusted.
   loo_training:
     enabled: true
     start_epoch: 24
     loss_weight: 0.05
     min_pairs_for_loo: 2
     max_loo_pairs: 4
-    batch_reduction_divisor: 2.0
+    batch_reduction_divisor: 2.5    # CHANGED: 2.0 → 2.5 for 512 memory safety
     min_batch_size: 8
     adjust_grad_accumulation: true
   
