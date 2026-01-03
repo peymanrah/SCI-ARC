@@ -454,9 +454,13 @@ data:
   stratified_seed: 42
   
   # Data loading
-  num_workers: 12
+  # OPTIMIZED for 48 vCPU system (Jan 2026):
+  # - num_workers=24 (half of vCPUs, leaves room for main process)
+  # - prefetch_factor=4 (more conservative to avoid memory pressure)
+  # - persistent_workers=true (avoids worker respawn overhead)
+  num_workers: 24
   pin_memory: true
-  prefetch_factor: 6
+  prefetch_factor: 4
   persistent_workers: true
   
   # ==========================================================================
