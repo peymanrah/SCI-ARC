@@ -44,6 +44,7 @@ from .loo_training import (
     EquivarianceConfig,
     LOOTrainingLoss,
     AugmentationEquivarianceLoss,
+    OutputEquivarianceLoss,  # Jan 2026: Output-level equiv for TTA consensus
     CombinedMetaLoss,
     create_augmented_contexts,
     AugmentedConfidenceWeighting,

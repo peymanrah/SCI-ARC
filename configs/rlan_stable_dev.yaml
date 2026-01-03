@@ -456,6 +456,16 @@ training:
   ponder_weight: 0.02        # Small cost per clue (encourages efficiency)
   entropy_ponder_weight: 0.02  # Encourages sharp attention
   
+  # NEW (Jan 2025): Variance regularization to prevent clue count collapse
+  # When std of clues_used < target_variance, applies penalty
+  clue_variance_weight: 1.0   # Weight for variance regularization
+  clue_target_variance: 0.5   # Target std for clue count across batch
+  
+  # NEW (Jan 2025): Stop logit saturation guard to prevent gradient vanishing
+  # When |stop_logit| > threshold, sigmoid saturates and gradients vanish
+  stop_saturation_weight: 0.5   # Weight for saturation penalty (penalizes extreme logits)
+  stop_saturation_threshold: 5.0  # Threshold (sigmoid(-5)≈0.007, sigmoid(5)≈0.993)
+  
   use_stablemax: true
   
   use_curriculum: false
@@ -665,6 +675,16 @@ training:
   meta_escalation:
     enabled: true                    # Set to false to disable (baseline behavior)
     
+    # =============================================================
+    # META LOSS CAPPING (Jan 2026 FIX)
+    # =============================================================
+    # Caps the combined (LOO + equiv + HPM) loss contribution to prevent
+    # meta-learning from overwhelming the primary task loss.
+    # Training logs showed 40.9% meta contribution, causing weak task learning.
+    # Target: Keep meta ≤25% of total loss.
+    meta_loss_cap_ratio: 0.25        # Max ratio of meta-loss to total loss
+    meta_loss_cap_enabled: true      # Set to false to disable capping
+    
     # When to start increasing meta-learning strength
     start_epoch: 25                  # After LOO is stable (18 + 7 epochs)
     ramp_epochs: 12                  # Gradual increase over 12 epochs
@@ -734,6 +754,36 @@ data:
   
   # CRITICAL: Ignore padding in loss
   ignore_padding_in_loss: true
+  
+  # ==========================================================================
+  # MERGED TRAINING SET (ARC-AGI-1 + ARC-AGI-2) - January 2026
+  # ==========================================================================
+  # When enabled, uses the merged training set created by:
+  #   python scripts/build_merged_training_set.py
+  #
+  # This provides MORE RULES for training (1000+ unique tasks vs 400)
+  # while ensuring NO DATA LEAKAGE to ARC-AGI-1/2 evaluation sets.
+  #
+  # WHAT IT DOES:
+  # - Loads tasks from merged_train_manifest.jsonl instead of train_path
+  # - Uses canonical dedup to exclude any task matching eval sets
+  # - Provides dev set (merged_dev_manifest.jsonl) for tuning/stopping
+  #
+  # REQUIREMENTS:
+  # 1. Run: python scripts/build_merged_training_set.py
+  # 2. Ensure merged_training_path points to output directory
+  # 3. Set use_merged_training: true
+  #
+  # WHEN FALSE (default): Uses existing train_path (ARC-AGI-1 only)
+  # WHEN TRUE: Uses merged training set from merged_training_path
+  #
+  # This is ADDITIVE - does NOT change existing data loading behavior
+  # when set to false. The original codebase remains untouched.
+  # ==========================================================================
+  use_merged_training: false  # Set to true to use ARC-AGI-1 + ARC-AGI-2 merged set
+  merged_training_path: "./data/merged_training"  # Output from build_merged_training_set.py
+  merged_dev_path: "./data/merged_training"       # Same dir, uses merged_dev_manifest.jsonl
+  merged_manifest_validation: true  # Validate cache/buffer manifest hashes match
   
   # ==========================================================================
   # DATA SAMPLING CONFIGURATION
@@ -832,12 +882,25 @@ data:
   
   cache_samples: true
   
-  # num_cached_samples is the TOTAL samples, not per-task!
-  # With 400 tasks × 50 samples = 20,000 total (250 iters/epoch @ batch 80)
-  # This is faster than 50K while providing much better task diversity.
-  num_cached_samples: 20000  # 400 tasks × 50 = 20K (250 iters/epoch @ batch 80)
+  # ==========================================================================
+  # num_cached_samples CALCULATION (Jan 2026)
+  # ==========================================================================
+  # COMPUTED DYNAMICALLY based on task count and samples_per_task:
+  #   - use_merged_training=false: 400 tasks × samples_per_task
+  #   - use_merged_training=true:  602 tasks × samples_per_task
+  #
+  # Set to 'auto' to let the code compute it, or specify explicit value.
+  # When 'auto', the code uses: detected_tasks × samples_per_task
+  #
+  # FORMULA: num_cached_samples = task_count × samples_per_task
+  #   - Default (400 tasks × 50) = 20,000
+  #   - Merged (602 tasks × 50) = 30,100
+  # ==========================================================================
+  num_cached_samples: auto  # Computed as task_count × samples_per_task
   
-  cache_path: "./cache/rlan_stable_20k_400tasks.pkl"  # DEV: 20K samples across 400 tasks
+  # Cache path includes dataset type for clarity
+  # Code will auto-update path based on use_merged_training flag
+  cache_path: "./cache/rlan_stable_agi1_400tasks.pkl"  # Updated if merged training enabled
   
   # See max_tasks vs cache_load_percent explanation above!
   # This controls RAM usage by loading a random subset of cached samples.

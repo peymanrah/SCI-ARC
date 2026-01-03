@@ -299,7 +299,18 @@ data:
   max_grid_size: 30
   ignore_padding_in_loss: true
   
-  # Use all 400 tasks with 50 samples each
+  # ==========================================================================
+  # MERGED TRAINING SET (ARC-AGI-1 + ARC-AGI-2) - January 2026
+  # ==========================================================================
+  # When enabled, uses the merged training set (602 tasks, no leakage).
+  # When disabled, uses ARC-AGI-1 only (400 tasks).
+  # ==========================================================================
+  use_merged_training: false  # Set to true to use ARC-AGI-1 + ARC-AGI-2 merged set
+  merged_training_path: "./data/merged_training"
+  merged_dev_path: "./data/merged_training"
+  merged_manifest_validation: true
+  
+  # Use all tasks with 50 samples each
   max_tasks: null
   samples_per_task: 50
   stratified_seed: 42
@@ -310,8 +321,11 @@ data:
   persistent_workers: true
   
   cache_samples: true
-  num_cached_samples: 20000
-  cache_path: "./cache/rlan_stable_20k_400tasks.pkl"  # Same cache (data unchanged)
+  # num_cached_samples computed dynamically: task_count × samples_per_task
+  # - use_merged_training=false: 400 × 50 = 20,000
+  # - use_merged_training=true:  602 × 50 = 30,100
+  num_cached_samples: auto
+  cache_path: "./cache/rlan_stable_agi1_400tasks.pkl"  # Updated if merged training enabled
   cache_load_percent: 100
   
   bucketed_batching: true

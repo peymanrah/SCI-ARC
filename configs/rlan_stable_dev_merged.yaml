@@ -1,0 +1,621 @@
+# RLAN STABLE DEV MERGED Configuration
+# =====================================
+# Configuration for training on MERGED dataset (ARC-AGI-1 + ARC-AGI-2)
+# Based on rlan_stable_dev.yaml with merged training enabled.
+#
+# USAGE:
+# 1. Build merged dataset: python scripts/build_merged_training_set.py
+# 2. Train with: python scripts/train_rlan.py configs/rlan_stable_dev_merged.yaml --resume checkpoints/rlan_stable_dev/latest.pt --reset-optimizer
+#
+# KEY CHANGES FROM rlan_stable_dev.yaml:
+# - use_merged_training: true (was false)
+# - cache_path: Updated for merged dataset
+# - num_cached_samples: auto (computed for 602 tasks)
+#
+# WARM START WORKFLOW (Jan 2026):
+# This config is designed for continuing training from epoch 30 checkpoint
+# using the --reset-optimizer flag to start fresh on merged data.
+#
+# HARDWARE TARGET: RTX 3090 (24GB VRAM), 48 virtual CPUs, 128GB RAM
+#
+# ==========================
+
+model:
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10  # colors 0-9
+  max_grid_size: 30
+  
+  max_clues: 7
+  num_predicates: 32  # More predicates for diversity
+  num_solver_steps: 7   # Increased from 5 for more iteration capacity (user request Jan 2026)
+  
+  use_act: false       # DISABLED
+  dropout: 0.1
+  
+  # =============================================================
+  # BEST-STEP SELECTION (Dec 2025)
+  # =============================================================
+  use_best_step_selection: false
+  
+  dsc_num_heads: 4
+  lcr_num_heads: 4     # Not used
+  
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+  lcr_num_freq: 8      # Not used
+  
+  # CORE MODULES ONLY (ablation validated)
+  use_context_encoder: true   # REQUIRED - learns task from demos
+  use_dsc: true               # REQUIRED - dynamic spatial cluing
+  use_msre: true              # REQUIRED - multi-scale relative encoding
+  use_lcr: false              # DISABLED - not needed for learning
+  
+  # Context injection mode
+  use_cross_attention_context: true
+  spatial_downsample: 8       # 8x8 target - preserves objects while being memory-efficient
+  use_sph: false              # DISABLED - not needed for learning
+  use_learned_pos: false      # DISABLED - sinusoidal works better
+  
+  # Solver Cross-Attention to Support Set
+  use_solver_context: true    # ENABLED - critical for iterative verification
+  solver_context_heads: 4     # Multi-head attention for diverse queries
+  
+  # =============================================================
+  # HYPER-LORA: META-LEARNING WEIGHT ADAPTATION
+  # =============================================================
+  use_hyperlora: true        # ENABLED - critical for task-specific adaptation
+  hyperlora_rank: 8          # LoRA rank (lower = fewer params, less expressive)
+  hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
+  hyperlora_dropout: 0.0     # Dropout on LoRA activations
+  hyperlora_init_scale: 0.005  # NEAR-ZERO: Start as identity, warmup to 0.1 (was 0.1)
+  hyperlora_max_norm: 1.0    # STABILITY FIX: Clamp LoRA delta L2 norm (prevents collapse)
+
+  # =============================================================
+  # HIERARCHICAL PRIMITIVE MEMORY (HPM v2)
+  # =============================================================
+  use_hpm: true                       # ENABLED: HPM with gated residual (safe warmup built-in)
+  hpm_start_epoch: 20                 # Activate HPM at epoch 20 (after equivariance @ 16, before LOO @ 24)
+  
+  # Sparse MoE Routing Configuration
+  hpm_top_k: 2                        # Number of banks to route to per sample
+  hpm_balance_weight: 0.01            # Load balancing loss weight (prevents mode collapse)
+  
+  # Static Bank Configuration
+  hpm_primitives_per_bank: 32         # Number of primitives per static bank (was 16)
+  hpm_levels_per_bank: 3              # Hierarchical levels within each bank (was 2)
+  hpm_use_cross_attention: true       # Use cross-attention aggregation
+  
+  # Dynamic Bank Configuration
+  hpm_memory_size: 10000              # Max entries in dynamic banks (enough for 10x ARC)
+  hpm_retrieval_k: 5                  # Number of neighbors to retrieve
+  
+  # Bank Selection
+  hpm_use_compositional_bank: true    # Transformations that compose
+  hpm_use_pattern_bank: true          # Holistic patterns/templates
+  hpm_use_relational_bank: true       # Spatial/logical relationships
+  hpm_use_concept_bank: false         # Domain knowledge (optional)
+  
+  # Dynamic banks
+  hpm_use_procedural_bank: true       # HyperLoRA codes (requires HyperLoRA enabled)
+  hpm_use_instance_bank: true         # ContextEncoder cache (retrieval-augmented reasoning)
+  
+  # HPM Buffer Storage
+  hpm_buffer_path: "checkpoints/rlan_stable_merged/hpm"  # Merged config path
+  hpm_buffer_save_frequency: 1
+  hpm_buffer_stale_days: 7
+  hpm_buffer_auto_load: true
+  
+  # HPM Memory Collection
+  hpm_memory_start_epoch: 0  # Start collecting solved task memories from epoch 0
+  
+  # HPM Solver-Context Coupling
+  hpm_solver_context_enabled: true
+  hpm_solver_context_start_epoch: 80
+  hpm_solver_context_gate_init: 0.0
+  hpm_solver_context_gate_warmup_epochs: 20
+  hpm_solver_context_max_tokens: 4
+  hpm_solver_context_gate_max: 0.3
+  hpm_solver_context_logit_clamp: 5.0
+  hpm_solver_context_disable_on_instability: true
+
+training:
+  max_epochs: 200  # Enough for hard tasks
+  
+  # Memory optimizations
+  use_8bit_optimizer: true    # ~75% optimizer memory savings
+  gradient_checkpointing: false  # DISABLED: Known issues
+  use_torch_compile: false
+  torch_compile_mode: 'reduce-overhead'
+  
+  batch_size: 50    # Reduced for HyperLoRA activation headroom
+  grad_accumulation_steps: 7  # Effective batch_size = 50 × 7 = 350
+  
+  learning_rate: 5.0e-4  # Works well in ablation
+  weight_decay: 0.01     # Light regularization
+  gradient_clip: 1.0     # Conservative
+  
+  # Per-module LR boosting
+  dsc_lr_multiplier: 1.0
+  msre_lr_multiplier: 1.0
+  hyperlora_lr_multiplier: 1.0   # CONSERVATIVE: Same as base
+  
+  # Temperature for DSC attention
+  temperature_start: 1.0
+  temperature_end: 0.5
+  
+  # Loss configuration - FOCAL WEIGHTED
+  loss_mode: 'focal_weighted'
+  bg_weight_cap: 1.0
+  fg_weight_cap: 6.0
+  
+  focal_gamma: 1.2
+  focal_alpha: 0.75
+  
+  # AUXILIARY LOSSES
+  lambda_entropy: 0.01
+  lambda_sparsity: 0.5
+  lambda_predicate: 0.01
+  lambda_curriculum: 0.0
+  lambda_deep_supervision: 0.0
+  lambda_act: 0.0
+  lambda_centroid_diversity: 0.3
+  
+  # Clue regularization
+  min_clues: 1.0
+  min_clue_weight: 5.0
+  ponder_weight: 0.02
+  entropy_ponder_weight: 0.02
+  
+  # Variance regularization
+  clue_variance_weight: 1.0
+  clue_target_variance: 0.5
+  
+  # Stop logit saturation guard
+  stop_saturation_weight: 0.5
+  stop_saturation_threshold: 5.0
+  
+  use_stablemax: true
+  
+  use_curriculum: false
+  curriculum_stages: []
+  
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+  
+  # NO SCHEDULER - constant LR (most stable)
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 5.0e-4
+  
+  # EMA
+  use_ema: false
+  ema_decay: 0.995
+  
+  # =============================================================
+  # STAGED META-LEARNING
+  # =============================================================
+  # NOTE FOR WARM START: These epochs are ABSOLUTE, not relative.
+  # When resuming from epoch 30, modules already activated will remain active.
+  # The training code checks: if current_epoch >= start_epoch, activate module.
+  #
+  # PHASED TRAINING COORDINATION (Jan 2026):
+  # Phase A (epochs 1-10): No meta, no aug - these start epochs are overridden
+  # Phase B (epochs 11-20): Geometric aug only - HyperLoRA still disabled by phase
+  # Phase C (epochs 21+): Full meta-learning - all modules can activate
+  #
+  # Even though meta_learning_start_epoch=21, modules won't activate earlier
+  # because phased training disable_hyperlora=true overrides until Phase C.
+  # =============================================================
+  
+  # Context path activates in Phase B (after base solver establishes)
+  solver_context_start_epoch: 11
+  cross_attention_start_epoch: 15
+  
+  # HyperLoRA activates at Phase C start (after geometric aug exposure)
+  # Note: Phase A/B disable_hyperlora=true prevents early activation
+  meta_learning_start_epoch: 21
+  
+  # HyperLoRA warmup (starts when Phase C allows activation)
+  hyperlora_warmup_epochs: 8
+  hyperlora_warmup_start_scale: 0.005
+  hyperlora_warmup_end_scale: 0.05
+  
+  # LR reduction at activation epochs
+  activation_lr_reduction: 0.5
+  activation_lr_recovery_epochs: 2
+  
+  # Gradient explosion backoff
+  grad_explosion_threshold: 10.0
+  grad_explosion_lr_reduction: 0.5
+  grad_explosion_cooldown_epochs: 2
+  
+  # =============================================================
+  # LOO TRAINING: LEAVE-ONE-OUT META-LEARNING LOSS
+  # =============================================================
+  # Note: LOO only activates in Phase C (epoch 21+) due to phase disable flags
+  # start_epoch is a minimum; phase gating provides additional control
+  # =============================================================
+  loo_training:
+    enabled: true
+    start_epoch: 25  # After HyperLoRA warmup completes (21 + 4 buffer epochs)
+    loss_weight: 0.05
+    min_pairs_for_loo: 2
+    max_loo_pairs: 4
+    batch_reduction_divisor: 2.0
+    min_batch_size: 8
+    adjust_grad_accumulation: true
+  
+  # =============================================================
+  # EQUIVARIANCE TRAINING
+  # =============================================================
+  # CRITICAL FOR TTA CONSENSUS AND DIHEDRAL INVARIANCE
+  # =============================================================
+  equivariance_training:
+    # Weight-level equivariance (DEPRECATED - often ~0 due to D4-invariant pooling)
+    enabled: false  # Disabled in favor of output-level equivariance
+    start_epoch: 21
+    loss_weight: 0.01
+    num_augmentations: 4
+
+  # =============================================================
+  # OUTPUT-LEVEL EQUIVARIANCE (Jan 2026 FIX)
+  # =============================================================
+  # This replaces the degenerate weight-level equivariance.
+  # Compares MODEL OUTPUTS after inverse augmentation, directly
+  # optimizing for TTA consensus.
+  #
+  # FIX (Jan 2026): Now properly flows gradients through original_logits
+  # so the loss actually teaches the model to produce equivariant outputs.
+  # =============================================================
+  output_equivariance_training:
+    enabled: true
+    start_epoch: 22  # Shortly after Phase C starts (epoch 21)
+    loss_weight: 0.02
+    num_augmentations: 2  # Keep low - each is a full forward pass
+    loss_type: "kl"       # 'kl' or 'l2'
+    mask_to_target: true  # Jan 2026: Only compute on valid output region (not padding)
+
+  # =============================================================
+  # GROUP-MARGINALIZED NLL (Jan 2026)
+  # =============================================================
+  # A mathematically principled alternative to output-equiv + regular NLL.
+  # Trains directly on the group-marginalized distribution:
+  #   p̄(y|x) = (1/K) Σ_g g⁻¹(p(·|g(x)))
+  #
+  # This directly optimizes what TTA voting tries to achieve, without
+  # fighting between NLL and consistency losses.
+  #
+  # Can be used as:
+  #   - AUXILIARY loss (default): adds to regular task loss
+  #   - PRIMARY loss: replaces task loss entirely
+  # =============================================================
+  group_marginalized_nll:
+    enabled: false  # Experimental - enable to test
+    start_epoch: 22
+    loss_weight: 0.1  # As auxiliary loss (lower weight)
+    num_augmentations: 2
+    as_primary_loss: false  # If true, replaces task loss (use weight=1.0)
+
+  # =============================================================
+  # PHASED TRAINING (Jan 2026)
+  # =============================================================
+  # Structured training phases to ensure base solver competence
+  # before enabling meta-learning components.
+  #
+  # Without phases, the model learns meta-learning shortcuts
+  # before the base solver can generalize, causing:
+  #   - equiv ≈ 0 (degenerate)
+  #   - TTA consensus ≈ random
+  #   - Training "looks good" but eval fails
+  #
+  # Phase progression:
+  #   A: Base solver only (no aug, no meta) - epochs 1-10
+  #   B: Add geometric aug, solver context  - epochs 11-20  
+  #   C: Full meta-learning                 - epochs 21+
+  # =============================================================
+  phased_training:
+    enabled: true
+    
+    # Phase A: Base solver competence (no meta, limited aug)
+    # Goal: Verify base model can learn to solve ARC without help
+    phase_a:
+      end_epoch: 10
+      # Override augmentation for this phase
+      augmentation:
+        rotation: false
+        flip: false
+        transpose: false
+        color_permutation: false
+        translational: false  # Jan 2026: Also disable translational in phase A
+      # Disable all meta components
+      disable_hyperlora: true
+      disable_loo: true
+      disable_equivariance: true
+      disable_hpm: true
+      # Subset training for faster iteration (optional)
+      max_tasks: null  # Use all tasks (or set to e.g., 100 for fast validation)
+    
+    # Phase B: Geometric augmentation + context path
+    # Goal: Test equivariance with solver context active
+    phase_b:
+      start_epoch: 11
+      end_epoch: 20
+      # Enable geometric augmentation
+      augmentation:
+        rotation: true
+        flip: true
+        transpose: true
+        color_permutation: false  # Still disabled - adds complexity
+        translational: true  # Jan 2026: Enable translational in phase B
+      # Enable context path only
+      disable_hyperlora: true  # HyperLoRA still off
+      disable_loo: true
+      disable_equivariance: true  # Wait for Phase C
+      disable_hpm: true
+    
+    # Phase C: Full meta-learning
+    # Goal: Enable all components after base solver is competent
+    phase_c:
+      start_epoch: 21
+      # Full augmentation
+      augmentation:
+        rotation: true
+        flip: true
+        transpose: true
+        color_permutation: true
+        color_permutation_prob: 0.3  # Lower than default for stability
+        translational: true  # Jan 2026: Full translational in phase C
+      # Enable all meta components (respects their individual start_epochs)
+      disable_hyperlora: false
+      disable_loo: false
+      disable_equivariance: false
+      disable_hpm: false
+
+  # =============================================================
+  # META ESCALATION
+  # =============================================================
+  meta_escalation:
+    enabled: true
+    
+    # Meta Loss Capping
+    meta_loss_cap_ratio: 0.25
+    meta_loss_cap_enabled: true
+    
+    start_epoch: 25
+    ramp_epochs: 12
+    schedule: linear
+    
+    targets:
+      hyperlora_delta_scale: 0.20
+      equiv_loss_weight: 0.03
+      loo_loss_weight: 0.08
+    
+    require_stability: true
+    
+    max_grad_explosion_events_per_epoch: 2
+    max_lr_backoff_events_per_epoch: 2
+    max_consecutive_nan_streak_per_epoch: 3
+    
+    recovery_enabled: true
+    recovery_step_per_window: 0.05
+    
+    log_every_epoch: true
+    
+    late_phase:
+      enabled: true
+      start_epoch: 50
+      
+      max_grad_explosion_events: 0
+      max_lr_backoff_events: 0
+      max_attention_collapse_events: 0
+      
+      decay_targets: false
+      target_decay_factor: 0.8
+      
+      lr_decay:
+        enabled: true
+        start_epoch: 50
+        end_epoch: 200
+        decay_factor: 0.1
+        schedule: cosine
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  
+  max_grid_size: 30
+  
+  # CRITICAL: Ignore padding in loss
+  ignore_padding_in_loss: true
+  
+  # ==========================================================================
+  # MERGED TRAINING SET (ARC-AGI-1 + ARC-AGI-2) - ENABLED
+  # ==========================================================================
+  # Uses the merged training set providing ~602 tasks (vs 400 original)
+  # for better rule diversity and generalization.
+  #
+  # REQUIREMENTS:
+  # 1. Run: python scripts/build_merged_training_set.py
+  # 2. This creates merged_train_manifest.jsonl and merged_dev_manifest.jsonl
+  # ==========================================================================
+  use_merged_training: true   # ENABLED for merged training
+  merged_training_path: "./data/merged_training"
+  merged_dev_path: "./data/merged_training"
+  merged_manifest_validation: true
+  
+  # ==========================================================================
+  # DATA SAMPLING CONFIGURATION
+  # ==========================================================================
+  max_tasks: null  # ALL tasks for better generalization
+  samples_per_task: 50  # 50 samples per task
+  stratified_seed: 42
+  
+  # Data loading
+  num_workers: 12
+  pin_memory: true
+  prefetch_factor: 6
+  persistent_workers: true
+  
+  # ==========================================================================
+  # CACHING CONFIGURATION
+  # ==========================================================================
+  # IMPORTANT (Jan 2026): cache_samples and phased training augmentation
+  # are INCOMPATIBLE. Cached samples have fixed augmentations from build time.
+  #
+  # For phased training to control augmentation per phase:
+  #   - Set cache_samples: false (on-the-fly augmentation)
+  #   - Phase A/B/C augmentation overrides will work correctly
+  #
+  # For maximum training speed with fixed augmentation:
+  #   - Set cache_samples: true
+  #   - Phase augmentation overrides will be IGNORED (warning printed)
+  #   - Use separate runs with different configs for each phase
+  # ==========================================================================
+  cache_samples: false  # CHANGED: false for phased training augmentation control
+  
+  # ==========================================================================
+  # CACHE CONFIGURATION FOR MERGED DATASET
+  # ==========================================================================
+  # These settings are used when cache_samples: true
+  # Formula: num_cached_samples = 602 tasks × 50 = 30,100
+  # ==========================================================================
+  num_cached_samples: auto  # Computed as task_count × samples_per_task
+  
+  # UPDATED PATH for merged dataset
+  cache_path: "./cache/rlan_stable_merged_602tasks.pkl"
+  
+  cache_load_percent: 100
+  
+  # Bucketed batching
+  bucketed_batching: true
+  bucket_boundaries: [10, 15, 20, 25]
+  
+  augmentation:
+    enabled: true
+    rotation: true
+    flip: true
+    transpose: true
+    color_permutation: true
+    color_permutation_prob: 0.5
+    translational: true
+    track_augmentation: true
+
+# =============================================================
+# EVALUATION
+# =============================================================
+evaluation:
+  num_guesses: 2
+  use_tta: true
+  tta_rotations: [0, 90, 180, 270]
+  tta_flips: [false, true]
+  
+  # TRM-style evaluation settings
+  use_trm_style_eval: true
+  num_augmented_views: 8
+  num_color_perms: 4
+  use_voting: true
+  use_inverse_aug: true
+  pass_ks: [1, 2, 3]
+  max_eval_tasks: 100
+
+# =============================================================
+# MONITORING
+# =============================================================
+monitoring:
+  enabled: true
+  exact_match_warning: 0.10
+  exact_match_critical: 0.20
+  entropy_ratio_warning: 2.0
+  entropy_ratio_critical: 5.0
+  stop_value_warning: 0.15
+  stop_value_critical: 0.25
+  
+  lora_norm_warn: 2.0
+  lora_norm_critical: 5.0
+  lora_norm_kill: 10.0
+  
+  nan_batches_abort: 20
+  
+  tta_consensus_warning: 0.25
+  tta_consensus_critical: 0.15
+  
+  centroid_spread_warning: 2.0
+  centroid_spread_critical: 0.5
+  
+  attn_max_collapse_threshold: 0.02
+  attention_collapse_consecutive_threshold: 2
+  
+  collapse_backoff:
+    enabled: true
+    cooldown_epochs: 3
+    delta_scale_factor: 0.5
+    lr_factor: 0.5
+    restore_rate: 0.2
+
+logging:
+  log_every: 1
+  save_every: 10
+  eval_every: 10
+  keep_last_n: 3
+  checkpoint_dir: "checkpoints/rlan_stable_merged"  # NEW checkpoint dir for merged training
+  log_to_file: true
+  track_augmentation: true
+  memory_debug_batches: 5
+  
+  use_wandb: false
+  wandb_project: "rlan-arc"
+  wandb_run_name: null
+
+# =============================================================
+# INFERENCE SETTINGS
+# =============================================================
+inference:
+  temperature: 0.1
+  use_best_step_selection: false
+  num_steps_override: null
+  
+  use_tta: true
+  num_dihedral: 8
+  num_color_perms: 4
+  
+  batch_size: 32
+  
+  loo_sanity_check: true
+  loo_threshold: 0.9
+  
+  acw_enabled: true
+  acw_num_views: 8
+
+  meta_learning:
+    hyperlora:
+      enable: true
+      require_trained: true
+      fallback_on_failure: true
+    
+    hpm:
+      enable: true
+      require_nonempty_buffers: true
+      min_buffer_entries: 1
+      use_static_banks: true
+      use_dynamic_banks: true
+    
+    solver_context:
+      enable: true
+    
+    cross_attention:
+      enable: true
+
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: false
+  check_nan_inf: true
+
+device:
+  use_cuda: true
+  mixed_precision: true
+  dtype: "bfloat16"
+  compile: false

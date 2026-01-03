@@ -52,8 +52,12 @@ from sci_arc.training.ema import EMAHelper
 from sci_arc.models.rlan_modules.loo_training import (
     LOOTrainingLoss, LOOConfig,
     AugmentationEquivarianceLoss, EquivarianceConfig,
+    OutputEquivarianceLoss,  # Jan 2026: Output-level equiv for TTA consensus
+    GroupMarginalizedNLLLoss,  # Jan 2026: Group-marginalized NLL for principled generalization
 )
 from sci_arc.data import ARCDataset, collate_sci_arc, BucketedBatchSampler
+# Jan 2026: Import constant for ignore_index consistency (single source of truth)
+PADDING_IGNORE_VALUE = ARCDataset.PADDING_IGNORE_VALUE  # -100, imported from dataset
 from sci_arc.evaluation.trm_style_evaluator import TRMStyleEvaluator
 from sci_arc.utils.gap_monitor import GapHealthMonitor
 from sci_arc.utils.memory_manager import MemoryManager, get_memory_manager
@@ -581,9 +585,58 @@ def create_train_loader(
     # CACHING CONFIGURATION
     # When cache_samples=True, pre-generate fixed samples for memorization training
     cache_samples = data_cfg.get('cache_samples', False)
-    num_cached_samples = data_cfg.get('num_cached_samples', 32000)
     cache_path = data_cfg.get('cache_path', None)
     cache_load_percent = data_cfg.get('cache_load_percent', 100.0)  # Percentage of cache to load
+    
+    # ==========================================================================
+    # DYNAMIC num_cached_samples CALCULATION (Jan 2026)
+    # ==========================================================================
+    # Compute num_cached_samples based on task count and samples_per_task
+    use_merged_training = data_cfg.get('use_merged_training', False)
+    samples_per_task = data_cfg.get('samples_per_task', 50)
+    max_tasks = data_cfg.get('max_tasks', None)
+    
+    # Determine task count and get task paths based on training set source
+    merged_task_paths = None  # Will be set if use_merged_training=True
+    if use_merged_training:
+        merged_path = data_cfg.get('merged_training_path', './data/merged_training')
+        try:
+            from sci_arc.data.merged_loader import get_training_stats, get_merged_task_paths, should_use_merged_training
+            
+            # Validate that merged training is actually available
+            if should_use_merged_training(data_cfg):
+                merged_stats = get_training_stats(merged_path)
+                base_task_count = merged_stats['total_train_tasks']
+                
+                # Get the actual task paths from the manifest
+                merged_task_paths = get_merged_task_paths(merged_path)
+                print(f"  [Merged Training] Using {base_task_count} tasks from merged set")
+                print(f"  [Merged Training] Loaded {len(merged_task_paths)} task paths from manifest")
+            else:
+                print(f"  [WARNING] use_merged_training=True but manifest not found, falling back to train_path")
+                base_task_count = 400
+        except Exception as e:
+            print(f"  [WARNING] Could not load merged training: {e}")
+            print(f"  [WARNING] Falling back to train_path (ARC-AGI-1 only)")
+            base_task_count = 400  # Fallback to default
+    else:
+        base_task_count = 400  # Default ARC-AGI-1 task count
+    
+    # Apply max_tasks limit if specified
+    actual_task_count = min(base_task_count, max_tasks) if max_tasks else base_task_count
+    
+    # Get num_cached_samples from config, compute if 'auto'
+    num_cached_samples_cfg = data_cfg.get('num_cached_samples', 'auto')
+    if num_cached_samples_cfg == 'auto' or num_cached_samples_cfg is None:
+        num_cached_samples = actual_task_count * samples_per_task
+        print(f"  [Auto Compute] num_cached_samples = {actual_task_count} tasks × {samples_per_task} = {num_cached_samples}")
+    else:
+        num_cached_samples = int(num_cached_samples_cfg)
+    
+    # Update cache path based on training mode (for clarity)
+    if cache_path and use_merged_training and 'agi1' in cache_path:
+        cache_path = cache_path.replace('agi1', 'merged').replace('400tasks', f'{actual_task_count}tasks')
+        print(f"  [Cache Path Updated] {cache_path}")
     
     if cache_samples:
         print(f"\n{'='*60}")
@@ -592,7 +645,10 @@ def create_train_loader(
         print(f"  Samples will be pre-generated and reused each epoch")
         print(f"  This allows model to learn from repeated exposure")
         print(f"  (Required for hard tasks needing >100 epochs)")
-        print(f"  num_cached_samples: {num_cached_samples}")
+        print(f"  Training Set: {'MERGED (AGI-1 + AGI-2)' if use_merged_training else 'ARC-AGI-1 only'}")
+        print(f"  Task Count: {actual_task_count}")
+        print(f"  Samples/Task: {samples_per_task}")
+        print(f"  Total Samples: {num_cached_samples}")
         if cache_load_percent < 100:
             print(f"  cache_load_percent: {cache_load_percent}% (PARTIAL LOAD for quick testing)")
         if cache_path:
@@ -600,7 +656,7 @@ def create_train_loader(
         print(f"{'='*60}\n")
     
     # Support max_tasks for quick testing (stratified sampling for representativeness)
-    max_tasks = data_cfg.get('max_tasks', None)
+    # max_tasks already read above for num_cached_samples calculation
     stratified_seed = data_cfg.get('stratified_seed', 42)
     
     # Warn about wasteful configurations
@@ -617,8 +673,16 @@ def create_train_loader(
         print(f"  3. max_tasks={max_tasks}, cache_samples=false (on-the-fly augmentation)")
         print(f"{'!'*60}\n")
     
+    # Determine data_path for dataset (merged training uses first path as reference)
+    # The actual tasks come from merged_task_paths when provided
+    effective_data_path = data_cfg['train_path']
+    if merged_task_paths:
+        # For merged training, data_path is used for logging/cache path derivation
+        # but actual tasks come from merged_task_paths
+        effective_data_path = data_cfg.get('merged_training_path', data_cfg['train_path'])
+    
     train_dataset = ARCDataset(
-        data_cfg['train_path'],
+        effective_data_path,
         max_size=max_grid_size,
         augment=augment_enabled,
         color_permutation=color_permutation,
@@ -633,6 +697,7 @@ def create_train_loader(
         cache_load_percent=cache_load_percent,  # Percentage of cache to load (for quick testing)
         max_tasks=max_tasks,  # Limit tasks for testing (stratified sampling)
         stratified_seed=stratified_seed,  # Seed for reproducible stratified sampling
+        task_paths=merged_task_paths,  # Explicit task paths for merged training (Jan 2026)
     )
     
     # ADAPTIVE BATCH SIZE: Use override if provided (for LOO memory management)
@@ -955,6 +1020,10 @@ def create_loss(config: dict) -> RLANLoss:
         min_clue_weight=train_config.get('min_clue_weight', 5.0),  # Strong penalty for fewer clues
         ponder_weight=train_config.get('ponder_weight', 0.02),  # Base cost per clue
         entropy_ponder_weight=train_config.get('entropy_ponder_weight', 0.02),  # Extra cost for diffuse attention
+        clue_variance_weight=train_config.get('clue_variance_weight', 0.0),  # NEW: Variance regularization
+        clue_target_variance=train_config.get('clue_target_variance', 0.5),  # NEW: Target std
+        stop_saturation_weight=train_config.get('stop_saturation_weight', 0.0),  # NEW: Saturation penalty
+        stop_saturation_threshold=train_config.get('stop_saturation_threshold', 5.0),  # NEW: Threshold
         max_clues=model_config['max_clues'],
         use_stablemax=train_config.get('use_stablemax', True),
         loss_mode=train_config.get('loss_mode', 'focal_stablemax'),
@@ -1343,8 +1412,17 @@ def train_epoch(
     ema: Optional[EMAHelper] = None,
     loo_loss_fn: Optional[LOOTrainingLoss] = None,
     equiv_loss_fn: Optional[AugmentationEquivarianceLoss] = None,
+    output_equiv_loss_fn = None,  # Jan 2026: Output-level equivariance
+    group_marg_loss_fn = None,    # Jan 2026: Group-marginalized NLL
     loo_start_epoch: int = 12,
     equiv_start_epoch: int = 8,
+    output_equiv_start_epoch: int = 16,  # Jan 2026
+    output_equiv_weight: float = 0.02,   # Jan 2026
+    output_equiv_num_augs: int = 2,      # Jan 2026
+    group_marg_start_epoch: int = 22,    # Jan 2026
+    group_marg_weight: float = 0.1,      # Jan 2026
+    global_task_tracker: Optional[Dict] = None,  # Jan 2026: Global task solving tracker
+    phase_disable_flags: Optional[Dict] = None,  # Jan 2026: Phased training overrides
 ) -> Dict[str, float]:
     """
     Train for one epoch with augmentation diversity tracking.
@@ -1364,10 +1442,15 @@ def train_epoch(
         equiv_loss_fn: Optional Augmentation Equivariance loss for meta-learning
         loo_start_epoch: Epoch when LOO loss activates (default: 12)
         equiv_start_epoch: Epoch when equivariance loss activates (default: 8)
+        global_task_tracker: Optional dict tracking tasks solved across all epochs (Jan 2026)
     
     Returns losses dict AND augmentation statistics for debugging.
     """
     model.train()
+    
+    # Initialize phase disable flags (Jan 2026: phased training support)
+    if phase_disable_flags is None:
+        phase_disable_flags = {}
     
     total_losses = {
         'total_loss': 0.0,
@@ -1377,6 +1460,7 @@ def train_epoch(
         'predicate_loss': 0.0,
         'loo_loss': 0.0,  # LOO meta-learning loss
         'equiv_loss': 0.0,  # Augmentation equivariance loss
+        'output_equiv_loss': 0.0,  # Jan 2026: Output-level equivariance
         'hpm_balance_loss': 0.0,  # HPM load balancing loss
         'curriculum_loss': 0.0,
         'deep_supervision_loss': 0.0,  # FIX: Was missing, caused zero reporting
@@ -1684,17 +1768,65 @@ def train_epoch(
                     centroids=outputs.get('centroids'),  # For centroid diversity loss
                 )
                 
+                # =============================================================
+                # META LOSS CAPPING (Jan 2026 FIX)
+                # =============================================================
+                # Cap combined meta-losses (LOO + equiv + HPM) to prevent them from
+                # overwhelming the task loss. Training logs showed 40.9% meta contribution.
+                # =============================================================
+                meta_loss_cap_enabled = config.get('training', {}).get('meta_escalation', {}).get('meta_loss_cap_enabled', True)
+                meta_loss_cap_ratio = config.get('training', {}).get('meta_escalation', {}).get('meta_loss_cap_ratio', 0.25)
+                
+                # Get task loss value for capping calculation
+                task_loss_value = losses.get('task_loss', losses.get('focal_loss', losses['total_loss']))
+                if torch.is_tensor(task_loss_value):
+                    task_loss_value = task_loss_value.item()
+                
+                # Calculate meta loss weight cap multiplier
+                # FIX (Jan 2026): Actually compute and apply the cap factor
+                meta_loss_cap_factor = 1.0
+                if meta_loss_cap_enabled and task_loss_value > 0:
+                    # Target: (loo + equiv + hpm) <= cap_ratio * total
+                    # Which means: meta_weight <= cap_ratio / (1 - cap_ratio) * task_loss
+                    # 
+                    # For cap_ratio=0.25: max_meta = 0.25/0.75 * task = 0.333 * task
+                    # If raw meta weights sum to W, we scale by min(1, max_meta / W)
+                    max_meta_contribution = meta_loss_cap_ratio / (1 - meta_loss_cap_ratio) * task_loss_value
+                    
+                    # Get the raw meta loss weights that will be applied
+                    raw_loo_weight = loo_loss_fn.config.loss_weight if loo_loss_fn is not None else 0.0
+                    raw_equiv_weight = equiv_loss_fn.config.loss_weight if equiv_loss_fn is not None else 0.0
+                    total_raw_meta_weight = raw_loo_weight + raw_equiv_weight
+                    
+                    # Scale down if raw weights would exceed the cap
+                    if total_raw_meta_weight > 0 and total_raw_meta_weight > max_meta_contribution:
+                        meta_loss_cap_factor = max_meta_contribution / total_raw_meta_weight
+                        # Clamp to reasonable range
+                        meta_loss_cap_factor = max(0.01, min(1.0, meta_loss_cap_factor))
+                    
+                    # Store for diagnostics
+                    epoch_diagnostics['meta_loss_cap_factor'] = meta_loss_cap_factor
+                    epoch_diagnostics['task_loss_value'] = task_loss_value
+                    epoch_diagnostics['max_meta_contribution'] = max_meta_contribution
+                    epoch_diagnostics['raw_meta_weight_sum'] = total_raw_meta_weight
+                
                 # Compute LOO loss if enabled (meta-learning via HyperLoRA)
                 # MEMORY FIX v3: Use iterative backward - backward happens INSIDE the function
                 # This prevents O(N) memory accumulation from holding all N computation graphs
                 loo_loss_value = 0.0  # Float for logging (backward done inside)
                 loo_metrics = None
                 # Check epoch threshold - LOO activates at loo_start_epoch
-                loo_active = loo_loss_fn is not None and epoch >= loo_start_epoch
+                # Jan 2026: Respect phased training disable flags
+                loo_phase_disabled = phase_disable_flags.get('loo', False)
+                loo_active = (loo_loss_fn is not None and 
+                              epoch >= loo_start_epoch and 
+                              not loo_phase_disabled)
                 if loo_active and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
                     # LOO requires at least min_pairs training pairs
                     num_pairs = pair_mask.sum(dim=1).min().item() if pair_mask is not None else train_inputs.shape[1]
                     if num_pairs >= loo_loss_fn.config.min_pairs_for_loo:
+                        # Apply meta loss cap to LOO weight
+                        effective_loo_weight = loo_loss_fn.config.loss_weight * meta_loss_cap_factor
                         loo_result = loo_loss_fn(
                             model=model,
                             input_grids=train_inputs,
@@ -1703,7 +1835,7 @@ def train_epoch(
                             temperature=temperature,
                             # v3: Iterative backward - pass scaler so backward happens inside
                             scaler=scaler,
-                            loss_weight=loo_loss_fn.config.loss_weight,
+                            loss_weight=effective_loo_weight,
                             grad_accumulation_steps=grad_accumulation_steps,
                         )
                         # loo_loss is now a float (backward already done inside)
@@ -1725,21 +1857,30 @@ def train_epoch(
                 # MEMORY FIX v3: Use iterative backward - backward happens INSIDE the function
                 equiv_loss_value = 0.0  # Float for logging
                 # Check epoch threshold - Equivariance activates at equiv_start_epoch
-                equiv_active = equiv_loss_fn is not None and epoch >= equiv_start_epoch
+                # Jan 2026: Respect phased training disable flags
+                equiv_phase_disabled = phase_disable_flags.get('equivariance', False)
+                equiv_active = (equiv_loss_fn is not None and 
+                                epoch >= equiv_start_epoch and 
+                                not equiv_phase_disabled)
                 if equiv_active and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
                     support_features = outputs.get('support_features')  # (B, N, D, H, W)
                     lora_deltas = outputs.get('lora_deltas')  # Dict with original deltas
                     
                     if support_features is not None and lora_deltas is not None:
-                        # Get original context from HyperLoRA output
-                        original_context = lora_deltas.get('context')  # (B, D)
+                        # FIX (Jan 2026): Compute original context using simple pooling
+                        # The lora_deltas['context'] is D4-averaged, which doesn't give
+                        # useful gradients when compared with augmented contexts.
+                        # Instead, use pool_context_simple for BOTH original and augmented.
+                        support_features_detached = support_features.detach()
+                        if hasattr(model.hyper_lora, 'pool_context_simple'):
+                            original_context = model.hyper_lora.pool_context_simple(support_features_detached)
+                        else:
+                            # Fallback: use D4-averaged context from lora_deltas
+                            original_context = lora_deltas.get('context')
+                            if original_context is not None:
+                                original_context = original_context.detach()
                         
                         if original_context is not None:
-                            # CRITICAL: Detach to create independent computation graph
-                            # This prevents "backward through graph second time" error
-                            # The equivariance loss should NOT backprop through the main forward pass
-                            original_context = original_context.detach()
-                            support_features_detached = support_features.detach()
                             
                             # MEMORY FIX: Generate augmented contexts with memory cleanup
                             # Process one augmentation at a time to avoid memory accumulation
@@ -1756,8 +1897,16 @@ def train_epoch(
                                     aug_type
                                 ).permute(0, 1, 4, 2, 3)  # Back to (B, N, D, H, W)
                                 
-                                # Pool augmented features to get context
-                                aug_context = model.hyper_lora.pool_context(aug_features)
+                                # FIX (Jan 2026): Use pool_context_simple for augmented features
+                                # The full pool_context uses D4-invariant averaging, which makes
+                                # ALL augmented contexts identical (equiv loss ≈ 0 always)
+                                # pool_context_simple doesn't average over transforms, so
+                                # augmented contexts will differ, giving useful gradients
+                                if hasattr(model.hyper_lora, 'pool_context_simple'):
+                                    aug_context = model.hyper_lora.pool_context_simple(aug_features)
+                                else:
+                                    # Fallback for older models without pool_context_simple
+                                    aug_context = model.hyper_lora.pool_context(aug_features)
                                 augmented_contexts[aug_type] = aug_context
                                 # MEMORY FIX: Delete intermediate aug_features immediately
                                 del aug_features
@@ -1765,13 +1914,15 @@ def train_epoch(
                             if augmented_contexts:
                                 # P0.4: Wrap equivariance in try/except to track failures
                                 try:
+                                    # Apply meta loss cap to equiv weight
+                                    effective_equiv_weight = equiv_loss_fn.config.loss_weight * meta_loss_cap_factor
                                     equiv_result, equiv_metrics = equiv_loss_fn(
                                         hyper_lora=model.hyper_lora,
                                         original_context=original_context,
                                         augmented_contexts=augmented_contexts,
                                         # v3: Iterative backward
                                         scaler=scaler,
-                                        loss_weight=equiv_loss_fn.config.loss_weight,
+                                        loss_weight=effective_equiv_weight,
                                         grad_accumulation_steps=grad_accumulation_steps,
                                     )
                                     # equiv_result is now a float (backward already done inside)
@@ -1804,6 +1955,129 @@ def train_epoch(
                             
                             # MEMORY FIX: Clean up augmented contexts after use
                             del augmented_contexts, support_features_detached
+                
+                # =========================================================================
+                # OUTPUT-LEVEL EQUIVARIANCE LOSS (Jan 2026)
+                # =========================================================================
+                # This is the NEW, non-degenerate equivariance that compares OUTPUTS
+                # instead of intermediate contexts. It directly optimizes TTA consensus.
+                # =========================================================================
+                output_equiv_loss_value = 0.0
+                # Respect phased training disable flags
+                output_equiv_phase_disabled = phase_disable_flags.get('equivariance', False)
+                output_equiv_active = (output_equiv_loss_fn is not None and 
+                                       epoch >= output_equiv_start_epoch and
+                                       not output_equiv_phase_disabled)
+                if output_equiv_active:
+                    try:
+                        # Get the original logits from this forward pass
+                        original_logits = outputs.get('logits')  # (B, C, H, W)
+                        
+                        if original_logits is not None:
+                            # Compute output-level equivariance
+                            # This does: aug_input → model → inv_aug_output → compare with original
+                            # GRADIENT FIX (Jan 2026): Do NOT detach original_logits!
+                            # Gradients must flow through original_probs for learning.
+                            # The augmented outputs serve as target (no_grad is fine there).
+                            
+                            # MASKING FIX (Jan 2026): Create mask from test_targets
+                            # to only compute equivariance on non-padded output region
+                            target_mask = None
+                            if 'test_targets' in batch and batch['test_targets'] is not None:
+                                test_targets_for_mask = batch['test_targets'].to(device)
+                                # Valid pixels are those != PADDING_IGNORE_VALUE (ignore_index for padding)
+                                # CRITICAL: Use constant, not hardcoded -100, to ensure consistency
+                                target_mask = (test_targets_for_mask != PADDING_IGNORE_VALUE)  # (B, H, W) bool
+                                
+                                # Defensive validation: log if mask is all False (suspicious)
+                                if target_mask is not None and not target_mask.any():
+                                    print(f"[WARNING] Output equiv target_mask is ALL False - check padding values!")
+                            
+                            output_equiv_result, output_equiv_metrics = output_equiv_loss_fn(
+                                model=model,
+                                test_inputs=test_inputs,
+                                train_inputs=train_inputs,
+                                train_outputs=train_outputs,
+                                pair_mask=pair_mask,
+                                original_logits=original_logits,  # KEEP GRADIENTS for learning!
+                                temperature=temperature,
+                                num_augmentations=output_equiv_num_augs,
+                                target_mask=target_mask,  # Jan 2026: Mask to valid output region
+                            )
+                            
+                            if torch.is_tensor(output_equiv_result):
+                                # Apply meta loss cap factor
+                                effective_output_equiv_weight = output_equiv_weight * meta_loss_cap_factor
+                                weighted_output_equiv = effective_output_equiv_weight * output_equiv_result
+                                
+                                # Scale for grad accumulation and backward
+                                if scaler is not None:
+                                    scaler.scale(weighted_output_equiv / grad_accumulation_steps).backward()
+                                else:
+                                    (weighted_output_equiv / grad_accumulation_steps).backward()
+                                
+                                output_equiv_loss_value = output_equiv_result.item()
+                                losses['output_equiv_loss'] = output_equiv_loss_value
+                                
+                                # Track diagnostics
+                                epoch_diagnostics['output_equiv_loss_sum'] = epoch_diagnostics.get('output_equiv_loss_sum', 0.0) + output_equiv_loss_value
+                                epoch_diagnostics['output_equiv_batch_count'] = epoch_diagnostics.get('output_equiv_batch_count', 0) + 1
+                                
+                    except Exception as e:
+                        epoch_diagnostics['output_equiv_failures'] = epoch_diagnostics.get('output_equiv_failures', 0) + 1
+                        if epoch_diagnostics['output_equiv_failures'] <= 3:
+                            print(f"[OUTPUT_EQUIV WARNING] Failed: {e}")
+                
+                # =========================================================================
+                # GROUP-MARGINALIZED NLL LOSS (Jan 2026)
+                # =========================================================================
+                # This is a mathematically principled approach that directly optimizes
+                # the group-marginalized distribution used by TTA voting.
+                # =========================================================================
+                group_marg_loss_value = 0.0
+                group_marg_phase_disabled = phase_disable_flags.get('equivariance', False)  # Share phase gating with equiv
+                group_marg_active = (group_marg_loss_fn is not None and
+                                     epoch >= group_marg_start_epoch and
+                                     not group_marg_phase_disabled)
+                if group_marg_active:
+                    try:
+                        # Get targets from batch
+                        test_targets = batch.get('test_targets')
+                        if test_targets is not None:
+                            test_targets = test_targets.to(device)
+                            
+                            group_marg_result, group_marg_metrics = group_marg_loss_fn(
+                                model=model,
+                                test_inputs=test_inputs,
+                                train_inputs=train_inputs,
+                                train_outputs=train_outputs,
+                                pair_mask=pair_mask,
+                                targets=test_targets,
+                                temperature=temperature,
+                            )
+                            
+                            if torch.is_tensor(group_marg_result) and not group_marg_metrics.get('skipped', False):
+                                # Apply weight and meta loss cap
+                                effective_weight = group_marg_weight * meta_loss_cap_factor
+                                weighted_loss = effective_weight * group_marg_result
+                                
+                                # Scale for grad accumulation and backward
+                                if scaler is not None:
+                                    scaler.scale(weighted_loss / grad_accumulation_steps).backward()
+                                else:
+                                    (weighted_loss / grad_accumulation_steps).backward()
+                                
+                                group_marg_loss_value = group_marg_result.item()
+                                losses['group_marginalized_nll'] = group_marg_loss_value
+                                
+                                # Track diagnostics
+                                epoch_diagnostics['group_marg_loss_sum'] = epoch_diagnostics.get('group_marg_loss_sum', 0.0) + group_marg_loss_value
+                                epoch_diagnostics['group_marg_batch_count'] = epoch_diagnostics.get('group_marg_batch_count', 0) + 1
+                                
+                    except Exception as e:
+                        epoch_diagnostics['group_marg_failures'] = epoch_diagnostics.get('group_marg_failures', 0) + 1
+                        if epoch_diagnostics['group_marg_failures'] <= 3:
+                            print(f"[GROUP_MARG WARNING] Failed: {e}")
                 
                 # Compute HPM load balancing loss if enabled
                 # This loss ensures all memory banks are utilized (prevents mode collapse)
@@ -2591,6 +2865,10 @@ def train_epoch(
                     if sample_task_id not in epoch_diagnostics['seen_task_ids']:
                         is_first_sample_for_task = True
                     epoch_diagnostics['seen_task_ids'].add(sample_task_id)
+                    
+                    # Global task tracking (Jan 2026): track all ever-seen tasks
+                    if global_task_tracker is not None:
+                        global_task_tracker['all_seen_task_ids'].add(sample_task_id)
                 
                 # Valid mask (exclude padding)
                 valid_mask = target_i != -100
@@ -2615,6 +2893,18 @@ def train_epoch(
                         # ANY-SAMPLE TRACKING: Mark task as solved (lenient metric)
                         if sample_task_id is not None:
                             epoch_diagnostics['solved_task_ids'].add(sample_task_id)
+                            
+                            # =============================================================
+                            # GLOBAL TASK TRACKING (Jan 2026)
+                            # =============================================================
+                            # Track whether this is a NEWLY solved task (never seen as exact
+                            # match before in any previous epoch) or a REPEAT.
+                            if global_task_tracker is not None:
+                                if sample_task_id not in global_task_tracker['all_solved_task_ids']:
+                                    # First time this task has ever been solved exactly!
+                                    global_task_tracker['all_solved_task_ids'].add(sample_task_id)
+                                    global_task_tracker['first_solve_epoch'][sample_task_id] = epoch + 1
+                                    epoch_diagnostics['new_globally_solved_count'] = epoch_diagnostics.get('new_globally_solved_count', 0) + 1
                         
                         # HPM DYNAMIC BUFFER POPULATION:
                         # When a sample is solved exactly, store its context in dynamic banks
@@ -2913,6 +3203,18 @@ def train_epoch(
                   f"exact={total_exact}/{total_processed} ({exact_pct:.1f}%), "
                   f"running_acc={running_acc:.1%}, "
                   f"lr={current_lr:.2e}{meta_str}")
+            
+            # =============================================================
+            # GLOBAL TASK TRACKING LOG (Jan 2026)
+            # =============================================================
+            # Show: total unique solved ever | new this epoch | new this batch
+            if global_task_tracker is not None:
+                total_globally_solved = len(global_task_tracker['all_solved_task_ids'])
+                total_ever_seen = len(global_task_tracker['all_seen_task_ids'])
+                new_this_epoch = epoch_diagnostics.get('new_globally_solved_count', 0)
+                epoch_solved_this_epoch = len(epoch_diagnostics['solved_task_ids'])
+                print(f"    [TaskTrack] Global_Solved: {total_globally_solved}/{total_ever_seen}, "
+                      f"Epoch_Solved: {epoch_solved_this_epoch}, New_Puzzles: {new_this_epoch}")
             
             # FG/BG accuracy for this batch and running averages
             fg_window = epoch_diagnostics['fg_running_window']
@@ -4494,7 +4796,68 @@ Config Overrides:
     equiv_start_epoch = equiv_config.get('start_epoch', 8)  # Default: epoch 8
     equiv_weight = equiv_config.get('loss_weight', 0.05) if use_equivariance else 0.0
     equiv_loss_fn = None
-    if use_equivariance:
+    
+    # =========================================================================
+    # OUTPUT-LEVEL EQUIVARIANCE (Jan 2026 FIX)
+    # =========================================================================
+    # The weight-level AugmentationEquivarianceLoss is degenerate because 
+    # HyperLoRA uses D4-invariant pooling, making all augmented contexts 
+    # identical (equiv ≈ 0 always). 
+    #
+    # OutputEquivarianceLoss compares model OUTPUTS instead, directly
+    # optimizing for TTA consensus. Set use_output_equiv=true to enable.
+    # =========================================================================
+    output_equiv_config = config.get('training', {}).get('output_equivariance_training', {})
+    use_output_equiv = output_equiv_config.get('enabled', False)
+    output_equiv_start_epoch = output_equiv_config.get('start_epoch', equiv_start_epoch)
+    output_equiv_weight = output_equiv_config.get('loss_weight', 0.02)
+    output_equiv_num_augs = output_equiv_config.get('num_augmentations', 2)  # Keep low for memory
+    output_equiv_loss_fn = None
+    
+    if use_output_equiv:
+        output_equiv_loss_fn = OutputEquivarianceLoss(
+            config=EquivarianceConfig(
+                enabled=True,
+                loss_weight=output_equiv_weight,
+                num_augmentations=output_equiv_num_augs,
+            ),
+            loss_type=output_equiv_config.get('loss_type', 'kl'),
+            mask_to_target=output_equiv_config.get('mask_to_target', True),  # Jan 2026: Mask to valid region
+        )
+        print(f"OUTPUT-level equivariance training configured: weight={output_equiv_weight}, "
+              f"num_augs={output_equiv_num_augs}, start_epoch={output_equiv_start_epoch}, "
+              f"type={output_equiv_config.get('loss_type', 'kl')}, "
+              f"mask_to_target={output_equiv_config.get('mask_to_target', True)}")
+    
+    # =========================================================================
+    # GROUP-MARGINALIZED NLL LOSS (Jan 2026)
+    # =========================================================================
+    # This is a mathematically principled alternative to output-equiv + regular NLL.
+    # Instead of fighting between two losses, it trains directly on the group-
+    # marginalized distribution: p̄(y|x) = avg_g g⁻¹(p(·|g(x)))
+    #
+    # This directly optimizes what TTA voting tries to achieve.
+    # Can be used as PRIMARY loss (replacing task loss) or AUXILIARY loss.
+    # =========================================================================
+    group_marg_config = config.get('training', {}).get('group_marginalized_nll', {})
+    use_group_marginalized = group_marg_config.get('enabled', False)
+    group_marg_start_epoch = group_marg_config.get('start_epoch', 21)
+    group_marg_weight = group_marg_config.get('loss_weight', 1.0)  # High weight - this is principled
+    group_marg_num_augs = group_marg_config.get('num_augmentations', 2)
+    group_marg_as_primary = group_marg_config.get('as_primary_loss', False)  # Replace task loss entirely
+    group_marg_loss_fn = None
+    
+    if use_group_marginalized:
+        group_marg_loss_fn = GroupMarginalizedNLLLoss(
+            num_augmentations=group_marg_num_augs,
+            ignore_index=-100,
+        )
+        mode_str = "PRIMARY (replaces task loss)" if group_marg_as_primary else "AUXILIARY"
+        print(f"GROUP-MARGINALIZED NLL configured: mode={mode_str}, weight={group_marg_weight}, "
+              f"num_augs={group_marg_num_augs}, start_epoch={group_marg_start_epoch}")
+    
+    # Weight-level equivariance (DEPRECATED if output_equiv enabled)
+    if use_equivariance and not use_output_equiv:
         hidden_dim = config.get('model', {}).get('hidden_dim', 256)
         equiv_loss_fn = AugmentationEquivarianceLoss(
             config=EquivarianceConfig(
@@ -4504,7 +4867,8 @@ Config Overrides:
             ),
             hidden_dim=hidden_dim,
         )
-        print(f"Equivariance training configured: weight={equiv_weight}, num_augs={equiv_config.get('num_augmentations', 4)}, start_epoch={equiv_start_epoch}")
+        print(f"[DEPRECATED] Weight-level equivariance training configured: weight={equiv_weight}, num_augs={equiv_config.get('num_augmentations', 4)}, start_epoch={equiv_start_epoch}")
+        print(f"  NOTE: Consider enabling output_equivariance_training instead - weight-level equiv is often ~0 due to D4-invariant pooling")
     
     # STAGED META-LEARNING: Delay LOO/Equivariance to prevent early BG collapse
     # Each loss has its own start_epoch for fine-grained control
@@ -4566,6 +4930,17 @@ Config Overrides:
     meta_escalation_start_epoch = meta_escalation_config.get('start_epoch', 25)
     meta_escalation_ramp_epochs = meta_escalation_config.get('ramp_epochs', 12)
     meta_escalation_schedule = meta_escalation_config.get('schedule', 'linear')
+    
+    # ==========================================================================
+    # META LOSS CAPPING (Jan 2026 FIX)
+    # ==========================================================================
+    # Prevents meta-losses (LOO + equiv + HPM) from overwhelming task loss.
+    # Training logs showed 40.9% meta contribution, causing weak task learning.
+    # ==========================================================================
+    meta_loss_cap_enabled = meta_escalation_config.get('meta_loss_cap_enabled', True)
+    meta_loss_cap_ratio = meta_escalation_config.get('meta_loss_cap_ratio', 0.25)
+    if meta_loss_cap_enabled:
+        print(f"[META LOSS CAP] Enabled: meta-loss capped at {meta_loss_cap_ratio*100:.0f}% of total loss")
 
     # Model feature flags used by meta-escalation logging/targets
     use_hpm = config.get('model', {}).get('use_hpm', False)
@@ -4895,6 +5270,144 @@ Config Overrides:
     keep_last_n = log_cfg.get('keep_last_n', 5)
     
     # ================================================================
+    # PHASED TRAINING SUPPORT (Jan 2026)
+    # ================================================================
+    # Allows structured A/B/C training phases in a single YAML config.
+    # Each phase can override augmentation settings and disable meta-losses.
+    # ================================================================
+    phased_training_config = config.get('training', {}).get('phased_training', {})
+    phased_training_enabled = phased_training_config.get('enabled', False)
+    
+    # Store base augmentation config for restoration
+    base_aug_config = config.get('data', {}).get('augmentation', {}).copy()
+    
+    def get_current_phase(epoch: int) -> tuple:
+        """
+        Get current phase name and config based on epoch.
+        
+        IMPORTANT (Jan 2026 FIX): The `epoch` parameter is 0-based (from the training loop),
+        but YAML phase boundaries are specified in 1-based human-readable epochs.
+        We convert to 1-based for comparison: epoch_1based = epoch + 1
+        
+        Example: If phase_a.end_epoch=10 in YAML, Phase A runs for printed epochs 1-10,
+        which corresponds to loop epochs 0-9 (epoch + 1 <= 10).
+        """
+        if not phased_training_enabled:
+            return 'none', {}
+        
+        phase_a = phased_training_config.get('phase_a', {})
+        phase_b = phased_training_config.get('phase_b', {})
+        phase_c = phased_training_config.get('phase_c', {})
+        
+        # YAML epochs are 1-based; convert loop epoch (0-based) to 1-based for comparison
+        epoch_1based = epoch + 1
+        
+        phase_a_end = phase_a.get('end_epoch', 10)
+        phase_b_start = phase_b.get('start_epoch', phase_a_end + 1)
+        phase_b_end = phase_b.get('end_epoch', 20)
+        phase_c_start = phase_c.get('start_epoch', phase_b_end + 1)
+        
+        if epoch_1based <= phase_a_end:
+            return 'A', phase_a
+        elif epoch_1based >= phase_b_start and epoch_1based <= phase_b_end:
+            return 'B', phase_b
+        elif epoch_1based >= phase_c_start:
+            return 'C', phase_c
+        else:
+            # Transition period - use phase B settings
+            return 'B', phase_b
+    
+    def apply_phase_config(phase_name: str, phase_cfg: dict, epoch: int, dataset=None):
+        """
+        Apply phase-specific configuration overrides.
+        
+        FIXES (Jan 2026):
+        1. Actually updates dataset augmentation via set_augmentation_config()
+        2. Returns disable_flags that are enforced for module activation
+        
+        Args:
+            phase_name: 'A', 'B', or 'C'
+            phase_cfg: Phase configuration dict
+            epoch: Current epoch
+            dataset: ARCDataset instance for runtime augmentation update
+            
+        Returns:
+            disable_flags dict for LOO/equiv/hyperlora/hpm gating
+        """
+        if not phase_cfg:
+            return {}
+        
+        # =====================================================================
+        # FIX #2: Actually update dataset augmentation at runtime
+        # =====================================================================
+        aug_override = phase_cfg.get('augmentation', {})
+        if dataset is not None and hasattr(dataset, 'set_augmentation_config'):
+            # Map YAML phase augmentation keys to dataset method params
+            # Phase config uses: rotation, flip, transpose, color_permutation, color_permutation_prob
+            # Dataset uses: augment (covers rotation/flip/transpose), color_permutation, color_permutation_prob
+            #
+            # FIX (Jan 2026): Proper logic for all three geometric aug flags
+            # Dihedral is enabled if ANY of rotation/flip/transpose is True
+            # Dihedral is disabled only if ALL specified flags are False
+            rotation = aug_override.get('rotation', None)
+            flip = aug_override.get('flip', None)
+            transpose = aug_override.get('transpose', None)
+            
+            # Collect only explicitly specified flags
+            specified_flags = [v for v in [rotation, flip, transpose] if v is not None]
+            
+            if len(specified_flags) == 0:
+                # No geometric aug flags specified - use None (dataset default)
+                dihedral_enabled = None
+            elif any(specified_flags):
+                # At least one is True - enable dihedral
+                dihedral_enabled = True
+            else:
+                # All specified flags are False - disable dihedral
+                dihedral_enabled = False
+            
+            dataset.set_augmentation_config(
+                augment=dihedral_enabled,
+                color_permutation=aug_override.get('color_permutation', None),
+                color_permutation_prob=aug_override.get('color_permutation_prob', None),
+                translational_augment=aug_override.get('translational', None),
+            )
+        
+        # Phase-specific module disables
+        # These are enforced BOTH in train_epoch (for losses) AND at module activation
+        disable_flags = {
+            'hyperlora': phase_cfg.get('disable_hyperlora', False),
+            'loo': phase_cfg.get('disable_loo', False),
+            'equivariance': phase_cfg.get('disable_equivariance', False),
+            'hpm': phase_cfg.get('disable_hpm', False),
+        }
+        
+        return disable_flags
+    
+    if phased_training_enabled:
+        print(f"\n{'='*60}")
+        print(f"PHASED TRAINING ENABLED (Jan 2026)")
+        print(f"{'='*60}")
+        phase_a = phased_training_config.get('phase_a', {})
+        phase_b = phased_training_config.get('phase_b', {})
+        phase_c = phased_training_config.get('phase_c', {})
+        print(f"  Phase A (Base Solver): epochs 1-{phase_a.get('end_epoch', 10)}")
+        print(f"    - Augmentation: rotation={phase_a.get('augmentation', {}).get('rotation', False)}, "
+              f"flip={phase_a.get('augmentation', {}).get('flip', False)}")
+        print(f"    - Meta: HyperLoRA={not phase_a.get('disable_hyperlora', True)}, "
+              f"LOO={not phase_a.get('disable_loo', True)}")
+        print(f"  Phase B (Geometric Aug): epochs {phase_b.get('start_epoch', 11)}-{phase_b.get('end_epoch', 20)}")
+        print(f"    - Augmentation: rotation={phase_b.get('augmentation', {}).get('rotation', True)}, "
+              f"flip={phase_b.get('augmentation', {}).get('flip', True)}")
+        print(f"    - Meta: HyperLoRA={not phase_b.get('disable_hyperlora', True)}, "
+              f"LOO={not phase_b.get('disable_loo', True)}")
+        print(f"  Phase C (Full Meta): epochs {phase_c.get('start_epoch', 21)}+")
+        print(f"    - Augmentation: rotation={phase_c.get('augmentation', {}).get('rotation', True)}, "
+              f"color_perm={phase_c.get('augmentation', {}).get('color_permutation', True)}")
+        print(f"    - Meta: All enabled (respects individual start_epochs)")
+        print(f"{'='*60}\n")
+    
+    # ================================================================
     # PRE-CACHE EVAL TASKS (Dec 2025 - Prod optimization)
     # ================================================================
     # Load TRM/TTA eval tasks ONCE before training loop to avoid
@@ -4940,6 +5453,23 @@ Config Overrides:
         'exact_match_pct': [],     # Exact match percentage (should increase)
     }
     
+    # =============================================================
+    # GLOBAL TASK SOLVING TRACKER (Jan 2026)
+    # =============================================================
+    # Track which unique task IDs have been solved (exact match) across
+    # ALL epochs since training start. This provides critical insight:
+    # - Are we solving NEW puzzles or just repeating old ones?
+    # - How many unique tasks out of total have ever been solved?
+    # - Per-epoch: how many NEW tasks were solved vs previously solved?
+    # =============================================================
+    global_task_tracker = {
+        'all_solved_task_ids': set(),       # Task IDs ever solved (across all epochs)
+        'all_seen_task_ids': set(),         # All task IDs ever seen (should match dataset size)
+        'per_epoch_new_solved': [],         # List of newly solved task counts per epoch
+        'per_epoch_total_solved': [],       # List of total solved task counts per epoch
+        'first_solve_epoch': {},            # Dict: task_id -> first epoch where it was solved
+    }
+    
     # ADAPTIVE BATCH SIZE TRACKING
     # After LOO activation, batch size is reduced to prevent OOM
     current_batch_size_override = None  # None = use config batch_size
@@ -4962,6 +5492,80 @@ Config Overrides:
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
         
+        # ================================================================
+        # PHASED TRAINING: Apply phase-specific config at epoch start
+        # ================================================================
+        # FIX (Jan 2026): Pass dataset to apply_phase_config for runtime augmentation update
+        current_phase_name, current_phase_cfg = get_current_phase(epoch)
+        phase_disable_flags = {}
+        if phased_training_enabled and current_phase_cfg:
+            # Get dataset from train_loader for runtime augmentation update
+            train_dataset = train_loader.dataset if hasattr(train_loader, 'dataset') else None
+            phase_disable_flags = apply_phase_config(
+                current_phase_name, current_phase_cfg, epoch, 
+                dataset=train_dataset  # Pass dataset for augmentation update
+            )
+            # Log phase transition
+            if epoch == start_epoch or (epoch > 0 and get_current_phase(epoch - 1)[0] != current_phase_name):
+                print(f"\n{'='*60}")
+                print(f"  PHASE {current_phase_name} ACTIVE (epoch {epoch + 1})")
+                print(f"{'='*60}")
+                if phase_disable_flags.get('hyperlora'):
+                    print(f"    HyperLoRA: DISABLED by phase")
+                if phase_disable_flags.get('loo'):
+                    print(f"    LOO Loss: DISABLED by phase")
+                if phase_disable_flags.get('equivariance'):
+                    print(f"    Equivariance: DISABLED by phase")
+                if phase_disable_flags.get('hpm'):
+                    print(f"    HPM: DISABLED by phase")
+                aug_cfg = current_phase_cfg.get('augmentation', {})
+                print(f"    Augmentation: rot={aug_cfg.get('rotation', '(default)')}, "
+                      f"flip={aug_cfg.get('flip', '(default)')}, "
+                      f"trans={aug_cfg.get('translational', '(default)')}, "
+                      f"color={aug_cfg.get('color_permutation', '(default)')}")
+                print(f"{'='*60}\n")
+                
+                # =============================================================
+                # WORKER RECREATION FIX (Jan 2026): Recreate DataLoader on phase change
+                # =============================================================
+                # With persistent_workers=True or num_workers>0, worker processes
+                # keep their own dataset copies. Changing augmentation flags in the
+                # main process doesn't propagate to workers. Solution: recreate the
+                # DataLoader at phase boundaries to ensure workers pick up new config.
+                # =============================================================
+                data_cfg = config.get('data', {})
+                if data_cfg.get('num_workers', 0) > 0 and not data_cfg.get('cache_samples', False):
+                    print(f"  [Phase Change] Recreating DataLoader to propagate augmentation config to workers...")
+                    train_loader = create_train_loader(
+                        config,
+                        curriculum_stage=current_curriculum_stage if use_curriculum else 0,
+                        max_grid_size=max_grid_size,
+                        batch_size_override=current_batch_size_override,
+                    )
+                    # Re-apply augmentation config to the new dataset
+                    train_dataset = train_loader.dataset if hasattr(train_loader, 'dataset') else None
+                    if train_dataset is not None:
+                        apply_phase_config(
+                            current_phase_name, current_phase_cfg, epoch,
+                            dataset=train_dataset
+                        )
+                    print(f"  [Phase Change] DataLoader recreated with {len(train_loader)} batches")
+        
+        # ================================================================
+        # FIX #3: Enforce phase disable flags for module activation
+        # ================================================================
+        # Phase flags should prevent module activation even if past start_epoch
+        if phase_disable_flags.get('hyperlora', False):
+            if hasattr(model, 'hyperlora_active') and model.hyperlora_active:
+                model.hyperlora_active = False
+                print(f"  [Phase Override] HyperLoRA deactivated for phase {current_phase_name}")
+        if phase_disable_flags.get('hpm', False):
+            if hasattr(model, 'hpm_memory_enabled') and model.hpm_memory_enabled:
+                # FIX (Jan 2026): Actually disable HPM memory collection during disabled phases
+                # This prevents low-quality early memories from polluting the buffer
+                model.hpm_memory_enabled = False
+                print(f"  [Phase Override] HPM memory collection DISABLED for phase {current_phase_name}")
+        
         # Set epoch for bucketed batch sampler (ensures different batch order each epoch)
         if hasattr(train_loader, 'batch_sampler') and hasattr(train_loader.batch_sampler, 'set_epoch'):
             train_loader.batch_sampler.set_epoch(epoch)
@@ -4972,9 +5576,11 @@ Config Overrides:
         
         # BUG FIX: Update hpm_memory_enabled at epoch boundary (for staged activation)
         # This ensures buffers start populating at hpm_memory_start_epoch even when resuming
+        # BUT respect phase disable flags (don't enable if phase says no)
         if not model.hpm_memory_enabled and epoch >= hpm_memory_start_epoch:
-            model.hpm_memory_enabled = True
-            print(f"  [HPM Memory] Buffer population NOW ENABLED at epoch {epoch + 1}")
+            if not phase_disable_flags.get('hpm', False):
+                model.hpm_memory_enabled = True
+                print(f"  [HPM Memory] Buffer population NOW ENABLED at epoch {epoch + 1}")
         
         print(f"\nEpoch {epoch + 1}/{max_epochs}")
         print("-" * 40)
@@ -5088,8 +5694,10 @@ Config Overrides:
         
         # ================================================================
         # PHASE 3: Activate HyperLoRA with warmup
+        # FIX (Jan 2026): Respect phase disable flags - don't activate if phase says no
         # ================================================================
-        if use_hyperlora and epoch == meta_learning_start_epoch:
+        hyperlora_phase_allowed = not phase_disable_flags.get('hyperlora', False)
+        if use_hyperlora and epoch == meta_learning_start_epoch and hyperlora_phase_allowed:
             print(f"\n{'='*60}")
             print(f"PHASE 3: HYPERLORA ACTIVATED (epoch {epoch + 1})")
             print(f"{'='*60}")
@@ -5107,9 +5715,15 @@ Config Overrides:
                 max_mb = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
                 print(f"  GPU MEMORY: {allocated_mb:.0f}MB / {max_mb:.0f}MB ({100*allocated_mb/max_mb:.1f}%)")
             print(f"{'='*60}\n")
+        elif use_hyperlora and epoch >= meta_learning_start_epoch and not hyperlora_phase_allowed:
+            # Phase overrides: keep HyperLoRA inactive even if past start epoch
+            if model.hyperlora_active:
+                model.hyperlora_active = False
+                print(f"  [Phase Override] HyperLoRA kept INACTIVE for phase {current_phase_name}")
         
         # HyperLoRA warmup: linearly ramp delta_scale (Patch 1: use delta_scale)
-        if use_hyperlora and hasattr(model, 'hyper_lora') and model.hyper_lora is not None:
+        # Only apply warmup if HyperLoRA is allowed by current phase
+        if use_hyperlora and hasattr(model, 'hyper_lora') and model.hyper_lora is not None and hyperlora_phase_allowed:
             if epoch >= meta_learning_start_epoch and epoch < meta_learning_start_epoch + hyperlora_warmup_epochs:
                 warmup_progress = (epoch - meta_learning_start_epoch) / max(hyperlora_warmup_epochs, 1)
                 current_scale = hyperlora_warmup_start_scale + warmup_progress * (hyperlora_warmup_end_scale - hyperlora_warmup_start_scale)
@@ -5556,11 +6170,20 @@ Config Overrides:
             pre_epoch_allocated = torch.cuda.memory_allocated() / 1024 / 1024
             torch.cuda.reset_peak_memory_stats()
         
-        # Train
+        # Train (Jan 2026: pass output equiv, group marg, and phase disable flags)
         train_losses, global_step = train_epoch(
             model, train_loader, loss_fn, optimizer, device,
             epoch, config, scaler, global_step, ema, effective_loo_fn, effective_equiv_fn,
+            output_equiv_loss_fn=output_equiv_loss_fn,
+            group_marg_loss_fn=group_marg_loss_fn,  # Jan 2026: Group-marginalized NLL
             loo_start_epoch=loo_start_epoch, equiv_start_epoch=equiv_start_epoch,
+            output_equiv_start_epoch=output_equiv_start_epoch,
+            output_equiv_weight=output_equiv_weight,
+            output_equiv_num_augs=output_equiv_num_augs,
+            group_marg_start_epoch=group_marg_start_epoch,  # Jan 2026
+            group_marg_weight=group_marg_weight,            # Jan 2026
+            global_task_tracker=global_task_tracker,  # Jan 2026: Track tasks solved across epochs
+            phase_disable_flags=phase_disable_flags,  # Jan 2026: Phased training
         )
 
         # ================================================================
@@ -5817,6 +6440,27 @@ Config Overrides:
         print(f"\nEpoch {epoch + 1} Summary:")
         print(f"  Total Loss: {train_losses['total_loss']:.4f}")
         print(f"  Task Loss ({loss_mode}): {task_loss_val:.4f}")
+        
+        # =============================================================
+        # GLOBAL TASK TRACKING SUMMARY (Jan 2026)
+        # =============================================================
+        # Report unique tasks solved across all epochs to track learning progress
+        if global_task_tracker is not None:
+            total_globally_solved = len(global_task_tracker['all_solved_task_ids'])
+            total_ever_seen = len(global_task_tracker['all_seen_task_ids'])
+            new_this_epoch = train_losses.get('diagnostics', {}).get('new_globally_solved_count', 0)
+            
+            # Update per-epoch tracking
+            global_task_tracker['per_epoch_new_solved'].append(new_this_epoch)
+            global_task_tracker['per_epoch_total_solved'].append(total_globally_solved)
+            
+            solve_pct = (total_globally_solved / total_ever_seen * 100) if total_ever_seen > 0 else 0.0
+            print(f"  [Global Task Progress] Unique Solved: {total_globally_solved}/{total_ever_seen} ({solve_pct:.1f}%)")
+            print(f"    NEW puzzles solved this epoch: {new_this_epoch}")
+            if len(global_task_tracker['per_epoch_new_solved']) > 1:
+                recent_new = global_task_tracker['per_epoch_new_solved'][-5:]  # Last 5 epochs
+                if sum(recent_new) == 0:
+                    print(f"    ⚠️ No new puzzles solved in last {len(recent_new)} epochs - model may be plateauing")
         
         # Only show auxiliary losses if they have non-zero weight in config
         if train_cfg.get('lambda_entropy', 0) > 0:

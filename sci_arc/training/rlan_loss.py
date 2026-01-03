@@ -191,6 +191,7 @@ class WeightedStablemaxLoss(nn.Module):
         reduction: 'mean', 'sum', or 'none'
         ignore_index: Label to ignore (-100 for padding)
         track_nan_telemetry: If True, track NaN statistics for debugging
+        logit_clamp_max: Maximum absolute value for logits (prevents NaN from extreme values)
     """
     
     def __init__(
@@ -201,6 +202,7 @@ class WeightedStablemaxLoss(nn.Module):
         reduction: str = "mean",
         ignore_index: int = -100,
         track_nan_telemetry: bool = False,  # BUG FIX #9: Add telemetry option
+        logit_clamp_max: float = 50.0,  # FIX: Prevent extreme logits causing NaN
     ):
         super().__init__()
         self.bg_weight_cap = bg_weight_cap
@@ -208,6 +210,7 @@ class WeightedStablemaxLoss(nn.Module):
         self.min_class_weight = min_class_weight
         self.reduction = reduction
         self.ignore_index = ignore_index
+        self.logit_clamp_max = logit_clamp_max
         
         # BUG FIX #9: NaN telemetry tracking
         self.track_nan_telemetry = track_nan_telemetry
@@ -273,6 +276,12 @@ class WeightedStablemaxLoss(nn.Module):
         logits_valid = logits_flat[valid_mask]
         targets_valid = targets_flat[valid_mask]
         n_valid = targets_valid.numel()
+        
+        # FIX (Jan 2026): Clamp extreme logits to prevent NaN
+        # Training logs showed logits in range [-90, +80] which cause NaN in stablemax.
+        # Clamping to ±50 preserves gradient flow while preventing numerical instability.
+        if self.logit_clamp_max > 0:
+            logits_valid = logits_valid.clamp(-self.logit_clamp_max, self.logit_clamp_max)
         
         # SAFETY CHECK: Clamp target values to valid range [0, C-1]
         # This prevents CUDA scatter/gather index out of bounds errors if
@@ -418,6 +427,7 @@ class FocalWeightedStablemaxLoss(nn.Module):
         min_class_weight: float = 0.1,
         reduction: str = "mean",
         ignore_index: int = -100,
+        logit_clamp_max: float = 50.0,  # FIX (Jan 2026): Prevent extreme logits causing NaN
     ):
         super().__init__()
         self.bg_weight_cap = bg_weight_cap
@@ -426,6 +436,7 @@ class FocalWeightedStablemaxLoss(nn.Module):
         self.min_class_weight = min_class_weight
         self.reduction = reduction
         self.ignore_index = ignore_index
+        self.logit_clamp_max = logit_clamp_max
     
     def forward(
         self,
@@ -458,6 +469,11 @@ class FocalWeightedStablemaxLoss(nn.Module):
         logits_valid = logits_flat[valid_mask]
         targets_valid = targets_flat[valid_mask]
         n_valid = targets_valid.numel()
+        
+        # FIX (Jan 2026): Clamp extreme logits to prevent NaN
+        # Training logs showed logits in range [-90, +80] which cause NaN in stablemax.
+        if self.logit_clamp_max > 0:
+            logits_valid = logits_valid.clamp(-self.logit_clamp_max, self.logit_clamp_max)
         
         # SAFETY CHECK: Clamp target values to valid range [0, C-1]
         if targets_valid.max() >= C or targets_valid.min() < 0:
@@ -799,6 +815,11 @@ class SparsityRegularization(nn.Module):
     - Early training: entropy is high, but that's OK (learning to attend)
     - Mid training: entropy drops, pondering cost dominates (learn when to stop)
     - Late training: sharp attention, efficient clue usage (task-optimal)
+    
+    NEW (Jan 2025): Variance regularizer to prevent clue count collapse.
+    When all samples use ~same clue count (std < 0.1), the stop predictor
+    is not adapting to task difficulty. This adds a penalty for low variance:
+        variance_penalty = max(0, target_variance - clues_used_variance)
     """
     
     def __init__(
@@ -807,6 +828,10 @@ class SparsityRegularization(nn.Module):
         ponder_weight: float = 0.1,
         min_clue_weight: float = 1.0,
         entropy_ponder_weight: float = 0.05,  # Extra cost for diffuse attention
+        variance_weight: float = 0.0,  # NEW: Weight for variance regularization (default off for backward compat)
+        target_variance: float = 0.5,  # NEW: Target std for clue count across samples
+        saturation_weight: float = 0.0,  # NEW: Weight for stop logit saturation penalty (default off)
+        saturation_threshold: float = 5.0,  # NEW: Threshold for |stop_logit| above which penalty applies
         epsilon: float = 1e-6
     ):
         """
@@ -815,6 +840,10 @@ class SparsityRegularization(nn.Module):
             ponder_weight: Base cost per clue used (ACT-style)
             min_clue_weight: Weight for minimum clue penalty
             entropy_ponder_weight: Extra cost for high-entropy (diffuse) attention
+            variance_weight: Weight for variance regularization (NEW - default 0 for backward compat)
+            target_variance: Target std for clue count across samples (NEW)
+            saturation_weight: Weight for stop logit saturation penalty (NEW - default 0)
+            saturation_threshold: |stop_logit| threshold above which penalty applies (NEW)
             epsilon: Small constant for numerical stability
         """
         super().__init__()
@@ -822,6 +851,10 @@ class SparsityRegularization(nn.Module):
         self.ponder_weight = ponder_weight
         self.min_clue_weight = min_clue_weight
         self.entropy_ponder_weight = entropy_ponder_weight
+        self.variance_weight = variance_weight
+        self.target_variance = target_variance
+        self.saturation_weight = saturation_weight
+        self.saturation_threshold = saturation_threshold
         self.epsilon = epsilon
     
     def forward(
@@ -879,12 +912,37 @@ class SparsityRegularization(nn.Module):
             
             entropy_pondering = weighted_entropy.mean() * self.entropy_ponder_weight
         
+        # 4. Variance regularization: penalize low variance in clue usage
+        # This encourages the stop predictor to adapt to task difficulty
+        variance_penalty = torch.tensor(0.0, device=stop_logits.device)
+        clues_used_variance = expected_clues_used.std()  # Std across batch
+        if self.variance_weight > 0:
+            # Penalty when variance is below target
+            # Hinge loss: only penalize if variance is too low
+            variance_deficit = F.relu(self.target_variance - clues_used_variance)
+            variance_penalty = variance_deficit * self.variance_weight
+        
+        # 5. Saturation penalty: penalize extreme stop logits where sigmoid saturates
+        # When |stop_logit| > threshold, gradient vanishes (sigmoid → 0 or 1)
+        # This keeps logits in a learnable range
+        saturation_penalty = torch.tensor(0.0, device=stop_logits.device)
+        logit_excess = torch.tensor(0.0, device=stop_logits.device)
+        if self.saturation_weight > 0:
+            # Compute excess above threshold: relu(|logit| - threshold)
+            logit_abs = stop_logits.abs()
+            excess = F.relu(logit_abs - self.saturation_threshold)  # (B, K)
+            # Mean excess across all logits
+            logit_excess = excess.mean()
+            saturation_penalty = logit_excess * self.saturation_weight
+        
         # Combined loss (excluding per-sample penalty which is returned separately if requested)
         # base_pondering and entropy_pondering are batch-level regularization
         total_loss = (
             self.min_clue_weight * min_clue_penalty 
             + base_pondering 
             + entropy_pondering
+            + variance_penalty  # NEW: variance regularization
+            + saturation_penalty  # NEW: saturation penalty
         )
         
         # Store component breakdown for diagnostics (can be retrieved after forward)
@@ -892,11 +950,14 @@ class SparsityRegularization(nn.Module):
             'min_clue_penalty': min_clue_penalty.item() if torch.is_tensor(min_clue_penalty) else min_clue_penalty,
             'base_pondering': base_pondering.item() if torch.is_tensor(base_pondering) else base_pondering,
             'entropy_pondering': entropy_pondering.item() if torch.is_tensor(entropy_pondering) else entropy_pondering,
+            'variance_penalty': variance_penalty.item() if torch.is_tensor(variance_penalty) else variance_penalty,  # NEW
+            'saturation_penalty': saturation_penalty.item() if torch.is_tensor(saturation_penalty) else saturation_penalty,  # NEW
+            'stop_logit_excess': logit_excess.item() if torch.is_tensor(logit_excess) else logit_excess,  # NEW: mean excess above threshold
             'expected_clues_used': expected_clues_used.mean().item(),
             'stop_prob_mean': stop_probs.mean().item(),
             # NEW: Track per-sample variance to verify task-dependent clue count
             'stop_prob_std': stop_probs.mean(dim=-1).std().item(),  # Std of mean stop_prob per sample
-            'clues_used_std': (1 - stop_probs).sum(dim=-1).std().item(),  # Std of clues used per sample
+            'clues_used_std': clues_used_variance.item(),  # Std of clues used per sample
         }
         
         # Return per-sample penalty for per-task gradient flow
@@ -1190,6 +1251,10 @@ class RLANLoss(nn.Module):
         min_clue_weight: float = 5.0,  # Strong penalty for using fewer than min_clues
         ponder_weight: float = 0.02,  # Base cost per clue (REDUCED from 0.1)
         entropy_ponder_weight: float = 0.02,  # Extra cost for diffuse attention (REDUCED)
+        clue_variance_weight: float = 0.0,  # NEW: Weight for clue count variance regularization
+        clue_target_variance: float = 0.5,  # NEW: Target std for clue count across batch
+        stop_saturation_weight: float = 0.0,  # NEW: Weight for stop logit saturation penalty
+        stop_saturation_threshold: float = 5.0,  # NEW: Threshold for saturation penalty
         max_clues: int = 5,
         use_stablemax: bool = True,  # Stablemax for numerical stability
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_weighted', 'focal_stablemax', or 'focal'
@@ -1211,6 +1276,10 @@ class RLANLoss(nn.Module):
             min_clue_weight: Penalty weight for using fewer than min_clues (default=5.0)
             ponder_weight: Base cost per clue used (ACT-style, default=0.02)
             entropy_ponder_weight: Extra cost for high-entropy attention (default=0.02)
+            clue_variance_weight: Penalty weight for low variance in clue count (default=0, off)
+            clue_target_variance: Target std for clue count across batch (default=0.5)
+            stop_saturation_weight: Penalty weight for extreme stop logits (default=0, off)
+            stop_saturation_threshold: |stop_logit| above which penalty applies (default=5.0)
             max_clues: Maximum number of clues
             use_stablemax: DEPRECATED - use loss_mode instead
             loss_mode: Loss function mode:
@@ -1290,6 +1359,10 @@ class RLANLoss(nn.Module):
             ponder_weight=ponder_weight,
             min_clue_weight=min_clue_weight,  # From config (strong penalty for < min_clues)
             entropy_ponder_weight=entropy_ponder_weight,  # Extra cost for diffuse attention
+            variance_weight=clue_variance_weight,  # NEW: Penalty for low clue count variance
+            target_variance=clue_target_variance,  # NEW: Target std for clue count
+            saturation_weight=stop_saturation_weight,  # NEW: Penalty for extreme stop logits
+            saturation_threshold=stop_saturation_threshold,  # NEW: |logit| threshold
         )
         self.predicate_diversity = PredicateDiversityLoss()
         self.centroid_diversity = CentroidDiversityLoss(min_distance=2.0, weight_by_usage=True)
@@ -1301,6 +1374,10 @@ class RLANLoss(nn.Module):
         
         # Print sparsity config for debugging
         print(f"  Clue Regularization: min_clues={min_clues}, min_clue_weight={min_clue_weight}, ponder_weight={ponder_weight}, entropy_weight={entropy_ponder_weight}")
+        if clue_variance_weight > 0:
+            print(f"  Clue Variance Regularization: weight={clue_variance_weight}, target_std={clue_target_variance}")
+        if stop_saturation_weight > 0:
+            print(f"  Stop Saturation Guard: weight={stop_saturation_weight}, threshold={stop_saturation_threshold}")
         print(f"  Centroid Diversity: lambda={self.lambda_centroid_diversity} (prevents DSC clue collapse)")
         
         self.lambda_entropy = lambda_entropy

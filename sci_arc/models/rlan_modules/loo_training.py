@@ -801,6 +801,431 @@ class CombinedMetaLoss(nn.Module):
         return total_loss, metrics
 
 
+class OutputEquivarianceLoss(nn.Module):
+    """
+    Output-Level Equivariance Loss (Jan 2026 FIX).
+    
+    PROBLEM: The existing AugmentationEquivarianceLoss compares LoRA weight 
+    predictions, but HyperLoRA uses D4-invariant pooling which produces 
+    identical contexts for augmented inputs by design. Result: equiv_loss ≈ 0.
+    
+    SOLUTION: Compare OUTPUTS (logits/predictions) instead of intermediate 
+    representations. Apply augmentation to input, get prediction, apply 
+    inverse augmentation to prediction, compare with original prediction.
+    
+    This directly optimizes for TTA consensus: if all augmented views produce
+    the same inverse-transformed output, voting will be unanimous.
+    
+    MASKING FIX (Jan 2026): When mask_to_target=True, the loss is computed
+    only over the true output region (not the padded 30x30 canvas). This
+    prevents the model from wasting capacity learning to be equivariant
+    on padding, which dilutes the learning signal.
+    
+    Args:
+        config: Equivariance configuration
+        loss_type: 'kl' (KL divergence on logits) or 'l2' (L2 on predictions)
+        mask_to_target: If True, only compute loss on non-padded output region
+        pad_value: The padding value used in targets (default: -100 for ignore_index)
+    """
+    
+    def __init__(self, config, loss_type: str = 'kl', mask_to_target: bool = True, pad_value: int = -100):
+        super().__init__()
+        self.config = config
+        self.loss_type = loss_type
+        self.mask_to_target = mask_to_target
+        self.pad_value = pad_value
+        
+    def apply_augmentation(
+        self,
+        tensor: torch.Tensor,
+        aug_type: str,
+        inverse: bool = False
+    ) -> torch.Tensor:
+        """Apply or inverse-apply an augmentation to (B, C, H, W) or (B, H, W) tensor."""
+        is_3d = tensor.dim() == 3
+        if is_3d:
+            tensor = tensor.unsqueeze(1)
+        
+        if aug_type == 'rotate_90':
+            if inverse:
+                result = torch.rot90(tensor, k=-1, dims=(2, 3))
+            else:
+                result = torch.rot90(tensor, k=1, dims=(2, 3))
+        elif aug_type == 'rotate_180':
+            result = torch.rot90(tensor, k=2, dims=(2, 3))
+        elif aug_type == 'rotate_270':
+            if inverse:
+                result = torch.rot90(tensor, k=-3, dims=(2, 3))
+            else:
+                result = torch.rot90(tensor, k=3, dims=(2, 3))
+        elif aug_type == 'flip_h':
+            result = torch.flip(tensor, dims=[3])
+        elif aug_type == 'flip_v':
+            result = torch.flip(tensor, dims=[2])
+        else:
+            result = tensor
+            
+        if is_3d:
+            result = result.squeeze(1)
+            
+        return result
+    
+    def forward(
+        self,
+        model: nn.Module,
+        test_inputs: torch.Tensor,  # (B, H, W)
+        train_inputs: torch.Tensor,  # (B, N, H, W)
+        train_outputs: torch.Tensor,  # (B, N, H, W)
+        pair_mask: torch.Tensor,  # (B, N)
+        original_logits: torch.Tensor,  # (B, C, H, W) - from original forward (WITH GRADIENTS!)
+        temperature: float = 1.0,
+        augmentations: Optional[list] = None,
+        num_augmentations: int = 2,  # Keep low for memory (each is a full forward pass)
+        target_mask: Optional[torch.Tensor] = None,  # (B, H, W) bool mask of valid (non-padded) pixels
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Compute output-level equivariance loss.
+        
+        GRADIENT FLOW FIX (Jan 2026):
+        The original implementation had NO gradients because:
+        1. original_logits was .detach()ed when passed in
+        2. original_probs computed under torch.no_grad()
+        
+        The FIX:
+        - original_logits MUST have gradients (comes from main forward pass)
+        - original_probs computed WITH gradients
+        - inv_probs (from augmented forward) is the TARGET (no_grad is OK)
+        - KL(inv_probs || original_probs) teaches: "make original output 
+          distribution match the consensus of augmented views"
+        
+        MASKING FIX (Jan 2026):
+        - If target_mask is provided, only pixels where mask=True contribute to loss
+        - This prevents wasting capacity on padding equivariance
+        - If mask_to_target=True (default), creates mask from test_targets != pad_value
+        
+        Args:
+            model: Full RLAN model for forward passes
+            test_inputs: Test input grid (original)
+            train_inputs: Training input grids (original)
+            train_outputs: Training output grids (original)
+            pair_mask: Valid pair mask
+            original_logits: Logits from original forward pass (MUST have gradients!)
+            temperature: DSC temperature
+            augmentations: List of augmentation types to use
+            num_augmentations: How many augmentations to sample
+            target_mask: Optional explicit mask of valid pixels (B, H, W). If None and
+                         mask_to_target=True, will use all pixels (caller should provide mask).
+            
+        Returns:
+            Tuple of (loss, metrics_dict)
+        """
+        import random
+        
+        if augmentations is None:
+            augmentations = ['rotate_90', 'rotate_180', 'flip_h', 'flip_v']
+        
+        if not self.config.enabled or num_augmentations == 0:
+            return torch.tensor(0.0, device=test_inputs.device, requires_grad=True), {
+                'output_equiv_loss': 0.0,
+                'output_equiv_skipped': True,
+            }
+        
+        # Select augmentations
+        selected_augs = random.sample(augmentations, min(num_augmentations, len(augmentations)))
+        
+        # GRADIENT FIX: Compute original_probs WITH gradients!
+        # This is what we're optimizing - making original output match augmented consensus
+        original_probs = F.softmax(original_logits, dim=1)  # (B, C, H, W) - HAS GRADIENTS
+        
+        # Accumulate inverse-augmented probabilities for consensus target
+        # We'll average them to get the "augmented consensus" distribution
+        inv_probs_list = []
+        per_aug_loss = {}
+        
+        for aug_type in selected_augs:
+            # Apply augmentation to ALL inputs (test and train)
+            aug_test = self.apply_augmentation(test_inputs, aug_type)
+            aug_train_in = self.apply_augmentation(train_inputs, aug_type)
+            aug_train_out = self.apply_augmentation(train_outputs, aug_type)
+            
+            # Forward pass on augmented inputs
+            # No gradients needed - augmented outputs form the TARGET distribution
+            # FIX (Jan 2026): Keep model in SAME mode as original forward to avoid
+            # train/eval mismatch (dropout differences would destabilize the equiv signal)
+            with torch.no_grad():
+                aug_outputs = model(
+                    aug_test,
+                    train_inputs=aug_train_in,
+                    train_outputs=aug_train_out,
+                    pair_mask=pair_mask,
+                    temperature=temperature,
+                    return_intermediates=False,
+                )
+            
+            aug_logits = aug_outputs['logits']  # (B, C, H, W)
+            
+            # Apply INVERSE augmentation to get back to original space
+            inv_logits = self.apply_augmentation(aug_logits, aug_type, inverse=True)
+            inv_probs = F.softmax(inv_logits, dim=1)  # No grad (target)
+            inv_probs_list.append(inv_probs)
+            
+            # Clean up intermediate tensors
+            del aug_test, aug_train_in, aug_train_out, aug_outputs, aug_logits, inv_logits
+        
+        # Compute average inverse-augmented probability as target (consensus)
+        # This is what we want the original output to match
+        target_probs = torch.stack(inv_probs_list, dim=0).mean(dim=0)  # (B, C, H, W), no grad
+        
+        # MASKING FIX (Jan 2026): Only compute loss on valid (non-padded) pixels
+        # This prevents the model from wasting capacity on padding equivariance
+        if target_mask is not None and self.mask_to_target:
+            # target_mask: (B, H, W) bool, True = valid pixel
+            # Expand to (B, 1, H, W) for broadcasting with (B, C, H, W)
+            mask_expanded = target_mask.unsqueeze(1).float()  # (B, 1, H, W)
+            num_valid = mask_expanded.sum()
+            if num_valid == 0:
+                # No valid pixels - skip this batch (shouldn't happen)
+                return torch.tensor(0.0, device=test_inputs.device, requires_grad=True), {
+                    'output_equiv_loss': 0.0,
+                    'output_equiv_skipped': True,
+                    'output_equiv_reason': 'no_valid_pixels',
+                }
+        else:
+            mask_expanded = None
+            num_valid = None
+        
+        # Compute KL divergence: KL(target || original)
+        # This teaches: "make original_probs more like target_probs"
+        # Gradient flows through original_probs (the Q in KL(P||Q))
+        epsilon = 1e-8
+        if self.loss_type == 'kl':
+            # KL(P || Q) = sum(P * log(P/Q)) where P=target (no grad), Q=original (has grad)
+            # Gradient flows through log(Q) term
+            kl_per_pixel = target_probs * (torch.log(target_probs + epsilon) - 
+                                           torch.log(original_probs + epsilon))
+            kl_per_spatial = kl_per_pixel.sum(dim=1)  # (B, H, W) - sum over classes
+            
+            if mask_expanded is not None:
+                # Apply mask: only count valid pixels
+                masked_kl = kl_per_spatial * mask_expanded.squeeze(1)  # (B, H, W)
+                total_loss = masked_kl.sum() / num_valid  # Mean over valid pixels only
+            else:
+                total_loss = kl_per_spatial.mean()  # Mean over all spatial/batch
+        else:
+            # L2 on probability distributions
+            l2_per_class = (target_probs - original_probs).pow(2)  # (B, C, H, W)
+            l2_per_spatial = l2_per_class.mean(dim=1)  # (B, H, W) - mean over classes
+            
+            if mask_expanded is not None:
+                masked_l2 = l2_per_spatial * mask_expanded.squeeze(1)
+                total_loss = masked_l2.sum() / num_valid
+            else:
+                total_loss = l2_per_spatial.mean()
+        
+        # Compute per-augmentation losses for diagnostics
+        with torch.no_grad():
+            for i, aug_type in enumerate(selected_augs):
+                inv_p = inv_probs_list[i]
+                orig_p = original_probs.detach()
+                if self.loss_type == 'kl':
+                    aug_kl = (inv_p * (torch.log(inv_p + epsilon) - torch.log(orig_p + epsilon))).sum(dim=1).mean()
+                else:
+                    aug_kl = (inv_p - orig_p).pow(2).mean()
+                per_aug_loss[aug_type] = aug_kl.item()
+        
+        # Clean up
+        del inv_probs_list, target_probs
+        
+        # NOTE (Jan 2026 FIX): We do NOT divide by len(selected_augs) here!
+        # target_probs is already the AVERAGE of all augmented views, so the KL
+        # loss is already properly scaled. Dividing again would weaken the signal.
+        
+        metrics = {
+            'output_equiv_loss': total_loss.item() if torch.is_tensor(total_loss) else total_loss,
+            'output_equiv_per_aug': per_aug_loss,
+            'output_equiv_num_augs': len(selected_augs),
+            'output_equiv_skipped': False,
+        }
+        
+        return total_loss, metrics
+
+
+class GroupMarginalizedNLLLoss(nn.Module):
+    """
+    Group-Marginalized NLL Loss (Jan 2026).
+    
+    MATHEMATICAL FOUNDATION:
+    Instead of training with consistency loss + regular NLL fighting each other,
+    this loss trains directly on the GROUP-MARGINALIZED predictor:
+    
+        p̄_θ(y|x) = (1/K) Σ_{g∈G} g⁻¹(p_θ(·|g(x)))
+    
+    where G is the transform group (e.g., D4 dihedral), and g⁻¹ is the inverse
+    transform applied to the output distribution.
+    
+    The loss is then: L = -Σ_{i∈Ω} log p̄_θ(y_i|x)
+    
+    where Ω is the true output region (not padded).
+    
+    ADVANTAGES:
+    1. Directly optimizes the same distribution that TTA voting uses
+    2. No fighting between NLL and consistency losses
+    3. Gradients flow through the averaging operation naturally
+    4. Mathematically principled: marginalizes over nuisance transforms
+    
+    PRACTICAL NOTES:
+    - Use K=2-4 augmentations for compute efficiency
+    - Can replace both regular NLL and output-equiv losses
+    - Or use as auxiliary loss with regular training
+    
+    Args:
+        num_augmentations: Number of random augmentations to sample per batch
+        ignore_index: Padding value to ignore in loss (default: -100)
+        augmentations: List of augmentation types to use
+    """
+    
+    def __init__(
+        self,
+        num_augmentations: int = 2,
+        ignore_index: int = -100,
+        augmentations: Optional[List[str]] = None,
+    ):
+        super().__init__()
+        self.num_augmentations = num_augmentations
+        self.ignore_index = ignore_index
+        self.augmentations = augmentations or ['rotate_90', 'rotate_180', 'flip_h', 'flip_v']
+        
+        # Reuse apply_augmentation from OutputEquivarianceLoss
+        self._aug_helper = OutputEquivarianceLoss(
+            config=EquivarianceConfig(enabled=True),
+            loss_type='kl'
+        )
+    
+    def forward(
+        self,
+        model: nn.Module,
+        test_inputs: torch.Tensor,  # (B, H, W)
+        train_inputs: torch.Tensor,  # (B, N, H, W)
+        train_outputs: torch.Tensor,  # (B, N, H, W)
+        pair_mask: torch.Tensor,  # (B, N)
+        targets: torch.Tensor,  # (B, H, W) - ground truth with ignore_index padding
+        temperature: float = 1.0,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Compute group-marginalized NLL loss.
+        
+        This trains on: L = -log(avg of inverse-augmented predictions)
+        
+        Args:
+            model: Full RLAN model
+            test_inputs: Test input grid
+            train_inputs: Training input grids
+            train_outputs: Training output grids
+            pair_mask: Valid pair mask
+            targets: Ground truth target with ignore_index for padding
+            temperature: DSC temperature
+            
+        Returns:
+            Tuple of (loss, metrics_dict)
+        """
+        import random
+        
+        B, H, W = test_inputs.shape
+        device = test_inputs.device
+        
+        # Select augmentations (include identity)
+        selected_augs = random.sample(
+            self.augmentations,
+            min(self.num_augmentations, len(self.augmentations))
+        )
+        
+        # Collect inverse-augmented probability distributions
+        all_probs = []
+        
+        # 1. Original forward pass (with gradients)
+        outputs = model(
+            test_inputs,
+            train_inputs=train_inputs,
+            train_outputs=train_outputs,
+            pair_mask=pair_mask,
+            temperature=temperature,
+            return_intermediates=False,
+        )
+        original_logits = outputs['logits']  # (B, C, H, W)
+        original_probs = F.softmax(original_logits, dim=1)
+        all_probs.append(original_probs)
+        
+        # 2. Augmented forward passes (with gradients for marginalization)
+        for aug_type in selected_augs:
+            # Apply augmentation to inputs
+            aug_test = self._aug_helper.apply_augmentation(test_inputs, aug_type)
+            aug_train_in = self._aug_helper.apply_augmentation(train_inputs, aug_type)
+            aug_train_out = self._aug_helper.apply_augmentation(train_outputs, aug_type)
+            
+            # Forward pass (WITH gradients - key for group marginalization!)
+            aug_outputs = model(
+                aug_test,
+                train_inputs=aug_train_in,
+                train_outputs=aug_train_out,
+                pair_mask=pair_mask,
+                temperature=temperature,
+                return_intermediates=False,
+            )
+            aug_logits = aug_outputs['logits']
+            
+            # Apply inverse augmentation to output
+            inv_logits = self._aug_helper.apply_augmentation(aug_logits, aug_type, inverse=True)
+            inv_probs = F.softmax(inv_logits, dim=1)
+            all_probs.append(inv_probs)
+            
+            # Cleanup
+            del aug_test, aug_train_in, aug_train_out, aug_outputs, aug_logits, inv_logits
+        
+        # 3. Average to get group-marginalized distribution
+        # p̄_θ(y|x) = (1/K) Σ_g g⁻¹(p_θ(·|g(x)))
+        marginalized_probs = torch.stack(all_probs, dim=0).mean(dim=0)  # (B, C, H, W)
+        
+        # 4. Compute NLL on marginalized distribution
+        # L = -Σ_{i∈Ω} log p̄_θ(y_i|x)
+        # Use gather to get probability of true class
+        valid_mask = (targets != self.ignore_index)  # (B, H, W)
+        
+        if valid_mask.sum() == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True), {
+                'group_marginalized_nll': 0.0,
+                'skipped': True,
+            }
+        
+        # Clamp targets for gather (replace ignore_index with 0, will be masked anyway)
+        safe_targets = targets.clone()
+        safe_targets[~valid_mask] = 0
+        
+        # Gather probabilities of true class: (B, H, W)
+        true_class_probs = torch.gather(
+            marginalized_probs,  # (B, C, H, W)
+            dim=1,
+            index=safe_targets.unsqueeze(1).long()  # (B, 1, H, W)
+        ).squeeze(1)  # (B, H, W)
+        
+        # Compute negative log-likelihood on valid pixels only
+        epsilon = 1e-8
+        nll_per_pixel = -torch.log(true_class_probs + epsilon)
+        masked_nll = nll_per_pixel * valid_mask.float()
+        loss = masked_nll.sum() / valid_mask.sum()
+        
+        # Cleanup
+        del all_probs, marginalized_probs
+        
+        metrics = {
+            'group_marginalized_nll': loss.item(),
+            'num_augs_used': len(selected_augs) + 1,  # +1 for original
+            'valid_pixels': valid_mask.sum().item(),
+            'skipped': False,
+        }
+        
+        return loss, metrics
+
+
 def create_augmented_contexts(
     encoder: nn.Module,
     support_inputs: torch.Tensor,  # (B, N, C, H, W)

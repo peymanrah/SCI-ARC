@@ -392,6 +392,32 @@ class HyperLoRA(nn.Module):
         
         return context
     
+    def pool_context_simple(self, support_features: torch.Tensor) -> torch.Tensor:
+        """
+        Pool support features WITHOUT dihedral averaging.
+        
+        This is used for equivariance loss training, where we need the
+        context to DIFFER for different orientations so the loss can
+        provide useful gradients.
+        
+        Args:
+            support_features: (B, N, D, H, W) spatial features from ContextEncoder
+            
+        Returns:
+            context: (B, D) pooled context vector (NOT dihedral-invariant)
+        """
+        B, N, D, H, W = support_features.shape
+        
+        # Pool each pair spatially: (B*N, D, H, W) → (B*N, D, 1, 1)
+        features_flat = support_features.reshape(B * N, D, H, W)
+        
+        # Simple pooling without D4 averaging
+        pooled = self.context_pool(features_flat)  # (B*N, D, 1, 1)
+        pooled = pooled.reshape(B, N, D).mean(dim=1)  # (B, D)
+        context = self.context_fuse(pooled)
+        
+        return context
+    
     def _clamp_delta_norm(self, delta: torch.Tensor) -> torch.Tensor:
         """
         Clamp per-sample LoRA delta to max L2 norm.

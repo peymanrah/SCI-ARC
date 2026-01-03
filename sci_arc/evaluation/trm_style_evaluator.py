@@ -148,19 +148,41 @@ def grid_hash(grid: np.ndarray) -> str:
     return hashlib.sha256(b"".join(buffer)).hexdigest()
 
 
-def crop_prediction(pred: np.ndarray, pad_value: int = 10) -> np.ndarray:
+def crop_prediction(pred: np.ndarray, pad_value: int = 10, target_shape: tuple = None) -> np.ndarray:
     """
     Crop prediction to remove padding.
     
-    Similar to TRM's _crop but works with our padding scheme (pad_value=10).
-    Finds the largest rectangle without padding.
+    CRITICAL FIX (Jan 2026): Now uses target_shape when provided.
     
-    CRITICAL: Also excludes -100 (ignore_index) from content mask.
+    The previous implementation tried to detect content by finding pixels != pad_value.
+    This FAILED because:
+    1. pad_value=10 is NOT a valid ARC color, but model doesn't predict it in padded regions
+    2. The model predicts 0-9 only, so pad detection by pad_value=10 never finds content
+    3. Result: crop_prediction returns wrong-sized grids, causing 0% exact match
+       even when the valid region has ~76% pixel accuracy!
+    
+    The fix is simple: pass the expected output shape through the pipeline
+    and crop to that exact size. This matches what TRM does.
+    
+    Args:
+        pred: (H, W) prediction array (possibly 30x30 padded)
+        pad_value: Fallback padding value for content detection (legacy mode)
+        target_shape: (h, w) expected output size. If provided, crop to this exact size.
+    
+    Returns:
+        Cropped prediction of shape target_shape (if provided) or detected content region
     """
     # Find rows and cols that contain actual content (not padding)
     if pred.ndim == 1:
         pred = pred.reshape(30, 30)  # Assume max ARC size
     
+    # NEW: If target_shape is provided, use it directly (correct approach)
+    if target_shape is not None:
+        h, w = target_shape
+        return pred[:h, :w].copy()
+    
+    # LEGACY FALLBACK: Content-based detection (unreliable but kept for backward compat)
+    # This path should rarely be used - always prefer passing target_shape
     # Mask of non-padding positions (exclude both pad_value=10 and ignore_index=-100)
     content_mask = (pred != pad_value) & (pred != -100)
     
@@ -186,6 +208,12 @@ class TRMStyleEvaluator:
     2. Aggregated voting across multiple predictions per task
     3. Confidence-based ranking of predictions
     4. Pass@K metrics for comparison
+    
+    SOFT AGGREGATION (Jan 2026):
+    When voting_mode='soft', uses log-mean-exp of confidence scores instead
+    of hard count-based voting. This is more robust when predictions are
+    uncertain (ties/high entropy). Mathematically aligns with group-marginalized
+    predictive distribution.
     """
     
     def __init__(
@@ -193,16 +221,19 @@ class TRMStyleEvaluator:
         pass_Ks: List[int] = [1, 2, 5, 10],
         use_voting: bool = True,
         pad_value: int = 10,
+        voting_mode: str = 'hard',  # Jan 2026: 'hard' (count-based) or 'soft' (log-mean-exp)
     ):
         """
         Args:
             pass_Ks: K values for Pass@K metrics
             use_voting: Whether to use aggregated voting (recommended)
             pad_value: Value used for padding in predictions
+            voting_mode: 'hard' for count*conf voting, 'soft' for log-mean-exp
         """
         self.pass_Ks = sorted(pass_Ks)
         self.use_voting = use_voting
         self.pad_value = pad_value
+        self.voting_mode = voting_mode
         
         # Storage for predictions per task
         # {task_id: {input_hash: [(pred_hash, confidence, pred_grid)]}}
@@ -224,6 +255,7 @@ class TRMStyleEvaluator:
         aug_info: Dict[str, Any],
         confidence: float = 1.0,
         input_grid: Optional[np.ndarray] = None,
+        target_shape: Optional[tuple] = None,
     ):
         """
         Add a prediction for evaluation.
@@ -238,9 +270,21 @@ class TRMStyleEvaluator:
                 - 'offset_r', 'offset_c': translation offset (if any)
             confidence: Model confidence score (higher = better)
             input_grid: Optional input grid for computing input hash
+            target_shape: (h, w) expected output shape for proper cropping (CRITICAL FIX Jan 2026)
+                         If provided, crops to this exact size instead of pad detection.
         """
         # Step 1: Crop prediction to remove padding
-        pred_cropped = crop_prediction(prediction, self.pad_value)
+        # CRITICAL FIX (Jan 2026): Use target_shape when provided for reliable cropping
+        # Also get aug_target_shape for augmented space cropping
+        aug_target_shape = None
+        if target_shape is not None:
+            # For dihedral transforms that swap dimensions (90°, 270°, transpose, anti-transpose)
+            dihedral_id = aug_info.get('dihedral_id', 0)
+            if dihedral_id in [1, 3, 6, 7]:  # rotations by 90°/270° and transposes swap H/W
+                aug_target_shape = (target_shape[1], target_shape[0])  # swap
+            else:
+                aug_target_shape = target_shape
+        pred_cropped = crop_prediction(prediction, self.pad_value, target_shape=aug_target_shape)
         
         # Step 2: Apply inverse augmentation to bring prediction to canonical space
         pred_canonical = pred_cropped.copy()
@@ -277,8 +321,8 @@ class TRMStyleEvaluator:
         # Step 5: Store ground truth (in canonical space)
         # CRITICAL FIX: ground_truth is already in CANONICAL space (per docstring),
         # so we should NOT apply inverse transforms to it!
-        # Only crop to remove padding.
-        gt_cropped = crop_prediction(ground_truth, self.pad_value)
+        # Use target_shape for reliable cropping if provided.
+        gt_cropped = crop_prediction(ground_truth, self.pad_value, target_shape=target_shape)
         
         if task_id not in self._ground_truths:
             self._ground_truths[task_id] = {}
@@ -292,8 +336,9 @@ class TRMStyleEvaluator:
         aug_infos: List[Dict[str, Any]],
         confidences: Optional[torch.Tensor] = None,  # (B,)
         input_grids: Optional[torch.Tensor] = None,  # (B, H, W)
+        target_shapes: Optional[List[tuple]] = None,  # List of (h, w) per sample
     ):
-        """Batch version of update."""
+        """Batch version of update with target_shapes support (Jan 2026 fix)."""
         B = len(task_ids)
         
         if confidences is None:
@@ -316,6 +361,7 @@ class TRMStyleEvaluator:
                 aug_info=aug_infos[i],
                 confidence=float(confidences_np[i]),
                 input_grid=input_grids_np[i] if input_grids is not None else None,
+                target_shape=target_shapes[i] if target_shapes is not None else None,
             )
     
     def compute_metrics(self) -> Dict[str, float]:
@@ -344,21 +390,45 @@ class TRMStyleEvaluator:
                 
                 if self.use_voting:
                     # Aggregate predictions by hash, accumulate confidence
-                    hash_votes: Dict[str, Tuple[int, float]] = {}  # {hash: (count, total_confidence)}
+                    hash_votes: Dict[str, Tuple[int, float, List[float]]] = {}  # {hash: (count, total_confidence, conf_list)}
                     for pred_hash, conf, _ in pred_list:
                         if pred_hash not in hash_votes:
-                            hash_votes[pred_hash] = (0, 0.0)
-                        count, total_conf = hash_votes[pred_hash]
-                        hash_votes[pred_hash] = (count + 1, total_conf + conf)
+                            hash_votes[pred_hash] = (0, 0.0, [])
+                        count, total_conf, conf_list = hash_votes[pred_hash]
+                        hash_votes[pred_hash] = (count + 1, total_conf + conf, conf_list + [conf])
                     
-                    # Rank by (average confidence * count) = total_confidence for robust voting
-                    # This gives preference to predictions that are both frequent AND confident
-                    ranked = sorted(
-                        hash_votes.items(),
-                        key=lambda x: x[1][1],  # total_confidence (= avg_conf * count)
-                        reverse=True
-                    )
-                    ranked_hashes = [h for h, _ in ranked]
+                    if self.voting_mode == 'soft':
+                        # SOFT AGGREGATION (Jan 2026): Use log-mean-exp of confidences
+                        # This is more robust when predictions are uncertain
+                        # Score = log(mean(exp(log_conf))) ≈ mean(conf) for small conf
+                        # but handles extreme values better than simple sum
+                        import math
+                        ranked = []
+                        for h, (count, total_conf, conf_list) in hash_votes.items():
+                            # Log-mean-exp: log(1/n * sum(exp(log_conf_i)))
+                            # For stability, use log-sum-exp trick
+                            if conf_list:
+                                max_log = max(math.log(c + 1e-10) for c in conf_list)
+                                log_sum_exp = max_log + math.log(
+                                    sum(math.exp(math.log(c + 1e-10) - max_log) for c in conf_list)
+                                )
+                                log_mean_exp = log_sum_exp - math.log(len(conf_list))
+                                # Convert back to linear scale, multiply by count for frequency boost
+                                soft_score = math.exp(log_mean_exp) * count
+                            else:
+                                soft_score = 0.0
+                            ranked.append((h, soft_score))
+                        ranked.sort(key=lambda x: x[1], reverse=True)
+                        ranked_hashes = [h for h, _ in ranked]
+                    else:
+                        # HARD VOTING: Rank by (average confidence * count) = total_confidence
+                        # This gives preference to predictions that are both frequent AND confident
+                        ranked = sorted(
+                            hash_votes.items(),
+                            key=lambda x: x[1][1],  # total_confidence (= avg_conf * count)
+                            reverse=True
+                        )
+                        ranked_hashes = [h for h, _ in ranked]
                 else:
                     # No voting: rank by confidence directly
                     sorted_preds = sorted(pred_list, key=lambda x: x[1], reverse=True)

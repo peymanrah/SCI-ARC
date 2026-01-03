@@ -1,0 +1,12 @@
+============================================================
+RLAN Evaluation
+============================================================
+Timestamp: 2026-01-03T10:47:56.243721
+Log file: eval_results_noTTA\evaluation_log_20260103_104756.txt
+Checkpoint: checkpoints/rlan_stable_dev/latest.pt
+Output directory: ./eval_results_noTTA
+Use TTA: False
+Detailed output: False
+Best-step selection: from config
+Solver steps override: None (use model default)
+============================================================

@@ -485,6 +485,7 @@ class ARCDataset(Dataset):
         cache_load_percent: float = 100.0,  # NEW: Percentage of cache to load (1-100)
         max_tasks: int = None,  # NEW: Limit number of tasks loaded (for testing)
         stratified_seed: int = 42,  # NEW: Seed for deterministic stratified sampling
+        task_paths: list = None,  # NEW: Explicit list of task file paths (for merged training)
     ):
         """
         Initialize ARCDataset.
@@ -512,8 +513,14 @@ class ARCDataset(Dataset):
                                Use 10-20% for quick testing without loading full cache
                                E.g., 10% of 50GB = 5GB, loads in ~20s instead of 3min
             stratified_seed: Seed for deterministic stratified sampling (default: 42)
+            task_paths: Optional list of explicit task file paths to load.
+                        When provided, loads tasks from these paths instead of data_path.
+                        Used for merged training (ARC-AGI-1 + ARC-AGI-2) where tasks
+                        come from a manifest file rather than a single directory.
+                        Default: None (use data_path for discovery)
         """
         self.data_path = Path(data_path)
+        self.task_paths = task_paths  # Explicit task paths (for merged training)
         self.max_size = max_size
         self.augment = augment
         self.color_permutation = color_permutation
@@ -528,6 +535,19 @@ class ARCDataset(Dataset):
         self.cache_load_percent = min(100.0, max(1.0, cache_load_percent))  # Clamp to 1-100%
         self.max_tasks = max_tasks
         self.stratified_seed = stratified_seed
+        
+        # =====================================================================
+        # RUNTIME AUGMENTATION CONTROL (Jan 2026 - Phased Training Support)
+        # =====================================================================
+        # These flags can be modified at runtime via set_augmentation_config()
+        # to support phased training without recreating the dataset.
+        # IMPORTANT: Only affects non-cached samples. Cached samples have
+        # fixed augmentations applied at cache build time.
+        # =====================================================================
+        self._runtime_augment_override = None  # None = use self.augment
+        self._runtime_color_perm_override = None  # None = use self.color_permutation
+        self._runtime_color_perm_prob_override = None  # None = use self.color_permutation_prob
+        self._runtime_translational_override = None  # None = use self.translational_augment
         
         # Cached sample storage
         self._cached_samples: List[Dict[str, Any]] = []
@@ -563,9 +583,30 @@ class ARCDataset(Dataset):
             self._build_cache()
     
     def _load_tasks(self) -> List[Dict]:
-        """Load tasks from JSON file or directory."""
+        """Load tasks from JSON file, directory, or explicit task_paths list."""
         tasks = []
         
+        # MERGED TRAINING SUPPORT (Jan 2026): If task_paths provided, use those
+        # This allows loading tasks from a manifest (merged AGI-1 + AGI-2) instead
+        # of discovering them from a directory. Backward compatible: if task_paths
+        # is None, falls through to original data_path-based loading.
+        if self.task_paths is not None:
+            print(f"  [Merged Training] Loading {len(self.task_paths)} tasks from explicit paths...")
+            for task_path in self.task_paths:
+                try:
+                    task_path = Path(task_path)
+                    with open(task_path, 'r') as f:
+                        task_data = json.load(f)
+                    tasks.append({
+                        'task_id': task_path.stem,
+                        'train': task_data.get('train', []),
+                        'test': task_data.get('test', [])
+                    })
+                except Exception as e:
+                    print(f"Warning: Failed to load {task_path}: {e}")
+            return tasks
+        
+        # Original loading logic (unchanged for backward compatibility)
         if self.data_path.is_file() and self.data_path.suffix == '.json':
             # Single JSON file (combined format)
             with open(self.data_path, 'r') as f:
@@ -1016,6 +1057,96 @@ class ARCDataset(Dataset):
         
         return result
     
+    # =========================================================================
+    # RUNTIME AUGMENTATION CONTROL (Jan 2026 - Phased Training Support)
+    # =========================================================================
+    
+    def set_augmentation_config(
+        self,
+        augment: Optional[bool] = None,
+        color_permutation: Optional[bool] = None,
+        color_permutation_prob: Optional[float] = None,
+        translational_augment: Optional[bool] = None,
+    ) -> None:
+        """
+        Update augmentation settings at runtime for phased training.
+        
+        This allows changing augmentation behavior between epochs without
+        recreating the dataset. Use None to reset to the original constructor value.
+        
+        IMPORTANT: This only affects non-cached (on-the-fly) samples!
+        If cache_samples=True, cached samples have fixed augmentations that
+        were applied at cache build time. This method will print a warning
+        if called with caching enabled.
+        
+        Args:
+            augment: Override dihedral augmentation (rotation/flip/transpose).
+                     None = use original constructor value.
+            color_permutation: Override color permutation.
+                               None = use original constructor value.
+            color_permutation_prob: Override color permutation probability.
+                                    None = use original constructor value.
+            translational_augment: Override translational augmentation.
+                                   None = use original constructor value.
+        
+        Example:
+            # Phase A: No augmentation
+            dataset.set_augmentation_config(augment=False, color_permutation=False)
+            
+            # Phase B: Geometric augmentation only
+            dataset.set_augmentation_config(augment=True, color_permutation=False)
+            
+            # Phase C: Full augmentation
+            dataset.set_augmentation_config(augment=True, color_permutation=True)
+            
+            # Reset to constructor defaults
+            dataset.set_augmentation_config()
+        """
+        if self.cache_samples and self._cached_samples:
+            print(f"[WARNING] set_augmentation_config() called but cache_samples=True!")
+            print(f"  Cached samples have FIXED augmentations from build time.")
+            print(f"  Runtime changes will NOT affect cached samples.")
+            print(f"  To use phased augmentation, set cache_samples=False or use separate runs.")
+        
+        self._runtime_augment_override = augment
+        self._runtime_color_perm_override = color_permutation
+        self._runtime_color_perm_prob_override = color_permutation_prob
+        self._runtime_translational_override = translational_augment
+        
+        # Log the change
+        aug_status = self._get_effective_augment()
+        color_status = self._get_effective_color_perm()
+        color_prob = self._get_effective_color_perm_prob()
+        trans_status = self._get_effective_translational()
+        print(f"  [ARCDataset] Augmentation config updated:")
+        print(f"    dihedral={aug_status}, color_perm={color_status} (prob={color_prob:.2f}), translational={trans_status}")
+    
+    def _get_effective_augment(self) -> bool:
+        """Get effective augment setting (runtime override or constructor value)."""
+        if self._runtime_augment_override is not None:
+            return self._runtime_augment_override
+        return self.augment
+    
+    def _get_effective_color_perm(self) -> bool:
+        """Get effective color_permutation setting."""
+        if self._runtime_color_perm_override is not None:
+            return self._runtime_color_perm_override
+        return self.color_permutation
+    
+    def _get_effective_color_perm_prob(self) -> float:
+        """Get effective color_permutation_prob setting."""
+        if self._runtime_color_perm_prob_override is not None:
+            return self._runtime_color_perm_prob_override
+        return self.color_permutation_prob
+    
+    def _get_effective_translational(self) -> bool:
+        """Get effective translational_augment setting."""
+        if self._runtime_translational_override is not None:
+            return self._runtime_translational_override
+        return self.translational_augment
+    
+    # =========================================================================
+    
     def __len__(self) -> int:
         if self.cache_samples and self._cached_samples:
             return len(self._cached_samples)
@@ -1027,6 +1158,9 @@ class ARCDataset(Dataset):
         
         If cache_samples=True, returns a pre-generated cached sample.
         Otherwise, generates fresh random augmentation on-the-fly.
+        
+        PHASED TRAINING (Jan 2026): Uses _get_effective_*() methods to respect
+        runtime augmentation overrides set via set_augmentation_config().
         """
         # Return cached sample if available
         if self.cache_samples and self._cached_samples:
@@ -1058,19 +1192,25 @@ class ARCDataset(Dataset):
             'translational_offset': (0, 0),
         }
         
+        # Get effective augmentation settings (respects runtime overrides for phased training)
+        effective_augment = self._get_effective_augment()
+        effective_color_perm = self._get_effective_color_perm()
+        effective_color_prob = self._get_effective_color_perm_prob()
+        effective_translational = self._get_effective_translational()
+        
         # CRITICAL ORDER: TRM applies color permutation FIRST, then dihedral
         # Forward: color_perm → dihedral
         # Inverse: inverse_dihedral → inverse_color
         
         # Step 1: Apply color permutation FIRST (like TRM)
-        if self.color_permutation and random.random() < self.color_permutation_prob:
+        if effective_color_perm and random.random() < effective_color_prob:
             train_inputs, train_outputs, test_input, test_output, color_perm = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )
             aug_info['color_perm'] = color_perm  # Store actual array for inverse!
         
         # Step 2: Apply dihedral augmentation SECOND (like TRM)
-        if self.augment:
+        if effective_augment:
             train_inputs, train_outputs, test_input, test_output, dihedral_id = self._augment_dihedral_tracked(
                 train_inputs, train_outputs, test_input, test_output
             )
@@ -1079,7 +1219,7 @@ class ARCDataset(Dataset):
         # Compute random translational offset (shared across all grids in this sample)
         # TRM-style: random position within 30×30 canvas
         offset = None
-        if self.translational_augment:
+        if effective_translational:
             # Find max grid dimensions in this task to determine valid offset range
             all_grids = train_inputs + train_outputs + [test_input, test_output]
             max_h = max(g.shape[0] for g in all_grids)
