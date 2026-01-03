@@ -1814,6 +1814,14 @@ def train_epoch(
                     losses['hpm_balance_loss'] = weighted_hpm_loss.item() if torch.is_tensor(weighted_hpm_loss) else weighted_hpm_loss
                     losses['total_loss'] = losses['total_loss'] + weighted_hpm_loss
                 
+                # Add HyperLoRA delta regularization loss if present (Dec 2025)
+                # This prevents LoRA delta norm from growing without bound
+                if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
+                    delta_reg_loss = outputs['lora_deltas'].get('delta_reg_loss', None)
+                    if delta_reg_loss is not None and torch.is_tensor(delta_reg_loss):
+                        losses['delta_reg_loss'] = delta_reg_loss.item()
+                        losses['total_loss'] = losses['total_loss'] + delta_reg_loss
+                
                 # Scale loss for gradient accumulation
                 # Note: LOO and Equiv losses already have their backward done inside
                 loss = losses['total_loss'] / grad_accumulation_steps
@@ -3305,11 +3313,40 @@ def inverse_color_perm(arr: np.ndarray, perm: np.ndarray) -> np.ndarray:
     return inv_perm[arr]
 
 
-def crop_prediction(pred: np.ndarray, pad_value: int = 10) -> np.ndarray:
-    """Crop prediction to remove padding."""
+def crop_prediction(pred: np.ndarray, target_shape: tuple = None, pad_value: int = 10) -> np.ndarray:
+    """
+    Crop prediction to remove padding.
+    
+    CRITICAL FIX (Dec 2025): Now uses target_shape when provided.
+    
+    The previous implementation tried to detect content by finding pixels != pad_value.
+    This FAILED because:
+    1. pad_value=10 is a valid ARC color that can appear in real outputs
+    2. The model is NOT trained to predict pad_value=10 in padded regions
+    3. Result: crop_prediction returns wrong-sized grids, causing 0% exact match
+       even when the valid region has ~76% pixel accuracy!
+    
+    The fix is simple: pass the expected output shape through the pipeline
+    and crop to that exact size. This matches what TRM does.
+    
+    Args:
+        pred: (H, W) prediction array (possibly 30x30 padded)
+        target_shape: (h, w) expected output size. If provided, crop to this exact size.
+        pad_value: Fallback padding value for content detection (legacy mode)
+    
+    Returns:
+        Cropped prediction of shape target_shape (if provided) or detected content region
+    """
     if pred.ndim == 1:
         pred = pred.reshape(30, 30)
     
+    # NEW: If target_shape is provided, use it directly (correct approach)
+    if target_shape is not None:
+        h, w = target_shape
+        return pred[:h, :w].copy()
+    
+    # LEGACY FALLBACK: Content-based detection (unreliable but kept for backward compat)
+    # This path should rarely be used - always prefer passing target_shape
     content_mask = (pred != pad_value) & (pred != -100)
     
     if not content_mask.any():
@@ -3421,7 +3458,8 @@ def evaluate_trm_style(
             batch_pair_masks = []       # Will be (total_views, max_pairs)
             
             # Store augmentation info for inverse transforms
-            aug_infos = []  # List of (dihedral_id, color_perm) tuples
+            # FIXED: Now includes expected_aug_shape for proper cropping
+            aug_infos = []  # List of (dihedral_id, color_perm, expected_aug_shape) tuples
             
             for dihedral_id in range(num_dihedral):
                 for color_idx in range(num_color_perms):
@@ -3446,6 +3484,12 @@ def evaluate_trm_style(
                     aug_train_in = [apply_dihedral(g, dihedral_id) for g in color_aug_train_in]
                     aug_train_out = [apply_dihedral(g, dihedral_id) for g in color_aug_train_out]
                     aug_test_in = apply_dihedral(color_aug_test_in, dihedral_id)
+                    
+                    # FIXED: Track expected output shape in AUGMENTED space
+                    # This is what we need to crop the 30x30 padded prediction down to
+                    # before applying inverse_dihedral to get back to canonical space.
+                    # We use the first train output as reference (all pairs should produce same-sized output)
+                    expected_aug_shape = aug_train_out[0].shape  # (H_aug, W_aug)
                     
                     # Pad grids
                     train_in_padded = [pad_grid_for_tta(g, max_size, is_target=False) for g in aug_train_in]
@@ -3473,7 +3517,7 @@ def evaluate_trm_style(
                     batch_train_inputs.append(input_grids)
                     batch_train_outputs.append(output_grids)
                     batch_pair_masks.append(pair_mask)
-                    aug_infos.append((dihedral_id, color_perm))
+                    aug_infos.append((dihedral_id, color_perm, expected_aug_shape))
             
             # ================================================================
             # BATCHED FORWARD PASS: All views in one call
@@ -3513,11 +3557,17 @@ def evaluate_trm_style(
             # ================================================================
             predictions = []  # List of (canonical_pred, confidence)
             
-            for view_idx, (dihedral_id, color_perm) in enumerate(aug_infos):
-                pred = preds[view_idx]  # (H, W)
+            for view_idx, (dihedral_id, color_perm, expected_aug_shape) in enumerate(aug_infos):
+                pred = preds[view_idx]  # (H, W) - this is 30x30 padded
+                
+                # FIXED: Crop using expected_aug_shape instead of content detection
+                # This is the critical fix for the 0% exact match bug!
+                # The model doesn't output pad_value=10 in padded regions, so
+                # content detection fails. We know the expected shape from the
+                # augmented training outputs, so use that directly.
+                pred_cropped = crop_prediction(pred, target_shape=expected_aug_shape)
                 
                 # Inverse transform to canonical space
-                pred_cropped = crop_prediction(pred)
                 pred_canonical = inverse_dihedral(pred_cropped, dihedral_id)
                 if color_perm is not None:
                     pred_canonical = inverse_color_perm(pred_canonical, color_perm)
@@ -6316,9 +6366,16 @@ Config Overrides:
                         print(f"    [!] High equivariance loss - LoRA predictions vary with augmentation")
                 else:
                     # P1.5: Explicitly flag when equivariance is enabled but never computed
-                    if epoch >= config['training'].get('equivariance_training', {}).get('start_epoch', 12):
+                    # FIXED (Dec 2025): Also check if equivariance is actually enabled in config!
+                    # Previously this showed "BROKEN" even when intentionally disabled.
+                    equiv_is_enabled = equiv_config.get('enabled', False) and config.get('model', {}).get('use_hyperlora', False)
+                    if equiv_is_enabled and epoch >= config['training'].get('equivariance_training', {}).get('start_epoch', 12):
                         print(f"  Equivariance: ⚠️ BROKEN - 0 batches computed (should be active)")
                         print(f"    [!] Equivariance path is silently failing - TTA will have <25% consensus")
+                    elif not equiv_is_enabled:
+                        print(f"  Equivariance: DISABLED in config")
+                    else:
+                        print(f"  Equivariance: Not yet active (starts epoch {config['training'].get('equivariance_training', {}).get('start_epoch', 12)})")
                 
                 # Meta-Learning Health Summary (combined status)
                 print(f"  --- Meta-Learning Health Summary ---")

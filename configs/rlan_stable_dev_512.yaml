@@ -192,7 +192,7 @@ training:
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.0
   lambda_act: 0.0
-  lambda_centroid_diversity: 0.1
+  lambda_centroid_diversity: 0.3  # Strengthened per TRAINING_FIXES_DEC2025.md (was 0.1, caused collapse)
   
   # Clue regularization
   min_clues: 1.0
@@ -249,12 +249,15 @@ training:
     min_batch_size: 8
     adjust_grad_accumulation: true
   
-  # Equivariance Training (DISABLED)
+  # Equivariance Training (ENABLED - critical for TTA consensus)
+  # FIXED (Dec 2025): Was disabled, causing "0 batches computed" warning
+  # Equivariance loss ensures HyperLoRA predicts consistent weights for
+  # rotated/flipped versions of the same task, improving TTA voting.
   equivariance_training:
-    enabled: false
+    enabled: true
     start_epoch: 16
     loss_weight: 0.01
-    num_augmentations: 4
+    num_augmentations: 2  # REDUCED from 4 for 512-dim memory safety
   
   # Meta Escalation
   meta_escalation:

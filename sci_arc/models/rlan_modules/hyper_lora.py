@@ -57,6 +57,11 @@ class HyperLoRAConfig:
     - FIX: Reduced lora_max_norm from 3.0 → 1.0 to prevent GRU gate saturation.
     - Mathematical basis: When ||ΔW||_F > 1.0 relative to normalized base weights,
       the adaptation term dominates, causing sigmoid saturation → gradient vanishing.
+    
+    DELTA REGULARIZATION (Dec 2025):
+    - Added delta_reg_weight to encourage smaller LoRA deltas.
+    - Training log showed max_norm growing from 1 to 30+ and hit_rate reaching 5%+.
+    - L2 regularization on predicted deltas prevents this growth at the source.
     """
     enabled: bool = True
     rank: int = 8                          # LoRA rank (8-16 recommended)
@@ -69,6 +74,7 @@ class HyperLoRAConfig:
     num_gru_gates: int = 3                 # reset, update, candidate (GRU has 3 gates)
     init_scale: float = 0.1               # Stronger init for better adaptation signal (was 0.01)
     lora_max_norm: float = 1.0            # P0.1: Hard clamp per-sample delta L2 norm (was 3.0, caused collapse)
+    delta_reg_weight: float = 0.001       # L2 regularization weight on predicted deltas (prevents norm growth)
 
 
 class LoRAPredictor(nn.Module):
@@ -225,11 +231,19 @@ class HyperLoRA(nn.Module):
         # Mathematical invariant: ||ΔW||_F ≤ 1.0 prevents GRU gate saturation.
         self.lora_max_norm = config.lora_max_norm if config and hasattr(config, 'lora_max_norm') else 1.0
         
+        # Delta regularization weight (Dec 2025)
+        # L2 regularization on predicted deltas to prevent norm growth at the source.
+        # Training log showed max_norm growing to 30+ with 5%+ hit rate.
+        self.delta_reg_weight = config.delta_reg_weight if config and hasattr(config, 'delta_reg_weight') else 0.001
+        
         # Jan 2026: Clamp hit-rate tracking for diagnostics
         # These counters are reset each epoch by train_rlan.py to compute hit-rate
         self.clamp_hit_count = 0      # Number of samples that hit the clamp
         self.clamp_total_count = 0    # Total number of samples processed
         self.clamp_max_pre_norm = 0.0  # Max pre-clamp norm seen this epoch
+        
+        # Store last regularization loss for adding to total loss externally
+        self._last_delta_reg_loss = 0.0
         
         # Context pooling: (B, N, D, H, W) → (B, D)
         self.context_pool = nn.Sequential(
@@ -443,6 +457,15 @@ class HyperLoRA(nn.Module):
             'threshold': self.lora_max_norm,
         }
     
+    def get_delta_reg_loss(self) -> float:
+        """
+        Get the last delta regularization loss for logging.
+        
+        This is computed during forward() when delta_reg_weight > 0.
+        Returns 0.0 if regularization is disabled or not computed yet.
+        """
+        return getattr(self, '_last_delta_reg_loss', 0.0)
+    
     def forward(
         self,
         support_features: torch.Tensor,
@@ -460,6 +483,7 @@ class HyperLoRA(nn.Module):
                 - 'gru_candidate': (B, hidden_dim, hidden_dim)
                 - 'output_head': (B, hidden_dim, hidden_dim)
                 - 'context': (B, D) pooled context for other uses
+                - 'delta_reg_loss': (optional) L2 regularization loss if delta_reg_weight > 0
         """
         # Pool to context vector
         context = self.pool_context(support_features)  # (B, D)
@@ -470,14 +494,38 @@ class HyperLoRA(nn.Module):
         # This multiplicatively attenuates deltas during early training
         scale = self.delta_scale
         
+        # Compute raw deltas BEFORE clamping for regularization
+        raw_deltas = {
+            'gru_reset': scale * self.gru_reset_lora.compute_delta_w(context),
+            'gru_update': scale * self.gru_update_lora.compute_delta_w(context),
+            'gru_candidate': scale * self.gru_candidate_lora.compute_delta_w(context),
+            'output_head': scale * self.output_head_lora.compute_delta_w(context),
+        }
+        
+        # Delta regularization loss (Dec 2025)
+        # L2 penalty on raw delta norms to prevent growth at the source
+        # This is more effective than just clamping because gradients flow back
+        delta_reg_loss = 0.0
+        if self.delta_reg_weight > 0 and self.training:
+            for name, delta in raw_deltas.items():
+                # Compute mean L2 norm over batch
+                norm = delta.norm(dim=(1, 2)).mean()
+                delta_reg_loss = delta_reg_loss + norm
+            delta_reg_loss = self.delta_reg_weight * delta_reg_loss
+            self._last_delta_reg_loss = delta_reg_loss.item() if hasattr(delta_reg_loss, 'item') else delta_reg_loss
+        
         # P0.1: Apply norm clamping to prevent runaway LoRA growth (Jan 2026)
         deltas = {
-            'gru_reset': self._clamp_delta_norm(scale * self.gru_reset_lora.compute_delta_w(context)),
-            'gru_update': self._clamp_delta_norm(scale * self.gru_update_lora.compute_delta_w(context)),
-            'gru_candidate': self._clamp_delta_norm(scale * self.gru_candidate_lora.compute_delta_w(context)),
-            'output_head': self._clamp_delta_norm(scale * self.output_head_lora.compute_delta_w(context)),
+            'gru_reset': self._clamp_delta_norm(raw_deltas['gru_reset']),
+            'gru_update': self._clamp_delta_norm(raw_deltas['gru_update']),
+            'gru_candidate': self._clamp_delta_norm(raw_deltas['gru_candidate']),
+            'output_head': self._clamp_delta_norm(raw_deltas['output_head']),
             'context': context,  # Keep for other uses
         }
+        
+        # Include regularization loss in output for external addition to total loss
+        if self.delta_reg_weight > 0 and self.training:
+            deltas['delta_reg_loss'] = delta_reg_loss
         
         return deltas
     

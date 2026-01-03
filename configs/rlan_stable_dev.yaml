@@ -266,7 +266,7 @@ model:
   # - To preserve old buffers, copy them before retraining
   # - Buffers include epoch number for versioning
   # =============================================================
-  hpm_buffer_path: "checkpoints/rlan_stable/hpm"  # Default path for this config
+  hpm_buffer_path: "checkpoints/rlan_stable_256/hpm"  # 256-dim config path
   hpm_buffer_save_frequency: 1       # Save buffers every N epochs (1=every checkpoint)
   hpm_buffer_stale_days: 7           # Warn if buffers older than N days at inference
   hpm_buffer_auto_load: true         # Auto-load from path on resume/inference
@@ -447,7 +447,7 @@ training:
   lambda_curriculum: 0.0        # OFF
   lambda_deep_supervision: 0.0  # OFF - not needed with weighted_stablemax
   lambda_act: 0.0               # OFF
-  lambda_centroid_diversity: 0.1  # NEW: Prevents DSC centroid collapse (spread > 0.5)
+  lambda_centroid_diversity: 0.3  # Strengthened per TRAINING_FIXES_DEC2025.md (was 0.1, caused collapse)
   
   # Clue regularization (ENABLED - validated stable Dec 2025)
   # Helps model learn appropriate clue count per task
@@ -585,22 +585,23 @@ training:
     adjust_grad_accumulation: true  # Auto-adjust grad_accum to maintain effective batch
   
   # =============================================================
-  # AUGMENTATION EQUIVARIANCE LOSS (DISABLED - Jan 2026)
+  # AUGMENTATION EQUIVARIANCE LOSS (ENABLED - Jan 2026)
   # =============================================================
-  # REASON FOR DISABLING:
-  # 1. Original deltas are DETACHED - only augmented have gradients
-  # 2. This pushes HyperLoRA toward mean behavior (over-regularization)
-  # 3. TTA consensus was only 13% anyway (not achieving equivariance)
-  # 4. Iterative backward causes gradient interference with task loss
+  # CRITICAL FOR TTA CONSENSUS (Bug Fix Dec 2025):
+  # Equivariance loss ensures HyperLoRA predicts consistent weights for
+  # rotated/flipped versions of the same task, improving TTA voting.
   #
-  # Re-enable after fixing gradient flow (non-detached original deltas)
-  # and achieving stable training without collapse.
+  # Without this, TTA consensus was stuck at 0% because model predicted
+  # different weights for each augmented view.
+  #
+  # STE FIX APPLIED: DSC now uses proper identity gradient (raw - raw.detach()
+  # + squashed.detach()) so gradients flow correctly through equivariance.
   # =============================================================
   equivariance_training:
-    enabled: false         # DISABLED: Causes over-regularization (see above)
+    enabled: true          # ENABLED: Critical for TTA consensus (bug fix)
     start_epoch: 16        # PHASE 4: After HyperLoRA warmup (8 + 8 = 16)
     loss_weight: 0.01      # GENTLER start (was 0.05)
-    num_augmentations: 4   # Number of random augmentations per task
+    num_augmentations: 4   # 256-dim can handle 4 (512 uses 2 for memory)
   
   # =============================================================
   # META-LEARNING STRATEGY SUMMARY (COMPLEMENTARY LOSSES)
@@ -977,7 +978,7 @@ logging:
   save_every: 10
   eval_every: 10  # Every 10 epochs (was 1) - TTA on 100 tasks is expensive
   keep_last_n: 3
-  checkpoint_dir: "checkpoints/rlan_stable"
+  checkpoint_dir: "checkpoints/rlan_stable_256"  # Explicit 256-dim path
   log_to_file: true
   track_augmentation: true  # Enable to verify augmentation diversity
   memory_debug_batches: 5   # Log detailed memory checkpoints for first N batches per epoch

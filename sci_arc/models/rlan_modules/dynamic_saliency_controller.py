@@ -481,16 +481,47 @@ class DynamicSaliencyController(nn.Module):
             
             # SOFT CLAMPING: Use tanh-based squashing instead of hard clamp
             # Hard clamp breaks gradient flow when saturated!
-            # tanh squashes to [-1, 1], then scale to [-4, 4] for sigmoid range
-            # sigmoid(4) = 0.982, sigmoid(-4) = 0.018 - still allows gradient
+            # 
+            # FIXED (Dec 2025): Increased range from [-4, 4] to [-6, 6]
+            # The training log showed stop_logits collapsing to -4.0 with near-zero
+            # gradients. With tanh(x/4)*4, the gradient at x=-4 is:
+            #   d/dx[4*tanh(x/4)] = 1 - tanh^2(x/4) ≈ 0.07 at x=-4
+            # This is too weak for learning!
+            # 
+            # With tanh(x/6)*6, at x=-4:
+            #   gradient = 1 - tanh^2(-4/6) ≈ 1 - 0.37 = 0.63 (9x stronger!)
+            # And we have room until x=-6 where sigmoid(-6)=0.0025 (still usable)
+            # 
+            # Additionally, we add a straight-through estimator (STE) for extreme
+            # saturation: if |raw| > 5, we bypass tanh for the gradient but keep
+            # the tanh output for the forward pass. This ensures gradients can
+            # still flow even when the predictor is deeply saturated.
             #
-            # Key insight: tanh has non-zero gradient everywhere (1 - tanh^2)
-            # At tanh(3) = 0.995: gradient = 1 - 0.99 = 0.01 (small but nonzero)
-            # vs hard clamp at 5.0: gradient = 0 (completely blocked!)
-            #
-            # Scale factor 4.0 gives sigmoid range [0.018, 0.982]
-            # This is softer than clamp [-5, 5] -> [0.007, 0.993]
-            stop_logit = 4.0 * torch.tanh(stop_logit_raw / 4.0)
+            # Range 6.0 gives sigmoid range [0.0025, 0.9975] which is sufficient
+            # for practical clue counts.
+            SQUASH_RANGE = 6.0
+            
+            # Standard tanh squashing
+            stop_logit_squashed = SQUASH_RANGE * torch.tanh(stop_logit_raw / SQUASH_RANGE)
+            
+            # Straight-Through Estimator (STE) for extreme saturation
+            # When |raw| > 5, gradients through tanh are < 0.1 (too weak)
+            # STE: forward uses squashed value, backward uses IDENTITY (raw value)
+            is_saturated = (stop_logit_raw.abs() > 5.0).detach()
+            if is_saturated.any() and self.training:
+                # For saturated samples: grad flows through raw value (identity)
+                # Forward value is still squashed for numerical stability
+                # STE trick: forward = squashed, backward = raw (identity gradient)
+                # Formula: raw - raw.detach() + squashed.detach()
+                #   Forward: raw - raw + squashed = squashed ✓
+                #   Backward: d/d(raw) = 1 (identity) ✓
+                stop_logit = torch.where(
+                    is_saturated,
+                    stop_logit_raw - stop_logit_raw.detach() + stop_logit_squashed.detach(),  # TRUE STE
+                    stop_logit_squashed
+                )
+            else:
+                stop_logit = stop_logit_squashed
             
             # Update cumulative mask (reduce weight of attended regions)
             # Use soft masking to allow gradients to flow

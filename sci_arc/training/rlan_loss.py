@@ -925,6 +925,10 @@ class CentroidDiversityLoss(nn.Module):
     to the same location (centroid spread < 0.5), making the stop
     predictor unable to differentiate between clues.
     
+    FIXED (Dec 2025): Increased min_distance from 2.0 to 3.0 and strengthened
+    repulsion term. Training logs showed centroid spread < 0.5 in later epochs,
+    indicating collapse despite diversity loss. The original settings were too weak.
+    
     Formula: L_diversity = -mean(min_pairwise_distance)
     
     We want to MAXIMIZE the minimum pairwise distance between centroids,
@@ -933,20 +937,25 @@ class CentroidDiversityLoss(nn.Module):
     
     def __init__(
         self,
-        min_distance: float = 2.0,  # Minimum desired distance between centroids
+        min_distance: float = 3.0,  # INCREASED from 2.0 - Minimum desired distance between centroids
         weight_by_usage: bool = True,  # Weight by clue usage probability
+        repulsion_weight: float = 0.3,  # INCREASED from 0.1 - Continuous repulsion gradient
     ):
         """
         Args:
             min_distance: Target minimum distance between clue centroids.
-                          For 30x30 grid, ~2.0 means clues should be at least
-                          2 pixels apart (reasonable for different objects).
+                          For 30x30 grid, ~3.0 means clues should be at least
+                          3 pixels apart (necessary for different objects).
+                          INCREASED from 2.0 due to observed collapse.
             weight_by_usage: If True, weight pairwise distances by clue usage
                             probability so unused clues don't dominate loss.
+            repulsion_weight: Weight for continuous repulsion term (provides
+                             gradient even when above threshold).
         """
         super().__init__()
         self.min_distance = min_distance
         self.weight_by_usage = weight_by_usage
+        self.repulsion_weight = repulsion_weight
     
     def forward(
         self,
@@ -1026,8 +1035,10 @@ class CentroidDiversityLoss(nn.Module):
         repulsion_loss = -soft_min_dist.mean()
         
         # Combine: hinge for hard constraint + repulsion for continuous gradient
-        # Weight repulsion lower to avoid pushing clues to corners
-        total_loss = diversity_loss + 0.1 * repulsion_loss
+        # FIXED: Increased repulsion_weight from 0.1 to 0.3 to prevent collapse
+        # The training log showed centroid spread < 0.5 even with diversity loss,
+        # indicating the continuous gradient was too weak.
+        total_loss = diversity_loss + self.repulsion_weight * repulsion_loss
         
         return total_loss.clamp(max=10.0)
 
@@ -1184,7 +1195,7 @@ class RLANLoss(nn.Module):
         loss_mode: str = 'focal_stablemax',  # 'stablemax', 'weighted_stablemax', 'focal_weighted', 'focal_stablemax', or 'focal'
         bg_weight_cap: float = 2.0,  # Max weight for BG in weighted losses
         fg_weight_cap: float = 5.0,  # Max weight for FG in weighted losses
-        lambda_centroid_diversity: float = 0.1,  # NEW: Weight for centroid diversity loss
+        lambda_centroid_diversity: float = 0.3,  # NEW: Weight for centroid diversity loss (INCREASED from 0.1)
     ):
         """
         Args:
