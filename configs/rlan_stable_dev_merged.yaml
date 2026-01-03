@@ -496,6 +496,11 @@ data:
   # Bucketed batching
   bucketed_batching: true
   bucket_boundaries: [10, 15, 20, 25]
+  # CRITICAL FIX (Jan 2026): drop_last=true permanently excludes tasks in small buckets!
+  # With batch_size=50 and bucket sizes [178, 88, 76, 28, 30], buckets with 28 and 30
+  # samples produce ZERO full batches → those 58 tasks are NEVER trained.
+  # Setting drop_last=false ensures ALL tasks are trained (incomplete batches are OK).
+  drop_last: false
   
   augmentation:
     enabled: true

@@ -747,13 +747,20 @@ def create_train_loader(
     print(f"  Using BUCKETED BATCHING (groups samples by grid size)")
     print(f"    Bucket boundaries: {bucket_boundaries} → {len(bucket_boundaries)+1} buckets")
     
+    # CRITICAL FIX (Jan 2026): drop_last=true excludes tasks in small buckets!
+    # With batch_size=50 and small buckets (e.g., 28 samples), drop_last=true means
+    # those tasks are NEVER trained. Default to false for full task coverage.
+    drop_last = data_cfg.get('drop_last', False)
+    if drop_last:
+        print(f"    [WARNING] drop_last=true may exclude tasks in small buckets!")
+    
     # Use hardware.seed for reproducibility (consistent with rest of training)
     global_seed = config.get('hardware', {}).get('seed', 42)
     batch_sampler = BucketedBatchSampler(
         dataset=train_dataset,
         batch_size=batch_size,
         bucket_boundaries=bucket_boundaries,
-        drop_last=True,
+        drop_last=drop_last,
         shuffle=True,
         seed=global_seed,
     )
