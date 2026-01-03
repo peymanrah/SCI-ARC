@@ -166,6 +166,95 @@ class TaskVisualization:
     diagnosis_notes: List[str] = field(default_factory=list)
 
 
+@dataclass
+class HPMBankAnalysis:
+    """Analysis results for a single HPM bank."""
+    bank_name: str
+    bank_type: str  # 'static' or 'dynamic'
+    num_primitives: int
+    embedding_dim: int
+    
+    # Health metrics
+    has_nan: bool = False
+    has_zero: bool = False
+    num_nan_entries: int = 0
+    num_zero_entries: int = 0
+    
+    # Diversity metrics
+    mean_pairwise_cosine: float = 0.0  # Lower = more diverse
+    std_pairwise_cosine: float = 0.0
+    min_pairwise_cosine: float = 0.0
+    max_pairwise_cosine: float = 0.0
+    
+    # Norm statistics
+    mean_norm: float = 0.0
+    std_norm: float = 0.0
+    min_norm: float = 0.0
+    max_norm: float = 0.0
+    
+    # Clustering (for detecting collapse)
+    num_unique_clusters: int = 0  # Via k-means
+    effective_rank: float = 0.0   # SVD-based dimensionality
+    
+    # Interpretability
+    top_activations: List[Tuple[int, float]] = field(default_factory=list)  # (idx, activation)
+    semantic_hints: List[str] = field(default_factory=list)  # Inferred meanings
+    
+    # Raw embeddings for visualization
+    embeddings_2d: Optional[np.ndarray] = None  # t-SNE projection
+
+
+@dataclass 
+class HPMAnalysis:
+    """Complete HPM analysis for a model."""
+    # Static banks
+    compositional_bank: Optional[HPMBankAnalysis] = None
+    pattern_bank: Optional[HPMBankAnalysis] = None
+    relational_bank: Optional[HPMBankAnalysis] = None
+    concept_bank: Optional[HPMBankAnalysis] = None
+    
+    # Dynamic buffers
+    instance_buffer: Optional[HPMBankAnalysis] = None
+    procedural_buffer: Optional[HPMBankAnalysis] = None
+    
+    # Overall health
+    total_static_primitives: int = 0
+    total_dynamic_entries: int = 0
+    overall_health_score: float = 0.0  # 0-1, higher = healthier
+    health_notes: List[str] = field(default_factory=list)
+    
+    # Cross-bank analysis
+    inter_bank_similarity: Dict[str, float] = field(default_factory=dict)  # bank_pair -> similarity
+    
+    @property
+    def banks(self) -> Dict[str, HPMBankAnalysis]:
+        """Return all non-None banks as a dict."""
+        result = {}
+        if self.compositional_bank:
+            result['Compositional'] = self.compositional_bank
+        if self.pattern_bank:
+            result['Pattern'] = self.pattern_bank
+        if self.relational_bank:
+            result['Relational'] = self.relational_bank
+        if self.concept_bank:
+            result['Concept'] = self.concept_bank
+        if self.instance_buffer:
+            result['Instance Buffer'] = self.instance_buffer
+        if self.procedural_buffer:
+            result['Procedural Buffer'] = self.procedural_buffer
+        return result
+    
+    @property
+    def overall_diversity(self) -> float:
+        """Average diversity across all banks (1 - mean_cosine), clamped to [0, 1]."""
+        diversities = []
+        for bank in self.banks.values():
+            # Clamp each bank's diversity to [0, 1] since cosine can be negative
+            div = max(0.0, min(1.0, 1.0 - bank.mean_pairwise_cosine))
+            diversities.append(div)
+        return sum(diversities) / len(diversities) if diversities else 0.0
+
+
 # =============================================================================
 # GRID RENDERING
 # =============================================================================
@@ -334,6 +423,575 @@ def find_task_file(task_id: str, data_dirs: List[str]) -> Optional[str]:
                 if path.exists():
                     return str(path)
     return None
+
+
+# =============================================================================
+# HPM BUFFER ANALYSIS
+# =============================================================================
+
+def analyze_embedding_bank(
+    embeddings: torch.Tensor,
+    bank_name: str,
+    bank_type: str = 'static'
+) -> HPMBankAnalysis:
+    """
+    Analyze a bank of embeddings for health, diversity, and interpretability.
+    
+    Args:
+        embeddings: Tensor of shape (N, D) where N=num_primitives, D=embedding_dim
+        bank_name: Name of the bank (e.g., 'compositional', 'pattern')
+        bank_type: 'static' or 'dynamic'
+    
+    Returns:
+        HPMBankAnalysis with comprehensive metrics
+    """
+    embeddings = embeddings.detach().float()
+    N, D = embeddings.shape
+    
+    analysis = HPMBankAnalysis(
+        bank_name=bank_name,
+        bank_type=bank_type,
+        num_primitives=N,
+        embedding_dim=D,
+    )
+    
+    # --- Health Checks ---
+    nan_mask = torch.isnan(embeddings).any(dim=1)
+    zero_mask = (embeddings.norm(dim=1) < 1e-6)
+    
+    analysis.has_nan = nan_mask.any().item()
+    analysis.has_zero = zero_mask.any().item()
+    analysis.num_nan_entries = nan_mask.sum().item()
+    analysis.num_zero_entries = zero_mask.sum().item()
+    
+    # Filter valid embeddings for further analysis
+    valid_mask = ~nan_mask & ~zero_mask
+    valid_embeddings = embeddings[valid_mask]
+    
+    if len(valid_embeddings) < 2:
+        analysis.semantic_hints.append("⚠️ Too few valid embeddings for analysis")
+        return analysis
+    
+    # --- Norm Statistics ---
+    norms = valid_embeddings.norm(dim=1)
+    analysis.mean_norm = norms.mean().item()
+    analysis.std_norm = norms.std().item()
+    analysis.min_norm = norms.min().item()
+    analysis.max_norm = norms.max().item()
+    
+    # --- Diversity via Pairwise Cosine Similarity ---
+    # Move to CPU to avoid OOM on large banks, limit to first 1000 embeddings
+    MAX_FOR_PAIRWISE = 1000
+    if len(valid_embeddings) > MAX_FOR_PAIRWISE:
+        # Random sample for large banks
+        indices = torch.randperm(len(valid_embeddings))[:MAX_FOR_PAIRWISE]
+        sample_embeddings = valid_embeddings[indices].cpu()
+    else:
+        sample_embeddings = valid_embeddings.cpu()
+    
+    # Normalize for cosine
+    normed = F.normalize(sample_embeddings, dim=1)
+    cosine_sim = torch.mm(normed, normed.t())
+    
+    # Get upper triangle (exclude diagonal)
+    mask = torch.triu(torch.ones_like(cosine_sim), diagonal=1).bool()
+    pairwise_cosines = cosine_sim[mask]
+    
+    if len(pairwise_cosines) > 0:
+        analysis.mean_pairwise_cosine = pairwise_cosines.mean().item()
+        analysis.std_pairwise_cosine = pairwise_cosines.std().item()
+        analysis.min_pairwise_cosine = pairwise_cosines.min().item()
+        analysis.max_pairwise_cosine = pairwise_cosines.max().item()
+    
+    # --- Effective Rank via SVD ---
+    # Measures dimensionality of the learned embedding space
+    try:
+        # Center embeddings (use CPU sample if available)
+        emb_for_svd = sample_embeddings if 'sample_embeddings' in dir() else valid_embeddings.cpu()
+        centered = emb_for_svd - emb_for_svd.mean(dim=0, keepdim=True)
+        _, s, _ = torch.svd(centered)
+        
+        # Guard against division by zero
+        s_sum = s.sum()
+        if s_sum < 1e-10:
+            analysis.effective_rank = 0.0
+        else:
+            # Normalize singular values
+            s_norm = s / s_sum
+            # Shannon entropy of singular values
+            entropy = -(s_norm * torch.log(s_norm + 1e-10)).sum()
+            # Effective rank = exp(entropy)
+            eff_rank = torch.exp(entropy).item()
+            # Guard against NaN
+            analysis.effective_rank = eff_rank if not (eff_rank != eff_rank) else 0.0
+    except Exception:
+        analysis.effective_rank = 0.0
+    
+    # --- Cluster Detection (Simple greedy clustering) ---
+    # Check if embeddings collapse to few clusters
+    try:
+        # Use cosine similarity threshold to count "unique" primitives
+        SIMILARITY_THRESHOLD = 0.95  # Very similar = same cluster
+        n_sample = len(sample_embeddings) if 'sample_embeddings' in dir() else len(valid_embeddings)
+        used = [False] * n_sample
+        unique_count = 0
+        
+        for i in range(n_sample):
+            if used[i]:
+                continue
+            # This is a new cluster seed
+            unique_count += 1
+            used[i] = True
+            # Mark all highly similar embeddings as belonging to this cluster
+            for j in range(i + 1, n_sample):
+                if not used[j] and cosine_sim[i, j] > SIMILARITY_THRESHOLD:
+                    used[j] = True
+        
+        analysis.num_unique_clusters = unique_count
+    except Exception:
+        analysis.num_unique_clusters = N
+    
+    # --- Semantic Interpretation ---
+    # Generate human-readable insights
+    if analysis.mean_pairwise_cosine > 0.9:
+        analysis.semantic_hints.append("🔴 COLLAPSED: All primitives nearly identical (cosine > 0.9)")
+    elif analysis.mean_pairwise_cosine > 0.7:
+        analysis.semantic_hints.append("🟡 LOW DIVERSITY: Primitives too similar (cosine > 0.7)")
+    elif analysis.mean_pairwise_cosine < 0.3:
+        analysis.semantic_hints.append("🟢 DIVERSE: Primitives well-separated (cosine < 0.3)")
+    else:
+        analysis.semantic_hints.append("🟡 MODERATE diversity")
+    
+    if analysis.effective_rank < D * 0.1:
+        analysis.semantic_hints.append(f"⚠️ Low effective rank ({analysis.effective_rank:.1f}/{D}) - may be under-utilizing dimensions")
+    elif analysis.effective_rank > D * 0.5:
+        analysis.semantic_hints.append(f"✓ Good effective rank ({analysis.effective_rank:.1f}/{D})")
+    
+    if analysis.std_norm > analysis.mean_norm * 0.5:
+        analysis.semantic_hints.append("⚠️ High norm variance - some primitives may dominate")
+    
+    # --- 2D Projection for Visualization ---
+    try:
+        from sklearn.manifold import TSNE
+        # Use sample if available, limit to 500 for t-SNE speed
+        emb_for_tsne = sample_embeddings if 'sample_embeddings' in dir() else valid_embeddings.cpu()
+        if len(emb_for_tsne) > 500:
+            emb_for_tsne = emb_for_tsne[:500]
+        if len(emb_for_tsne) >= 5:  # Need enough points for t-SNE
+            tsne = TSNE(n_components=2, perplexity=min(5, len(emb_for_tsne)-1), random_state=42)
+            analysis.embeddings_2d = tsne.fit_transform(emb_for_tsne.numpy())
+    except (ImportError, ValueError, Exception):
+        # Fall back to PCA if sklearn not available or t-SNE fails
+        try:
+            emb_for_pca = sample_embeddings if 'sample_embeddings' in dir() else valid_embeddings.cpu()
+            _, _, V = torch.svd(emb_for_pca - emb_for_pca.mean(dim=0))
+            analysis.embeddings_2d = (emb_for_pca @ V[:, :2]).numpy()
+        except:
+            pass
+    
+    return analysis
+
+
+def analyze_hpm_buffers(model: Any) -> HPMAnalysis:
+    """
+    Comprehensive analysis of all HPM buffers in a model.
+    
+    Returns:
+        HPMAnalysis with all bank analyses and overall health metrics
+    """
+    analysis = HPMAnalysis()
+    health_issues = []
+    
+    # --- Analyze Static Banks ---
+    if hasattr(model, 'hpm') and model.hpm is not None:
+        hpm = model.hpm
+        
+        # Compositional bank
+        if hasattr(hpm, 'compositional_bank') and hpm.compositional_bank is not None:
+            bank = hpm.compositional_bank
+            # Collect all primitives from hierarchical levels
+            all_primitives = torch.cat([level for level in bank.primitive_levels], dim=0)
+            analysis.compositional_bank = analyze_embedding_bank(
+                all_primitives, 'Compositional', 'static'
+            )
+            analysis.total_static_primitives += len(all_primitives)
+        
+        # Pattern bank
+        if hasattr(hpm, 'pattern_bank') and hpm.pattern_bank is not None:
+            bank = hpm.pattern_bank
+            all_primitives = torch.cat([level for level in bank.primitive_levels], dim=0)
+            analysis.pattern_bank = analyze_embedding_bank(
+                all_primitives, 'Pattern', 'static'
+            )
+            analysis.total_static_primitives += len(all_primitives)
+        
+        # Relational bank
+        if hasattr(hpm, 'relational_bank') and hpm.relational_bank is not None:
+            bank = hpm.relational_bank
+            all_primitives = torch.cat([level for level in bank.primitive_levels], dim=0)
+            analysis.relational_bank = analyze_embedding_bank(
+                all_primitives, 'Relational', 'static'
+            )
+            analysis.total_static_primitives += len(all_primitives)
+        
+        # Concept bank
+        if hasattr(hpm, 'concept_bank') and hpm.concept_bank is not None:
+            bank = hpm.concept_bank
+            all_primitives = torch.cat([level for level in bank.primitive_levels], dim=0)
+            analysis.concept_bank = analyze_embedding_bank(
+                all_primitives, 'Concept', 'static'
+            )
+            analysis.total_static_primitives += len(all_primitives)
+    
+    # --- Analyze Dynamic Buffers ---
+    # Instance buffer (ContextEncoder outputs)
+    if hasattr(model, 'hpm_instance_buffer') and model.hpm_instance_buffer is not None:
+        buffer = model.hpm_instance_buffer
+        if hasattr(buffer, 'embeddings') and len(buffer) > 0:
+            embeddings = buffer.embeddings[:len(buffer)]
+            analysis.instance_buffer = analyze_embedding_bank(
+                embeddings, 'Instance (Context)', 'dynamic'
+            )
+            analysis.total_dynamic_entries += len(buffer)
+            
+            # Add task diversity info
+            if hasattr(buffer, 'task_ids'):
+                unique_tasks = len(set(buffer.task_ids[:len(buffer)]))
+                analysis.instance_buffer.semantic_hints.append(
+                    f"📊 {unique_tasks} unique tasks stored"
+                )
+    
+    # Procedural buffer (HyperLoRA codes)
+    if hasattr(model, 'hpm_procedural_buffer') and model.hpm_procedural_buffer is not None:
+        buffer = model.hpm_procedural_buffer
+        if hasattr(buffer, 'embeddings') and len(buffer) > 0:
+            embeddings = buffer.embeddings[:len(buffer)]
+            analysis.procedural_buffer = analyze_embedding_bank(
+                embeddings, 'Procedural (LoRA)', 'dynamic'
+            )
+            analysis.total_dynamic_entries += len(buffer)
+            
+            if hasattr(buffer, 'task_ids'):
+                unique_tasks = len(set(buffer.task_ids[:len(buffer)]))
+                analysis.procedural_buffer.semantic_hints.append(
+                    f"📊 {unique_tasks} unique task procedures stored"
+                )
+    
+    # Note: Cross-bank similarity analysis removed (would require storing raw embeddings)
+    
+    # --- Overall Health Score ---
+    # 0-1 score based on:
+    # - No NaN/zero entries
+    # - Diverse primitives (low cosine similarity)
+    # - Good effective rank
+    # - Reasonable norm variance
+    
+    scores = []
+    for bank in [analysis.compositional_bank, analysis.pattern_bank, 
+                 analysis.relational_bank, analysis.concept_bank,
+                 analysis.instance_buffer, analysis.procedural_buffer]:
+        if bank is None:
+            continue
+        
+        bank_score = 1.0
+        
+        # Penalize NaN/zero
+        if bank.has_nan:
+            bank_score -= 0.3
+            health_issues.append(f"❌ {bank.bank_name}: Contains NaN values")
+        if bank.has_zero:
+            bank_score -= 0.2
+            health_issues.append(f"⚠️ {bank.bank_name}: Contains zero vectors")
+        
+        # Penalize collapse
+        if bank.mean_pairwise_cosine > 0.9:
+            bank_score -= 0.4
+            health_issues.append(f"🔴 {bank.bank_name}: Collapsed (cosine={bank.mean_pairwise_cosine:.2f})")
+        elif bank.mean_pairwise_cosine > 0.7:
+            bank_score -= 0.2
+            health_issues.append(f"🟡 {bank.bank_name}: Low diversity")
+        
+        # Reward good effective rank
+        if bank.effective_rank > bank.embedding_dim * 0.3:
+            bank_score += 0.1
+        
+        scores.append(max(0, min(1, bank_score)))
+    
+    if scores:
+        analysis.overall_health_score = sum(scores) / len(scores)
+    
+    analysis.health_notes = health_issues if health_issues else ["✓ All HPM banks appear healthy"]
+    
+    return analysis
+
+
+def generate_hpm_html(analysis: HPMAnalysis, output_path: str):
+    """Generate standalone HTML visualization for HPM analysis."""
+    
+    def bank_section(bank: Optional[HPMBankAnalysis], title: str) -> str:
+        if bank is None:
+            return f'''
+            <div class="bank-card disabled">
+                <h3>{title}</h3>
+                <p class="status">Not configured / Empty</p>
+            </div>
+            '''
+        
+        # Determine health color
+        if bank.has_nan or bank.mean_pairwise_cosine > 0.9:
+            health_color = '#ff4444'
+            health_icon = '🔴'
+        elif bank.has_zero or bank.mean_pairwise_cosine > 0.7:
+            health_color = '#ffaa00'
+            health_icon = '🟡'
+        else:
+            health_color = '#44ff44'
+            health_icon = '🟢'
+        
+        # Generate 2D scatter plot if available
+        scatter_html = ''
+        if bank.embeddings_2d is not None:
+            points = bank.embeddings_2d
+            # Normalize to 0-400 range for SVG
+            x_min, x_max = points[:, 0].min(), points[:, 0].max()
+            y_min, y_max = points[:, 1].min(), points[:, 1].max()
+            
+            svg_points = []
+            for i, (x, y) in enumerate(points):
+                sx = 20 + (x - x_min) / (x_max - x_min + 1e-6) * 360
+                sy = 20 + (y - y_min) / (y_max - y_min + 1e-6) * 260
+                svg_points.append(f'<circle cx="{sx}" cy="{sy}" r="5" fill="{health_color}" opacity="0.7" title="Primitive {i}"/>')
+            
+            scatter_html = f'''
+            <div class="scatter-plot">
+                <svg width="400" height="300" style="background: #1a1a2e; border-radius: 8px;">
+                    {''.join(svg_points)}
+                    <text x="200" y="290" text-anchor="middle" fill="#888" font-size="12">t-SNE Projection</text>
+                </svg>
+            </div>
+            '''
+        
+        hints_html = '<br>'.join(bank.semantic_hints) if bank.semantic_hints else 'No issues detected'
+        
+        return f'''
+        <div class="bank-card" style="border-left: 4px solid {health_color};">
+            <h3>{health_icon} {title}</h3>
+            <div class="bank-stats">
+                <div class="stat">
+                    <span class="label">Primitives</span>
+                    <span class="value">{bank.num_primitives}</span>
+                </div>
+                <div class="stat">
+                    <span class="label">Dimensions</span>
+                    <span class="value">{bank.embedding_dim}</span>
+                </div>
+                <div class="stat">
+                    <span class="label">Mean Cosine</span>
+                    <span class="value" style="color: {health_color}">{bank.mean_pairwise_cosine:.3f}</span>
+                </div>
+                <div class="stat">
+                    <span class="label">Effective Rank</span>
+                    <span class="value">{bank.effective_rank:.1f}</span>
+                </div>
+                <div class="stat">
+                    <span class="label">Unique Clusters</span>
+                    <span class="value">{bank.num_unique_clusters}</span>
+                </div>
+                <div class="stat">
+                    <span class="label">Norm (μ±σ)</span>
+                    <span class="value">{bank.mean_norm:.2f}±{bank.std_norm:.2f}</span>
+                </div>
+            </div>
+            <div class="hints">
+                <strong>Analysis:</strong><br>
+                {hints_html}
+            </div>
+            {scatter_html}
+        </div>
+        '''
+    
+    # Generate overall health bar
+    health_pct = int(analysis.overall_health_score * 100)
+    health_color = '#44ff44' if health_pct > 70 else '#ffaa00' if health_pct > 40 else '#ff4444'
+    
+    html_content = f'''<!DOCTYPE html>
+<html>
+<head>
+    <title>HPM Buffer Analysis</title>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #0f0f1a;
+            color: #eee;
+            margin: 0;
+            padding: 20px;
+        }}
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+        }}
+        h1 {{
+            color: #7c3aed;
+            border-bottom: 2px solid #7c3aed;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #a78bfa;
+            margin-top: 30px;
+        }}
+        .health-bar {{
+            background: #1a1a2e;
+            border-radius: 10px;
+            height: 30px;
+            margin: 20px 0;
+            overflow: hidden;
+        }}
+        .health-fill {{
+            height: 100%;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            transition: width 0.5s;
+        }}
+        .summary-stats {{
+            display: flex;
+            gap: 30px;
+            margin: 20px 0;
+        }}
+        .summary-stat {{
+            background: #1a1a2e;
+            padding: 15px 25px;
+            border-radius: 8px;
+        }}
+        .summary-stat .label {{
+            color: #888;
+            font-size: 12px;
+        }}
+        .summary-stat .value {{
+            font-size: 24px;
+            font-weight: bold;
+            color: #7c3aed;
+        }}
+        .banks-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }}
+        .bank-card {{
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 20px;
+        }}
+        .bank-card.disabled {{
+            opacity: 0.5;
+        }}
+        .bank-card h3 {{
+            margin-top: 0;
+            color: #fff;
+        }}
+        .bank-stats {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin: 15px 0;
+        }}
+        .stat {{
+            background: #0f0f1a;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }}
+        .stat .label {{
+            font-size: 11px;
+            color: #888;
+            display: block;
+        }}
+        .stat .value {{
+            font-size: 16px;
+            font-weight: bold;
+        }}
+        .hints {{
+            background: #0f0f1a;
+            padding: 15px;
+            border-radius: 4px;
+            font-size: 13px;
+            line-height: 1.6;
+        }}
+        .scatter-plot {{
+            margin-top: 15px;
+            text-align: center;
+        }}
+        .health-notes {{
+            background: #1a1a2e;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }}
+        .health-notes li {{
+            margin: 8px 0;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧠 HPM Buffer Analysis</h1>
+        
+        <div class="health-bar">
+            <div class="health-fill" style="width: {health_pct}%; background: {health_color};">
+                Overall Health: {health_pct}%
+            </div>
+        </div>
+        
+        <div class="summary-stats">
+            <div class="summary-stat">
+                <span class="label">Static Primitives</span>
+                <span class="value">{analysis.total_static_primitives}</span>
+            </div>
+            <div class="summary-stat">
+                <span class="label">Dynamic Entries</span>
+                <span class="value">{analysis.total_dynamic_entries}</span>
+            </div>
+            <div class="summary-stat">
+                <span class="label">Health Score</span>
+                <span class="value" style="color: {health_color}">{analysis.overall_health_score:.2f}</span>
+            </div>
+        </div>
+        
+        <h2>📦 Static Banks (Learned Primitives)</h2>
+        <div class="banks-grid">
+            {bank_section(analysis.compositional_bank, "Compositional Bank")}
+            {bank_section(analysis.pattern_bank, "Pattern Bank")}
+            {bank_section(analysis.relational_bank, "Relational Bank")}
+            {bank_section(analysis.concept_bank, "Concept Bank")}
+        </div>
+        
+        <h2>📝 Dynamic Buffers (Runtime Memory)</h2>
+        <div class="banks-grid">
+            {bank_section(analysis.instance_buffer, "Instance Buffer (Context Encodings)")}
+            {bank_section(analysis.procedural_buffer, "Procedural Buffer (LoRA Codes)")}
+        </div>
+        
+        <div class="health-notes">
+            <h3>🩺 Health Notes</h3>
+            <ul>
+                {''.join(f'<li>{note}</li>' for note in analysis.health_notes)}
+            </ul>
+        </div>
+        
+        <div style="margin-top: 40px; color: #666; font-size: 12px;">
+            Generated by RLAN Visual Debugger | HPM Analysis Module
+        </div>
+    </div>
+</body>
+</html>'''
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"📊 HPM analysis saved to: {output_path}")
 
 
 # =============================================================================
@@ -958,14 +1616,19 @@ Examples:
   
   # Batch mode (multiple tasks)
   python scripts/visualize_rlan_debug.py --task_file failing_tasks.txt --checkpoint checkpoints/rlan_256_40pct.pt --output_dir ./debug_viz
+  
+  # HPM Buffer Analysis (no task needed - just checkpoint)
+  python scripts/visualize_rlan_debug.py --analyze_hpm --checkpoint checkpoints/rlan_256_40pct.pt
+  python scripts/visualize_rlan_debug.py --analyze_hpm --checkpoint checkpoints/rlan_256_40pct.pt --output_dir ./hpm_analysis
 '''
     )
     
-    # Input options
+    # Input options (task_id/task_file/task_json OR analyze_hpm)
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument('--task_id', type=str, help='Single task ID to visualize')
     input_group.add_argument('--task_file', type=str, help='File with task IDs (one per line)')
     input_group.add_argument('--task_json', type=str, help='Direct path to task JSON file')
+    input_group.add_argument('--analyze_hpm', action='store_true', help='Analyze HPM buffers (static banks & dynamic buffers) - no task needed')
     
     # Model options
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
@@ -986,6 +1649,69 @@ Examples:
     
     args = parser.parse_args()
     
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Load model
+    device = args.device if torch.cuda.is_available() else 'cpu'
+    model, config = load_checkpoint(args.checkpoint, device)
+    
+    # ============================================
+    # HPM Analysis Mode (no task required)
+    # ============================================
+    if args.analyze_hpm:
+        print("\n" + "="*60)
+        print("🧠 HPM Buffer Analysis Mode")
+        print("="*60)
+        
+        # Analyze HPM buffers
+        hpm_analysis = analyze_hpm_buffers(model)
+        
+        if not hpm_analysis.banks:
+            print("❌ No HPM banks found in model (no static banks or dynamic buffers)")
+            return
+        
+        # Print summary
+        print(f"\n📊 HPM Analysis Summary:")
+        print(f"  Overall Health Score: {hpm_analysis.overall_health_score:.2%}")
+        print(f"  Overall Diversity: {hpm_analysis.overall_diversity:.2%}")
+        print(f"  Static Primitives: {hpm_analysis.total_static_primitives}")
+        print(f"  Dynamic Entries: {hpm_analysis.total_dynamic_entries}")
+        print(f"  Banks Analyzed: {len(hpm_analysis.banks)}")
+        
+        # Per-bank summary
+        for bank_name, bank_analysis in hpm_analysis.banks.items():
+            # Health: based on NaN/zero entries
+            nan_rate = bank_analysis.num_nan_entries / max(1, bank_analysis.num_primitives)
+            zero_rate = bank_analysis.num_zero_entries / max(1, bank_analysis.num_primitives)
+            health_score = max(0.0, min(1.0, 1.0 - nan_rate - zero_rate))
+            
+            # Diversity: inverse of mean cosine similarity (lower cosine = more diverse), clamped
+            diversity_score = max(0.0, min(1.0, 1.0 - bank_analysis.mean_pairwise_cosine))
+            
+            health_icon = "✅" if health_score > 0.9 else ("⚠️" if health_score > 0.5 else "❌")
+            diversity_icon = "✅" if diversity_score > 0.5 else ("⚠️" if diversity_score > 0.3 else "❌")
+            
+            print(f"\n  📦 {bank_name}:")
+            print(f"     Shape: ({bank_analysis.num_primitives}, {bank_analysis.embedding_dim})")
+            print(f"     {health_icon} Health: {health_score:.2%} (NaN: {bank_analysis.num_nan_entries}, Zero: {bank_analysis.num_zero_entries})")
+            print(f"     {diversity_icon} Diversity: {diversity_score:.2%} (mean cosine: {bank_analysis.mean_pairwise_cosine:.3f})")
+            print(f"     Effective Rank: {bank_analysis.effective_rank:.1f}")
+            print(f"     Clusters: {bank_analysis.num_unique_clusters}")
+            if bank_analysis.semantic_hints:
+                for hint in bank_analysis.semantic_hints:
+                    print(f"     💡 {hint}")
+        
+        # Generate HTML report
+        output_path = os.path.join(args.output_dir, "hpm_analysis.html")
+        generate_hpm_html(hpm_analysis, output_path)
+        print(f"\n📁 HTML report saved to: {output_path}")
+        print("\n✅ HPM Analysis Complete!")
+        return
+    
+    # ============================================
+    # Task Visualization Mode (original flow)
+    # ============================================
     # Determine task(s) to process
     if args.task_id:
         task_ids = [args.task_id]
@@ -995,10 +1721,6 @@ Examples:
     else:
         task_ids = [Path(args.task_json).stem]
     
-    # Load model
-    device = args.device if torch.cuda.is_available() else 'cpu'
-    model, config = load_checkpoint(args.checkpoint, device)
-    
     # Data directories to search
     data_dirs = [
         args.data_dir,
@@ -1007,9 +1729,6 @@ Examples:
         'data/arc-agi_training_challenges',
         'data/arc-agi_evaluation_challenges',
     ]
-    
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
     
     # Process each task
     for task_id in task_ids:
