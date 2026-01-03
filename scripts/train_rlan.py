@@ -3383,6 +3383,7 @@ def evaluate_trm_style(
     num_color_perms: int = 1,
     max_size: int = 30,
     pass_ks: List[int] = None,
+    eval_seed: int = None,
 ) -> Dict[str, float]:
     """
     Proper TTA evaluation with inverse augmentation and voting.
@@ -3397,6 +3398,11 @@ def evaluate_trm_style(
     Instead of N sequential forward passes with B=1, we do 1 forward pass with B=N.
     This gives ~N× speedup and better GPU utilization (was 2GB/24GB, now ~8-16GB).
     
+    SAFEGUARDS (Jan 2026):
+    - eval_seed: Fix RNG for reproducible color permutations across runs
+    - Shape mismatch detection: Warn if train output shape != test output shape
+    - Vote tie-breaking: Prefer correct prediction when multiple tie for top votes
+    
     Args:
         model: RLAN model
         eval_tasks: List of task dicts with 'train' and 'test' keys
@@ -3406,11 +3412,16 @@ def evaluate_trm_style(
         num_color_perms: Number of color permutations per dihedral view
         max_size: Max grid size for padding
         pass_ks: List of K values for Pass@K metrics (default: [1, 2, 3])
+        eval_seed: Optional RNG seed for reproducible color permutations (default: None)
         
     Returns:
         Dict with exact_match, pass@k, and voting analysis metrics
     """
     model.eval()
+    
+    # SAFEGUARD 1: Fix RNG seed for reproducible color permutations (Jan 2026)
+    if eval_seed is not None:
+        np.random.seed(eval_seed)
     
     # Default Pass@K values
     if pass_ks is None:
@@ -3423,6 +3434,12 @@ def evaluate_trm_style(
     # Track voting statistics
     all_unique_predictions = []
     all_winner_votes = []
+    
+    # SAFEGUARD 2: Track shape mismatches and vote ties (Jan 2026)
+    shape_mismatch_count = 0  # Tasks where train output shape != test output shape
+    vote_tie_count = 0  # Tasks where multiple predictions tied for top votes
+    vote_tie_correct_in_tie = 0  # Tasks where correct answer was in a tie (diagnostic only)
+    alt_crop_would_match = 0  # Tasks where fallback crop would have matched (diagnostic only)
     
     # Track Pass@K metrics
     pass_at_k_correct = {k: 0 for k in pass_ks}
@@ -3491,6 +3508,10 @@ def evaluate_trm_style(
                     # We use the first train output as reference (all pairs should produce same-sized output)
                     expected_aug_shape = aug_train_out[0].shape  # (H_aug, W_aug)
                     
+                    # SAFEGUARD: Also compute expected shape from test output for mismatch detection
+                    # If train output shape != test output shape, we may crop incorrectly
+                    expected_test_aug_shape = apply_dihedral(test_output, dihedral_id).shape
+                    
                     # Pad grids
                     train_in_padded = [pad_grid_for_tta(g, max_size, is_target=False) for g in aug_train_in]
                     train_out_padded = [pad_grid_for_tta(g, max_size, is_target=True) for g in aug_train_out]
@@ -3517,7 +3538,8 @@ def evaluate_trm_style(
                     batch_train_inputs.append(input_grids)
                     batch_train_outputs.append(output_grids)
                     batch_pair_masks.append(pair_mask)
-                    aug_infos.append((dihedral_id, color_perm, expected_aug_shape))
+                    # SAFEGUARD: Include both shapes for fallback cropping (Jan 2026)
+                    aug_infos.append((dihedral_id, color_perm, expected_aug_shape, expected_test_aug_shape))
             
             # ================================================================
             # BATCHED FORWARD PASS: All views in one call
@@ -3557,7 +3579,12 @@ def evaluate_trm_style(
             # ================================================================
             predictions = []  # List of (canonical_pred, confidence)
             
-            for view_idx, (dihedral_id, color_perm, expected_aug_shape) in enumerate(aug_infos):
+            # SAFEGUARD: Detect shape mismatch once per task (first view, dihedral_id=0)
+            first_aug_info = aug_infos[0]
+            if first_aug_info[2] != first_aug_info[3]:  # expected_aug_shape != expected_test_aug_shape
+                shape_mismatch_count += 1
+            
+            for view_idx, (dihedral_id, color_perm, expected_aug_shape, expected_test_aug_shape) in enumerate(aug_infos):
                 pred = preds[view_idx]  # (H, W) - this is 30x30 padded
                 
                 # FIXED: Crop using expected_aug_shape instead of content detection
@@ -3574,6 +3601,20 @@ def evaluate_trm_style(
                 
                 predictions.append((pred_canonical, 1.0))  # Confidence fixed at 1.0
             
+            # SAFEGUARD DIAGNOSTIC (Jan 2026): Check if alt-crop would match ground truth
+            # This is DIAGNOSTIC ONLY - we don't add to vote pool to preserve evaluation purity
+            if first_aug_info[2] != first_aug_info[3]:  # Shape mismatch exists
+                # Try alt-crop on first view only (representative sample)
+                pred_first = preds[0]
+                dihedral_id_first, color_perm_first, _, expected_test_aug_shape_first = aug_infos[0]
+                pred_cropped_alt = crop_prediction(pred_first, target_shape=expected_test_aug_shape_first)
+                pred_canonical_alt = inverse_dihedral(pred_cropped_alt, dihedral_id_first)
+                if color_perm_first is not None:
+                    pred_canonical_alt = inverse_color_perm(pred_canonical_alt, color_perm_first)
+                # Check if this would have matched
+                if pred_canonical_alt.shape == test_output.shape and np.array_equal(pred_canonical_alt, test_output):
+                    alt_crop_would_match += 1
+            
             # Vote across predictions
             vote_counts = {}  # {hash: {'count': int, 'grid': np.array}}
             
@@ -3584,7 +3625,22 @@ def evaluate_trm_style(
                 vote_counts[h]['count'] += 1
             
             # Rank predictions by vote count (descending)
-            ranked_preds = sorted(vote_counts.values(), key=lambda x: x['count'], reverse=True)
+            # NOTE: No ground-truth-aware tie-breaking - pure evaluation
+            ranked_preds = sorted(
+                vote_counts.values(), 
+                key=lambda x: x['count'],
+                reverse=True
+            )
+            
+            # SAFEGUARD DIAGNOSTIC (Jan 2026): Detect vote ties and check if correct was in tie
+            # This is DIAGNOSTIC ONLY - does not affect winner selection
+            if len(ranked_preds) >= 2 and ranked_preds[0]['count'] == ranked_preds[1]['count']:
+                vote_tie_count += 1
+                # Check if correct answer was anywhere in the tie
+                top_count = ranked_preds[0]['count']
+                tied_preds = [p for p in ranked_preds if p['count'] == top_count]
+                if any(p['grid'].shape == test_output.shape and np.array_equal(p['grid'], test_output) for p in tied_preds):
+                    vote_tie_correct_in_tie += 1
             
             # Track voting stats
             all_unique_predictions.append(len(vote_counts))
@@ -3621,6 +3677,16 @@ def evaluate_trm_style(
     
     print(f"  [TRM-Eval] Complete. Exact match: {correct}/{total} ({exact_match*100:.1f}%)")
     
+    # SAFEGUARD DIAGNOSTICS (Jan 2026) - informational only, no effect on metrics
+    if shape_mismatch_count > 0:
+        print(f"  [TRM-Eval] ⚠️ Shape mismatch info: {shape_mismatch_count}/{total} tasks had train output shape != test output shape")
+        if alt_crop_would_match > 0:
+            print(f"             ℹ️ {alt_crop_would_match} tasks would match if cropped to test output shape (diagnostic only)")
+    if vote_tie_count > 0:
+        print(f"  [TRM-Eval] ℹ️ Vote ties: {vote_tie_count}/{total} tasks had multiple predictions with same vote count")
+        if vote_tie_correct_in_tie > 0:
+            print(f"             ℹ️ Correct answer was in tie for {vote_tie_correct_in_tie} tasks (not used for selection)")
+    
     result = {
         'exact_match': exact_match,
         'correct_tasks': correct,
@@ -3630,6 +3696,11 @@ def evaluate_trm_style(
         'max_agreement': max_agreement,
         'total_views': total_views,
         'pass_ks': pass_ks,
+        # SAFEGUARD diagnostics (Jan 2026) - informational only
+        'shape_mismatch_count': shape_mismatch_count,
+        'alt_crop_would_match': alt_crop_would_match,
+        'vote_tie_count': vote_tie_count,
+        'vote_tie_correct_in_tie': vote_tie_correct_in_tie,
     }
     # Add Pass@K metrics
     result.update(pass_at_k)
@@ -7063,6 +7134,8 @@ Config Overrides:
                     num_dihedral = config.get('evaluation', {}).get('num_augmented_views', 8)
                     num_color_perms = config.get('evaluation', {}).get('num_color_perms', 4)
                     pass_ks = config.get('evaluation', {}).get('pass_ks', [1, 2, 3])
+                    # SAFEGUARD (Jan 2026): Optional eval_seed for reproducible color permutations
+                    eval_seed = config.get('evaluation', {}).get('eval_seed', None)
                     trm_metrics = evaluate_trm_style(
                         eval_model, eval_tasks, device, 
                         temperature=eval_temp,
@@ -7070,6 +7143,7 @@ Config Overrides:
                         num_color_perms=num_color_perms,  # TTA with color permutation for max generalization
                         max_size=max_grid_size,
                         pass_ks=pass_ks,
+                        eval_seed=eval_seed,
                     )
                     trm_eval_time = time_module.time() - trm_eval_start
                     
