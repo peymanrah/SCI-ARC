@@ -1,0 +1,28 @@
+{
+  "build_timestamp": "2026-01-03T15:01:11.256985",
+  "manifest_sha256": "7f4faaf1cd31bc6a5736a8906b0b2ddef30ee5f5221f1cb6affeb801809c9abe",
+  "config": {
+    "agi1_train_path": "./data/arc-agi/data/training",
+    "agi1_eval_path": "./data/arc-agi/data/evaluation",
+    "agi2_train_path": "./data/arc-agi-2/data/training",
+    "agi2_eval_path": "./data/arc-agi-2/data/evaluation",
+    "output_dir": "./data/merged_training",
+    "near_dup_histogram_threshold": 0.95,
+    "near_dup_structure_threshold": 0.9,
+    "dev_split_ratio": 0.05,
+    "dev_split_seed": 42,
+    "verbose": true,
+    "dry_run": false
+  },
+  "stats": {
+    "agi1_train_loaded": 400,
+    "agi2_train_loaded": 1000,
+    "agi1_eval_loaded": 400,
+    "agi2_eval_loaded": 120,
+    "exact_dups_removed": 1,
+    "internal_dups_removed": 4,
+    "near_dups_quarantined": 760,
+    "final_train_count": 602,
+    "final_dev_count": 33
+  }
+}

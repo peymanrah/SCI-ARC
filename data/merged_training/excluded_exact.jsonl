@@ -1,0 +1,5 @@
+{"task_uid": "agi1_train:40853293", "source": "agi1_train", "canonical_sha256": "fb3d7cacb7678d61d72c7e8cfca3ab18e473c719a076c3f458557e209d44ee26", "reason": "exact_canonical_match_with_eval"}
+{"task_uid": "agi1_train:e179c5f4", "source": "agi1_train", "canonical_sha256": "3c697c5aeee3b5529dc3fcafd90fe0693e160b0d66a944254a7c7aea48cbd522", "reason": "duplicate_within_training_sets"}
+{"task_uid": "agi2_train:29c11459", "source": "agi2_train", "canonical_sha256": "c181fb91ca0d72477a91d6f803fa2e643f68d7f102ee169604f54ff7558b5bc3", "reason": "duplicate_within_training_sets"}
+{"task_uid": "agi2_train:4522001f", "source": "agi2_train", "canonical_sha256": "1ec7b5ab27d2723d9ffeb38be00247155c95d5f815663e36bb75d90b31330552", "reason": "duplicate_within_training_sets"}
+{"task_uid": "agi2_train:e9afcf9a", "source": "agi2_train", "canonical_sha256": "3ee818f67069c2e516eaf4f4a8ff30e8eee6ee692ed133bb47e17e413e51eb39", "reason": "duplicate_within_training_sets"}
