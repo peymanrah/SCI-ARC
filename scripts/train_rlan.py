@@ -3746,123 +3746,130 @@ def evaluate_trm_style(
     # Track Pass@K metrics
     pass_at_k_correct = {k: 0 for k in pass_ks}
     
-    # Progress logging - note we now do 1 forward pass per task (batched views)
+    # ================================================================
+    # MULTI-TASK BATCHING (Jan 2026 Optimization)
+    # ================================================================
+    # Instead of 1 forward pass per task (100 passes for 100 tasks),
+    # we batch multiple tasks together: tasks_per_batch * views_per_task
+    # With tasks_per_batch=8 and views=32, we get batch_size=256
+    # This reduces 100 forward passes to ~13, giving ~7× speedup.
+    # ================================================================
+    tasks_per_batch = 8  # Number of tasks to batch together (tune for GPU memory)
+    
     print(f"\n  [TRM-Eval] Running TTA on {total} tasks × {total_views} views", flush=True)
-    print(f"  [TRM-Eval] BATCHED: {total} forward passes (B={total_views} each) instead of {total * total_views}", flush=True)
+    print(f"  [TRM-Eval] MULTI-TASK BATCHED: ~{(total + tasks_per_batch - 1) // tasks_per_batch} forward passes (B={tasks_per_batch * total_views} max)", flush=True)
+    
+    # Pre-parse all tasks to avoid repeated parsing
+    parsed_tasks = []
+    for task in eval_tasks:
+        train_inputs_np = [np.array(p['input'], dtype=np.int64) for p in task['train']]
+        train_outputs_np = [np.array(p['output'], dtype=np.int64) for p in task['train']]
+        test_pair = task['test'][0]
+        test_input = np.array(test_pair['input'], dtype=np.int64)
+        test_output = np.array(test_pair['output'], dtype=np.int64)
+        parsed_tasks.append({
+            'train_inputs': train_inputs_np,
+            'train_outputs': train_outputs_np,
+            'test_input': test_input,
+            'test_output': test_output,
+            'num_pairs': len(train_inputs_np),
+        })
+    
+    max_pairs = 10
     
     with torch.no_grad():
-        for task_idx, task in enumerate(eval_tasks):
-            # Progress indicator every 10 tasks
-            if (task_idx + 1) % 10 == 0 or task_idx == total - 1:
-                print(f"  [TRM-Eval] Task {task_idx + 1}/{total} ({(task_idx + 1) * 100 // total}%)", flush=True)
+        # Process tasks in batches
+        for batch_start in range(0, total, tasks_per_batch):
+            batch_end = min(batch_start + tasks_per_batch, total)
+            batch_tasks = parsed_tasks[batch_start:batch_end]
+            num_tasks_in_batch = len(batch_tasks)
             
-            # Parse task
-            train_inputs_np = [np.array(p['input'], dtype=np.int64) for p in task['train']]
-            train_outputs_np = [np.array(p['output'], dtype=np.int64) for p in task['train']]
-            test_pair = task['test'][0]
-            test_input = np.array(test_pair['input'], dtype=np.int64)
-            test_output = np.array(test_pair['output'], dtype=np.int64)
-            
-            num_pairs = len(train_inputs_np)
-            max_pairs = 10
+            # Progress indicator
+            print(f"  [TRM-Eval] Tasks {batch_start + 1}-{batch_end}/{total} ({batch_end * 100 // total}%)", flush=True)
             
             # ================================================================
-            # BATCHED VIEW PREPARATION: Build all augmented views at once
+            # BUILD MEGA-BATCH: all tasks × all views
             # ================================================================
-            # We'll create tensors of shape (total_views, ...) and forward all at once
+            all_test_inputs = []      # (num_tasks * total_views, H, W)
+            all_train_inputs = []     # (num_tasks * total_views, max_pairs, H, W)
+            all_train_outputs = []    # (num_tasks * total_views, max_pairs, H, W)
+            all_pair_masks = []       # (num_tasks * total_views, max_pairs)
+            all_aug_infos = []        # List of (task_idx_in_batch, dihedral_id, color_perm, expected_aug_shape, expected_test_aug_shape)
             
-            batch_test_inputs = []      # Will be (total_views, H, W)
-            batch_train_inputs = []     # Will be (total_views, max_pairs, H, W)
-            batch_train_outputs = []    # Will be (total_views, max_pairs, H, W)
-            batch_pair_masks = []       # Will be (total_views, max_pairs)
-            
-            # Store augmentation info for inverse transforms
-            # FIXED: Now includes expected_aug_shape for proper cropping
-            aug_infos = []  # List of (dihedral_id, color_perm, expected_aug_shape) tuples
-            
-            for dihedral_id in range(num_dihedral):
-                for color_idx in range(num_color_perms):
-                    # CRITICAL ORDER (matching TRM):
-                    # Forward: color permutation FIRST, then dihedral
-                    # Inverse: inverse_dihedral FIRST, then inverse_color
-                    
-                    # Step 1: Apply color permutation FIRST (if any)
-                    color_perm = None
-                    color_aug_train_in = train_inputs_np
-                    color_aug_train_out = train_outputs_np  
-                    color_aug_test_in = test_input
-                    
-                    if color_idx > 0:
-                        color_perm = np.arange(10, dtype=np.int64)
-                        color_perm[1:] = np.random.permutation(9) + 1
-                        color_aug_train_in = [color_perm[g] for g in train_inputs_np]
-                        color_aug_train_out = [color_perm[g] for g in train_outputs_np]
-                        color_aug_test_in = color_perm[test_input]
-                    
-                    # Step 2: Apply dihedral transform SECOND
-                    aug_train_in = [apply_dihedral(g, dihedral_id) for g in color_aug_train_in]
-                    aug_train_out = [apply_dihedral(g, dihedral_id) for g in color_aug_train_out]
-                    aug_test_in = apply_dihedral(color_aug_test_in, dihedral_id)
-                    
-                    # FIXED: Track expected output shape in AUGMENTED space
-                    # This is what we need to crop the 30x30 padded prediction down to
-                    # before applying inverse_dihedral to get back to canonical space.
-                    # We use the first train output as reference (all pairs should produce same-sized output)
-                    expected_aug_shape = aug_train_out[0].shape  # (H_aug, W_aug)
-                    
-                    # SAFEGUARD: Also compute expected shape from test output for mismatch detection
-                    # If train output shape != test output shape, we may crop incorrectly
-                    expected_test_aug_shape = apply_dihedral(test_output, dihedral_id).shape
-                    
-                    # Pad grids
-                    train_in_padded = [pad_grid_for_tta(g, max_size, is_target=False) for g in aug_train_in]
-                    train_out_padded = [pad_grid_for_tta(g, max_size, is_target=True) for g in aug_train_out]
-                    test_in_padded = pad_grid_for_tta(aug_test_in, max_size, is_target=False)
-                    
-                    # Build tensors for this view
-                    input_grids = torch.stack([torch.from_numpy(g) for g in train_in_padded])  # (K, H, W)
-                    output_grids = torch.stack([torch.from_numpy(g) for g in train_out_padded])  # (K, H, W)
-                    test_input_t = torch.from_numpy(test_in_padded)  # (H, W)
-                    
-                    # Create pair mask
-                    pair_mask = torch.zeros(max_pairs, dtype=torch.bool)
-                    pair_mask[:num_pairs] = True
-                    
-                    # Pad to max_pairs
-                    if num_pairs < max_pairs:
-                        pad_in = input_grids[0:1].expand(max_pairs - num_pairs, -1, -1)
-                        pad_out = output_grids[0:1].expand(max_pairs - num_pairs, -1, -1)
-                        input_grids = torch.cat([input_grids, pad_in], dim=0)
-                        output_grids = torch.cat([output_grids, pad_out], dim=0)
-                    
-                    # Collect for batching
-                    batch_test_inputs.append(test_input_t)
-                    batch_train_inputs.append(input_grids)
-                    batch_train_outputs.append(output_grids)
-                    batch_pair_masks.append(pair_mask)
-                    # SAFEGUARD: Include both shapes for fallback cropping (Jan 2026)
-                    aug_infos.append((dihedral_id, color_perm, expected_aug_shape, expected_test_aug_shape))
+            for task_idx_in_batch, task_data in enumerate(batch_tasks):
+                train_inputs_np = task_data['train_inputs']
+                train_outputs_np = task_data['train_outputs']
+                test_input = task_data['test_input']
+                test_output = task_data['test_output']
+                num_pairs = task_data['num_pairs']
+                
+                for dihedral_id in range(num_dihedral):
+                    for color_idx in range(num_color_perms):
+                        # Step 1: Apply color permutation FIRST
+                        color_perm = None
+                        color_aug_train_in = train_inputs_np
+                        color_aug_train_out = train_outputs_np  
+                        color_aug_test_in = test_input
+                        
+                        if color_idx > 0:
+                            color_perm = np.arange(10, dtype=np.int64)
+                            color_perm[1:] = np.random.permutation(9) + 1
+                            color_aug_train_in = [color_perm[g] for g in train_inputs_np]
+                            color_aug_train_out = [color_perm[g] for g in train_outputs_np]
+                            color_aug_test_in = color_perm[test_input]
+                        
+                        # Step 2: Apply dihedral transform SECOND
+                        aug_train_in = [apply_dihedral(g, dihedral_id) for g in color_aug_train_in]
+                        aug_train_out = [apply_dihedral(g, dihedral_id) for g in color_aug_train_out]
+                        aug_test_in = apply_dihedral(color_aug_test_in, dihedral_id)
+                        
+                        expected_aug_shape = aug_train_out[0].shape
+                        expected_test_aug_shape = apply_dihedral(test_output, dihedral_id).shape
+                        
+                        # Pad grids
+                        train_in_padded = [pad_grid_for_tta(g, max_size, is_target=False) for g in aug_train_in]
+                        train_out_padded = [pad_grid_for_tta(g, max_size, is_target=True) for g in aug_train_out]
+                        test_in_padded = pad_grid_for_tta(aug_test_in, max_size, is_target=False)
+                        
+                        # Build tensors
+                        input_grids = torch.stack([torch.from_numpy(g) for g in train_in_padded])
+                        output_grids = torch.stack([torch.from_numpy(g) for g in train_out_padded])
+                        test_input_t = torch.from_numpy(test_in_padded)
+                        
+                        # Create pair mask and pad to max_pairs
+                        pair_mask = torch.zeros(max_pairs, dtype=torch.bool)
+                        pair_mask[:num_pairs] = True
+                        
+                        if num_pairs < max_pairs:
+                            pad_in = input_grids[0:1].expand(max_pairs - num_pairs, -1, -1)
+                            pad_out = output_grids[0:1].expand(max_pairs - num_pairs, -1, -1)
+                            input_grids = torch.cat([input_grids, pad_in], dim=0)
+                            output_grids = torch.cat([output_grids, pad_out], dim=0)
+                        
+                        all_test_inputs.append(test_input_t)
+                        all_train_inputs.append(input_grids)
+                        all_train_outputs.append(output_grids)
+                        all_pair_masks.append(pair_mask)
+                        all_aug_infos.append((task_idx_in_batch, dihedral_id, color_perm, expected_aug_shape, expected_test_aug_shape))
             
             # ================================================================
-            # BATCHED FORWARD PASS: All views in one call
+            # SINGLE MEGA FORWARD PASS for all tasks in batch
             # ================================================================
-            # Stack all views into batch dimension
-            batch_test_inputs = torch.stack(batch_test_inputs).to(device)      # (V, H, W)
-            batch_train_inputs = torch.stack(batch_train_inputs).to(device)    # (V, K, H, W)
-            batch_train_outputs = torch.stack(batch_train_outputs).to(device)  # (V, K, H, W)
-            batch_pair_masks = torch.stack(batch_pair_masks).to(device)        # (V, K)
+            mega_test_inputs = torch.stack(all_test_inputs).to(device)
+            mega_train_inputs = torch.stack(all_train_inputs).to(device)
+            mega_train_outputs = torch.stack(all_train_outputs).to(device)
+            mega_pair_masks = torch.stack(all_pair_masks).to(device)
             
-            # Single batched forward pass!
             outputs = model(
-                batch_test_inputs,
-                train_inputs=batch_train_inputs,
-                train_outputs=batch_train_outputs,
-                pair_mask=batch_pair_masks,
+                mega_test_inputs,
+                train_inputs=mega_train_inputs,
+                train_outputs=mega_train_outputs,
+                pair_mask=mega_pair_masks,
                 temperature=temperature,
                 return_intermediates=True,
             )
             
-            # Best-step selection: use lowest-entropy step for most confident prediction
+            # Best-step selection
             if hasattr(model, 'use_best_step_selection') and model.use_best_step_selection:
                 all_logits = outputs.get('all_logits')
                 if all_logits and len(all_logits) > 1:
@@ -3871,102 +3878,81 @@ def evaluate_trm_style(
                 else:
                     logits = outputs['logits']
             else:
-                logits = outputs['logits']  # (V, C, H, W)
+                logits = outputs['logits']
             
-            # Get predictions for all views
-            preds = logits.argmax(dim=1).cpu().numpy()  # (V, H, W)
+            preds = logits.argmax(dim=1).cpu().numpy()  # (num_tasks * total_views, H, W)
             
             # ================================================================
-            # INVERSE TRANSFORMS AND VOTING (still sequential per view)
+            # POST-PROCESS: Group predictions by task and vote
             # ================================================================
-            predictions = []  # List of (canonical_pred, confidence)
+            # Group predictions by task_idx_in_batch
+            task_predictions = [[] for _ in range(num_tasks_in_batch)]
             
-            # SAFEGUARD: Detect shape mismatch once per task (first view, dihedral_id=0)
-            first_aug_info = aug_infos[0]
-            if first_aug_info[2] != first_aug_info[3]:  # expected_aug_shape != expected_test_aug_shape
-                shape_mismatch_count += 1
-            
-            for view_idx, (dihedral_id, color_perm, expected_aug_shape, expected_test_aug_shape) in enumerate(aug_infos):
-                pred = preds[view_idx]  # (H, W) - this is 30x30 padded
+            for view_idx, (task_idx_in_batch, dihedral_id, color_perm, expected_aug_shape, expected_test_aug_shape) in enumerate(all_aug_infos):
+                pred = preds[view_idx]
                 
-                # FIXED: Crop using expected_aug_shape instead of content detection
-                # This is the critical fix for the 0% exact match bug!
-                # The model doesn't output pad_value=10 in padded regions, so
-                # content detection fails. We know the expected shape from the
-                # augmented training outputs, so use that directly.
+                # Crop and inverse transform
                 pred_cropped = crop_prediction(pred, target_shape=expected_aug_shape)
-                
-                # Inverse transform to canonical space
                 pred_canonical = inverse_dihedral(pred_cropped, dihedral_id)
                 if color_perm is not None:
                     pred_canonical = inverse_color_perm(pred_canonical, color_perm)
                 
-                predictions.append((pred_canonical, 1.0))  # Confidence fixed at 1.0
+                task_predictions[task_idx_in_batch].append((pred_canonical, 1.0))
             
-            # SAFEGUARD DIAGNOSTIC (Jan 2026): Check if alt-crop would match ground truth
-            # This is DIAGNOSTIC ONLY - we don't add to vote pool to preserve evaluation purity
-            if first_aug_info[2] != first_aug_info[3]:  # Shape mismatch exists
-                # Try alt-crop on first view only (representative sample)
-                pred_first = preds[0]
-                dihedral_id_first, color_perm_first, _, expected_test_aug_shape_first = aug_infos[0]
-                pred_cropped_alt = crop_prediction(pred_first, target_shape=expected_test_aug_shape_first)
-                pred_canonical_alt = inverse_dihedral(pred_cropped_alt, dihedral_id_first)
-                if color_perm_first is not None:
-                    pred_canonical_alt = inverse_color_perm(pred_canonical_alt, color_perm_first)
-                # Check if this would have matched
-                if pred_canonical_alt.shape == test_output.shape and np.array_equal(pred_canonical_alt, test_output):
-                    alt_crop_would_match += 1
-            
-            # Vote across predictions
-            vote_counts = {}  # {hash: {'count': int, 'grid': np.array}}
-            
-            for pred, conf in predictions:
-                h = grid_hash(pred)
-                if h not in vote_counts:
-                    vote_counts[h] = {'count': 0, 'grid': pred}
-                vote_counts[h]['count'] += 1
-            
-            # Rank predictions by vote count (descending)
-            # NOTE: No ground-truth-aware tie-breaking - pure evaluation
-            ranked_preds = sorted(
-                vote_counts.values(), 
-                key=lambda x: x['count'],
-                reverse=True
-            )
-            
-            # SAFEGUARD DIAGNOSTIC (Jan 2026): Detect vote ties and check if correct was in tie
-            # This is DIAGNOSTIC ONLY - does not affect winner selection
-            if len(ranked_preds) >= 2 and ranked_preds[0]['count'] == ranked_preds[1]['count']:
-                vote_tie_count += 1
-                # Check if correct answer was anywhere in the tie
-                top_count = ranked_preds[0]['count']
-                tied_preds = [p for p in ranked_preds if p['count'] == top_count]
-                if any(p['grid'].shape == test_output.shape and np.array_equal(p['grid'], test_output) for p in tied_preds):
-                    vote_tie_correct_in_tie += 1
-            
-            # Track voting stats
-            all_unique_predictions.append(len(vote_counts))
-            all_winner_votes.append(ranked_preds[0]['count'] if ranked_preds else 0)
-            
-            # Check Pass@K: is ground truth among top K predictions?
-            for k in pass_ks:
-                top_k_preds = ranked_preds[:k]
-                is_in_top_k = any(
-                    p['grid'].shape == test_output.shape and np.array_equal(p['grid'], test_output)
-                    for p in top_k_preds
+            # Vote and evaluate each task
+            for task_idx_in_batch, task_data in enumerate(batch_tasks):
+                test_output = task_data['test_output']
+                predictions = task_predictions[task_idx_in_batch]
+                
+                # Check shape mismatch (first view only)
+                first_aug = all_aug_infos[task_idx_in_batch * total_views]
+                if first_aug[3] != first_aug[4]:
+                    shape_mismatch_count += 1
+                
+                # Vote across predictions
+                vote_counts = {}
+                for pred, conf in predictions:
+                    h = grid_hash(pred)
+                    if h not in vote_counts:
+                        vote_counts[h] = {'count': 0, 'grid': pred}
+                    vote_counts[h]['count'] += 1
+                
+                ranked_preds = sorted(vote_counts.values(), key=lambda x: x['count'], reverse=True)
+                
+                # Track voting stats
+                all_unique_predictions.append(len(vote_counts))
+                all_winner_votes.append(ranked_preds[0]['count'] if ranked_preds else 0)
+                
+                # Detect vote ties
+                if len(ranked_preds) >= 2 and ranked_preds[0]['count'] == ranked_preds[1]['count']:
+                    vote_tie_count += 1
+                    top_count = ranked_preds[0]['count']
+                    tied_preds = [p for p in ranked_preds if p['count'] == top_count]
+                    if any(p['grid'].shape == test_output.shape and np.array_equal(p['grid'], test_output) for p in tied_preds):
+                        vote_tie_correct_in_tie += 1
+                
+                # Check Pass@K
+                for k in pass_ks:
+                    top_k_preds = ranked_preds[:k]
+                    is_in_top_k = any(
+                        p['grid'].shape == test_output.shape and np.array_equal(p['grid'], test_output)
+                        for p in top_k_preds
+                    )
+                    if is_in_top_k:
+                        pass_at_k_correct[k] += 1
+                
+                # Check exact match
+                winner_grid = ranked_preds[0]['grid'] if ranked_preds else np.array([[0]])
+                is_correct = (
+                    winner_grid.shape == test_output.shape and
+                    np.array_equal(winner_grid, test_output)
                 )
-                if is_in_top_k:
-                    pass_at_k_correct[k] += 1
+                if is_correct:
+                    correct += 1
             
-            # Also check exact match (Pass@1)
-            winner_grid = ranked_preds[0]['grid'] if ranked_preds else np.array([[0]])
-            is_correct = (
-                winner_grid.shape == test_output.shape and
-                np.array_equal(winner_grid, test_output)
-            )
-            
-            if is_correct:
-                correct += 1
+            # Free GPU memory
+            del mega_test_inputs, mega_train_inputs, mega_train_outputs, mega_pair_masks, outputs, logits, preds
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
     # Compute metrics
     exact_match = correct / max(total, 1)
