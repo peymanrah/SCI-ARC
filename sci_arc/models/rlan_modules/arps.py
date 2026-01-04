@@ -1043,18 +1043,22 @@ class ARPS(nn.Module):
         }
 
 
-def create_arps_from_config(config: dict) -> Optional[ARPS]:
+def create_arps_from_config(config: dict, hidden_dim: int = 256) -> Optional[ARPS]:
     """
     Factory function to create ARPS module from YAML config.
     
     Args:
         config: Dictionary from YAML config['model']['arps_dsl_search']
+        hidden_dim: Hidden dimension for neural components (default: 256)
         
     Returns:
         ARPS module if enabled, None otherwise
     """
     if not config.get('enabled', False):
         return None
+    
+    # Use hidden_dim from config if specified, otherwise use parameter
+    effective_hidden_dim = config.get('hidden_dim', hidden_dim)
     
     arps_config = ARPSConfig(
         enabled=True,
@@ -1071,7 +1075,7 @@ def create_arps_from_config(config: dict) -> Optional[ARPS]:
         use_mdl_ranking=config.get('use_mdl_ranking', True),
         search_during_training=config.get('search_during_training', True),
         imitation_weight=config.get('imitation_weight', 0.1),
-        hidden_dim=config.get('hidden_dim', 256),
+        hidden_dim=effective_hidden_dim,
     )
     
     return ARPS(arps_config)
