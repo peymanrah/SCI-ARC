@@ -1615,6 +1615,20 @@ def train_epoch(
         'hpm_duplicate_skipped': 0,               # Count of duplicate adds prevented
         
         # =============================================================
+        # HPM WRITE DIAGNOSTICS (Jan 2026 Patch)
+        # =============================================================
+        # Detailed tracking of why HPM writes may be skipped
+        'hpm_write_attempts': 0,                  # Total attempts to write to HPM
+        'hpm_writes_succeeded': 0,                # Successful writes
+        'hpm_write_skip_reasons': {               # Breakdown of skip reasons
+            'no_method': 0,                       # Model lacks hpm_add_solved_task
+            'not_enabled': 0,                     # use_hpm=False AND hpm_memory_enabled=False
+            'global_duplicate': 0,                # Already in buffer from previous epoch
+            'epoch_duplicate': 0,                 # Already added this epoch
+            'no_support_features': 0,             # Missing support_features in output
+        },
+        
+        # =============================================================
         # HPM RETRIEVAL STATS (for monitoring memory quality)
         # =============================================================
         'hpm_retrieval_count': 0,                 # Number of batches with HPM retrieval
@@ -2916,37 +2930,41 @@ def train_epoch(
                         # HPM DYNAMIC BUFFER POPULATION:
                         # When a sample is solved exactly, store its context in dynamic banks
                         # for future retrieval-augmented reasoning on similar tasks.
-                        # TODO 2 FIX: Check hpm_memory_enabled OR use_hpm (decouple write vs use)
+                        # FIX (Jan 2026): Decoupled write vs use - check hpm_memory_enabled OR use_hpm
                         hpm_memory_enabled = getattr(model, 'hpm_memory_enabled', False)
                         has_hpm_method = hasattr(model, 'hpm_add_solved_task')
                         hpm_enabled_check = model.use_hpm or hpm_memory_enabled
                         
+                        # Track write attempt (Jan 2026 Patch)
+                        epoch_diagnostics['hpm_write_attempts'] = epoch_diagnostics.get('hpm_write_attempts', 0) + 1
+                        
                         # DIAGNOSTIC: Track why HPM buffer writes may be skipped
                         if not has_hpm_method:
-                            epoch_diagnostics['hpm_skipped_no_method'] = epoch_diagnostics.get('hpm_skipped_no_method', 0) + 1
+                            epoch_diagnostics['hpm_write_skip_reasons']['no_method'] += 1
                         elif not hpm_enabled_check:
-                            epoch_diagnostics['hpm_skipped_not_enabled'] = epoch_diagnostics.get('hpm_skipped_not_enabled', 0) + 1
+                            epoch_diagnostics['hpm_write_skip_reasons']['not_enabled'] += 1
                         
                         if has_hpm_method and hpm_enabled_check:
                             # Prefer a stable task id so retrieval isn't polluted by per-sample ids
                             task_id = sample_task_id if sample_task_id is not None else f"epoch{epoch}_batch{batch_idx}_sample{i}"
                             
-                            # TODO 3 FIX: GLOBAL DEDUPLICATION (not just per-epoch)
+                            # GLOBAL DEDUPLICATION (not just per-epoch)
                             # Check if task already exists in buffer across ALL epochs
                             already_in_buffer = False
                             if hasattr(model, 'hpm_buffer_contains_task'):
                                 already_in_buffer = model.hpm_buffer_contains_task(task_id)
                             
                             if already_in_buffer:
-                                epoch_diagnostics['hpm_global_duplicate_skipped'] = epoch_diagnostics.get('hpm_global_duplicate_skipped', 0) + 1
+                                epoch_diagnostics['hpm_write_skip_reasons']['global_duplicate'] += 1
                             elif task_id in epoch_diagnostics['hpm_tasks_added_this_epoch']:
                                 # Per-epoch dedup (multiple augmentations of same task in one epoch)
+                                epoch_diagnostics['hpm_write_skip_reasons']['epoch_duplicate'] += 1
                                 epoch_diagnostics['hpm_duplicate_skipped'] += 1
                             else:
                                 # Get context embedding for this sample
                                 support_features = outputs.get('support_features')
                                 if support_features is None:
-                                    epoch_diagnostics['hpm_add_skipped_no_support_features'] = epoch_diagnostics.get('hpm_add_skipped_no_support_features', 0) + 1
+                                    epoch_diagnostics['hpm_write_skip_reasons']['no_support_features'] += 1
                                 else:
                                     # support_features: (B, N, D, H, W) -> pool to (D,)
                                     z_context = support_features[i].mean(dim=(0, 2, 3))  # (D,)
@@ -2964,9 +2982,10 @@ def train_epoch(
                                         z_context.unsqueeze(0),
                                         z_task.unsqueeze(0) if z_task is not None else None,
                                         task_id,
-                                        force_write=hpm_memory_enabled,  # TODO 2: force write during staging
+                                        force_write=hpm_memory_enabled,  # Force write during staged-off period
                                     )
                                     epoch_diagnostics['hpm_tasks_added'] = epoch_diagnostics.get('hpm_tasks_added', 0) + 1
+                                    epoch_diagnostics['hpm_writes_succeeded'] = epoch_diagnostics.get('hpm_writes_succeeded', 0) + 1
                                     epoch_diagnostics['hpm_tasks_added_this_epoch'].add(task_id)
                     
                     # High accuracy (>=90% correct)
@@ -3215,13 +3234,20 @@ def train_epoch(
             # GLOBAL TASK TRACKING LOG (Jan 2026)
             # =============================================================
             # Show: total unique solved ever | new this epoch | new this batch
+            # PATCH (Jan 2026): Use expected_task_count for stable denominator
             if global_task_tracker is not None:
                 total_globally_solved = len(global_task_tracker['all_solved_task_ids'])
-                total_ever_seen = len(global_task_tracker['all_seen_task_ids'])
+                expected_total = global_task_tracker.get('expected_task_count', None)
                 new_this_epoch = epoch_diagnostics.get('new_globally_solved_count', 0)
                 epoch_solved_this_epoch = len(epoch_diagnostics['solved_task_ids'])
-                print(f"    [TaskTrack] Global_Solved: {total_globally_solved}/{total_ever_seen}, "
-                      f"Epoch_Solved: {epoch_solved_this_epoch}, New_Puzzles: {new_this_epoch}")
+                if expected_total is not None:
+                    print(f"    [TaskTrack] Global_Solved: {total_globally_solved}/{expected_total}, "
+                          f"Epoch_Solved: {epoch_solved_this_epoch}, New_Puzzles: {new_this_epoch}")
+                else:
+                    # Fallback to dynamic count
+                    total_ever_seen = len(global_task_tracker['all_seen_task_ids'])
+                    print(f"    [TaskTrack] Global_Solved: {total_globally_solved}/{total_ever_seen}, "
+                          f"Epoch_Solved: {epoch_solved_this_epoch}, New_Puzzles: {new_this_epoch}")
             
             # FG/BG accuracy for this batch and running averages
             fg_window = epoch_diagnostics['fg_running_window']
@@ -3579,6 +3605,162 @@ def evaluate(
         'predicate_activation': predicate_activation_sum / max(num_eval_samples, 1),
     }
     print(" Done.")  # End the progress line
+
+
+# =============================================================================
+# CANONICAL TRAIN EVALUATION (Jan 2026 Patch)
+# =============================================================================
+# Provides a deterministic, stable train accuracy metric by evaluating on
+# canonical (non-augmented) samples. This is independent of random augmentation
+# and gives a reliable signal for plateau detection.
+# =============================================================================
+
+def evaluate_canonical_train(
+    model: RLAN,
+    train_loader: DataLoader,
+    device: torch.device,
+    temperature: float = 0.5,
+    max_tasks: int = 100,  # Limit for speed
+) -> Dict[str, float]:
+    """
+    Evaluate model on training data with NO augmentation for stable metrics.
+    
+    This provides a deterministic train accuracy that doesn't fluctuate with
+    random augmentation, making it reliable for:
+    - Plateau detection
+    - Comparing train vs eval gap
+    - Debugging generalization issues
+    
+    Args:
+        model: RLAN model
+        train_loader: Training data loader (will use underlying dataset)
+        device: torch device
+        temperature: Softmax temperature
+        max_tasks: Maximum tasks to evaluate (for speed)
+    
+    Returns:
+        Dict with canonical_task_accuracy, canonical_pixel_accuracy, etc.
+    """
+    model.eval()
+    
+    # Get the underlying dataset
+    dataset = train_loader.dataset if hasattr(train_loader, 'dataset') else None
+    if dataset is None:
+        return {'canonical_task_accuracy': 0.0, 'canonical_enabled': False}
+    
+    # Get tasks from dataset
+    tasks = getattr(dataset, 'tasks', None)
+    if tasks is None:
+        return {'canonical_task_accuracy': 0.0, 'canonical_enabled': False}
+    
+    # Limit to max_tasks for speed
+    tasks_to_eval = tasks[:max_tasks] if len(tasks) > max_tasks else tasks
+    
+    total_correct_tasks = 0
+    total_tasks = 0
+    total_correct_pixels = 0
+    total_valid_pixels = 0
+    
+    max_size = 30
+    
+    with torch.no_grad():
+        for task in tasks_to_eval:
+            try:
+                # Get task data (no augmentation)
+                if isinstance(task, dict):
+                    train_pairs = task.get('train', [])
+                    test_pairs = task.get('test', [])
+                else:
+                    train_pairs = getattr(task, 'train', [])
+                    test_pairs = getattr(task, 'test', [])
+                
+                if not train_pairs or not test_pairs:
+                    continue
+                
+                # Get first test pair only (canonical)
+                test_pair = test_pairs[0]
+                test_input = np.array(test_pair['input'], dtype=np.int64)
+                test_output = np.array(test_pair['output'], dtype=np.int64)
+                
+                # Prepare train grids (no augmentation)
+                train_inputs = [np.array(p['input'], dtype=np.int64) for p in train_pairs]
+                train_outputs = [np.array(p['output'], dtype=np.int64) for p in train_pairs]
+                
+                # Pad all grids
+                def pad_np(g, size, pad_val):
+                    h, w = g.shape
+                    padded = np.full((size, size), pad_val, dtype=np.int64)
+                    padded[:h, :w] = g
+                    return padded
+                
+                train_inputs_t = torch.stack([
+                    torch.from_numpy(pad_np(g, max_size, 10)) for g in train_inputs
+                ]).unsqueeze(0).to(device)  # (1, N, H, W)
+                
+                train_outputs_t = torch.stack([
+                    torch.from_numpy(pad_np(g, max_size, 10)) for g in train_outputs
+                ]).unsqueeze(0).to(device)  # (1, N, H, W)
+                
+                test_input_t = torch.from_numpy(
+                    pad_np(test_input, max_size, 10)
+                ).unsqueeze(0).to(device)  # (1, H, W)
+                
+                test_output_t = torch.from_numpy(
+                    pad_np(test_output, max_size, -100)
+                ).to(device)  # (H, W) - for comparison
+                
+                # Create pair mask
+                num_pairs = len(train_inputs)
+                max_pairs = train_inputs_t.shape[1]
+                pair_mask = torch.zeros(1, max_pairs, dtype=torch.bool, device=device)
+                pair_mask[0, :num_pairs] = True
+                
+                # Forward pass
+                outputs = model(
+                    test_input_t,
+                    train_inputs=train_inputs_t,
+                    train_outputs=train_outputs_t,
+                    pair_mask=pair_mask,
+                    temperature=temperature,
+                )
+                
+                logits = outputs['logits']  # (1, C, H, W)
+                pred = logits.argmax(dim=1)[0]  # (H, W)
+                
+                # Compute accuracy over valid region only
+                h_out, w_out = test_output.shape
+                pred_cropped = pred[:h_out, :w_out].cpu()
+                target_t = torch.from_numpy(test_output)
+                
+                valid_mask = target_t >= 0
+                valid_pixels = valid_mask.sum().item()
+                
+                if valid_pixels > 0:
+                    correct = ((pred_cropped == target_t) & valid_mask).sum().item()
+                    total_correct_pixels += correct
+                    total_valid_pixels += valid_pixels
+                    
+                    # Exact match
+                    if correct == valid_pixels:
+                        total_correct_tasks += 1
+                
+                total_tasks += 1
+                
+            except Exception as e:
+                # Skip problematic tasks
+                continue
+    
+    # Compute metrics
+    canonical_task_accuracy = total_correct_tasks / max(total_tasks, 1)
+    canonical_pixel_accuracy = total_correct_pixels / max(total_valid_pixels, 1)
+    
+    return {
+        'canonical_task_accuracy': canonical_task_accuracy,
+        'canonical_pixel_accuracy': canonical_pixel_accuracy,
+        'canonical_correct_tasks': total_correct_tasks,
+        'canonical_total_tasks': total_tasks,
+        'canonical_enabled': True,
+    }
 
 
 # =============================================================================
@@ -5329,6 +5511,315 @@ Config Overrides:
     phased_training_config = config.get('training', {}).get('phased_training', {})
     phased_training_enabled = phased_training_config.get('enabled', False)
     
+    # ================================================================
+    # METRIC-BASED PHASE GATING (Jan 2026)
+    # ================================================================
+    # Optional: Delay phase transitions until metrics meet thresholds.
+    # Backward compatible: disabled by default or when config absent.
+    # ================================================================
+    phase_readiness_config = phased_training_config.get('phase_readiness', {})
+    use_metric_gating = phase_readiness_config.get('use_metric_gating', False)
+    
+    # State for tracking phase gate progress
+    phase_gate_state = {
+        'current_effective_phase': 'A',  # Actual phase in use (may lag epoch-based phase)
+        'epochs_in_current_phase': 0,     # How many epochs in current effective phase
+        'phase_a_start_epoch': 0,         # When Phase A started (for min_epochs tracking)
+        'phase_b_start_epoch': None,      # When Phase B started
+        'a_to_b_consecutive_met': 0,      # Consecutive evals meeting A→B gate
+        'b_to_c_consecutive_met': 0,      # Consecutive evals meeting B→C gate
+        'centroid_collapse_free_count': 0,  # Epochs without centroid collapse
+        'grad_explosion_free_count': 0,     # Epochs without gradient explosion
+        'last_gate_status': {},           # Last eval's gate status for logging
+        'transition_log': [],             # Log of phase transitions [(epoch, from_phase, to_phase)]
+    }
+    
+    if use_metric_gating and phased_training_enabled:
+        gate_a_to_b = phase_readiness_config.get('gate_a_to_b', {})
+        gate_b_to_c = phase_readiness_config.get('gate_b_to_c', {})
+        print(f"\n{'='*60}")
+        print(f"METRIC-BASED PHASE GATING ENABLED")
+        print(f"{'='*60}")
+        print(f"  A→B Gate:")
+        print(f"    min_epochs: {gate_a_to_b.get('min_epochs_in_phase_a', 10)}")
+        shape_max_ab = gate_a_to_b.get('shape_mismatch_max', 0.40)
+        if shape_max_ab >= 1.0:
+            print(f"    shape_mismatch: DISABLED (threshold=1.0)")
+        else:
+            print(f"    shape_mismatch ≤ {shape_max_ab:.0%}")
+        print(f"    fg_accuracy ≥ {gate_a_to_b.get('fg_accuracy_min', 0.45):.0%}")
+        print(f"    patience: {gate_a_to_b.get('patience', 2)} consecutive evals")
+        print(f"  B→C Gate:")
+        print(f"    min_epochs: {gate_b_to_c.get('min_epochs_in_phase_b', 5)}")
+        shape_max_bc = gate_b_to_c.get('shape_mismatch_max', 0.25)
+        if shape_max_bc >= 1.0:
+            print(f"    shape_mismatch: DISABLED (threshold=1.0)")
+        else:
+            print(f"    shape_mismatch ≤ {shape_max_bc:.0%}")
+        print(f"    fg_accuracy ≥ {gate_b_to_c.get('fg_accuracy_min', 0.50):.0%}")
+        tta_exact_min = gate_b_to_c.get('tta_exact_match_min', 0.01)
+        if tta_exact_min <= 0:
+            print(f"    tta_exact_match: DISABLED (threshold=0)")
+        else:
+            print(f"    tta_exact_match ≥ {tta_exact_min:.1%}")
+        print(f"    vote_tie_max ≤ {gate_b_to_c.get('vote_tie_max', 0.30):.0%}")
+        print(f"{'='*60}\n")
+    
+    def check_phase_gate(current_phase: str, epoch_1based: int, 
+                         eval_metrics: dict = None, trm_metrics: dict = None) -> tuple:
+        """
+        Check if phase gate criteria are met for transitioning.
+        
+        Args:
+            current_phase: Current effective phase ('A', 'B', 'C')
+            epoch_1based: Current epoch (1-based, human readable)
+            eval_metrics: Dict from evaluate() with fg_accuracy, etc.
+            trm_metrics: Dict from evaluate_trm_style() with shape_mismatch_count, etc.
+            
+        Returns:
+            (ready: bool, status: dict) - Whether gate is passed and detailed status
+        """
+        if not use_metric_gating:
+            return True, {'gating': 'disabled'}
+        
+        status = {'criteria': [], 'met': [], 'not_met': []}
+        
+        if current_phase == 'A':
+            # Check A→B gate
+            gate_cfg = phase_readiness_config.get('gate_a_to_b', {})
+            min_epochs = gate_cfg.get('min_epochs_in_phase_a', 10)
+            shape_mismatch_max = gate_cfg.get('shape_mismatch_max', 0.40)
+            fg_accuracy_min = gate_cfg.get('fg_accuracy_min', 0.45)
+            patience = gate_cfg.get('patience', 2)
+            collapse_free = gate_cfg.get('centroid_collapse_free_epochs', 0)
+            grad_free = gate_cfg.get('grad_explosion_free_epochs', 0)
+            
+            epochs_in_phase = epoch_1based - phase_gate_state['phase_a_start_epoch']
+            
+            # Criterion 1: Minimum epochs
+            min_epochs_met = epochs_in_phase >= min_epochs
+            status['criteria'].append(f"min_epochs≥{min_epochs}")
+            if min_epochs_met:
+                status['met'].append(f"epochs={epochs_in_phase}✓")
+            else:
+                status['not_met'].append(f"epochs={epochs_in_phase}<{min_epochs}")
+                # Don't check other criteria if min epochs not met
+                return False, status
+            
+            # Criterion 2: Shape mismatch rate (skip if threshold >= 1.0, i.e., disabled)
+            if shape_mismatch_max < 1.0:
+                if trm_metrics and 'shape_mismatch_count' in trm_metrics:
+                    total = trm_metrics.get('total_tasks', 1)
+                    shape_rate = trm_metrics['shape_mismatch_count'] / total if total > 0 else 1.0
+                    status['criteria'].append(f"shape_mismatch≤{shape_mismatch_max:.0%}")
+                    if shape_rate <= shape_mismatch_max:
+                        status['met'].append(f"shape={shape_rate:.0%}✓")
+                    else:
+                        status['not_met'].append(f"shape={shape_rate:.0%}>{shape_mismatch_max:.0%}")
+                else:
+                    status['not_met'].append("no TRM metrics")
+            # else: shape_mismatch check disabled (threshold=1.0)
+            
+            # Criterion 3: FG accuracy
+            if eval_metrics and 'fg_accuracy' in eval_metrics:
+                fg_acc = eval_metrics['fg_accuracy']
+                status['criteria'].append(f"fg_acc≥{fg_accuracy_min:.0%}")
+                if fg_acc >= fg_accuracy_min:
+                    status['met'].append(f"fg={fg_acc:.0%}✓")
+                else:
+                    status['not_met'].append(f"fg={fg_acc:.0%}<{fg_accuracy_min:.0%}")
+            else:
+                status['not_met'].append("no eval metrics")
+            
+            # Criterion 4: Stability (optional)
+            if collapse_free > 0:
+                status['criteria'].append(f"collapse_free≥{collapse_free}")
+                if phase_gate_state['centroid_collapse_free_count'] >= collapse_free:
+                    status['met'].append(f"collapse_free={phase_gate_state['centroid_collapse_free_count']}✓")
+                else:
+                    status['not_met'].append(f"collapse_free={phase_gate_state['centroid_collapse_free_count']}<{collapse_free}")
+            
+            if grad_free > 0:
+                status['criteria'].append(f"grad_free≥{grad_free}")
+                if phase_gate_state['grad_explosion_free_count'] >= grad_free:
+                    status['met'].append(f"grad_free={phase_gate_state['grad_explosion_free_count']}✓")
+                else:
+                    status['not_met'].append(f"grad_free={phase_gate_state['grad_explosion_free_count']}<{grad_free}")
+            
+            # Gate passes if all required criteria met
+            all_met = len(status['not_met']) == 0
+            if all_met:
+                phase_gate_state['a_to_b_consecutive_met'] += 1
+            else:
+                phase_gate_state['a_to_b_consecutive_met'] = 0
+            
+            ready = phase_gate_state['a_to_b_consecutive_met'] >= patience
+            status['consecutive'] = phase_gate_state['a_to_b_consecutive_met']
+            status['patience'] = patience
+            
+            return ready, status
+            
+        elif current_phase == 'B':
+            # Check B→C gate
+            gate_cfg = phase_readiness_config.get('gate_b_to_c', {})
+            min_epochs = gate_cfg.get('min_epochs_in_phase_b', 5)
+            shape_mismatch_max = gate_cfg.get('shape_mismatch_max', 0.25)
+            fg_accuracy_min = gate_cfg.get('fg_accuracy_min', 0.50)
+            tta_exact_min = gate_cfg.get('tta_exact_match_min', 0.01)
+            patience = gate_cfg.get('patience', 2)
+            vote_tie_max = gate_cfg.get('vote_tie_max', 0.30)
+            
+            if phase_gate_state['phase_b_start_epoch'] is None:
+                # Not yet in Phase B
+                return False, {'not_in_phase_b': True}
+            
+            epochs_in_phase = epoch_1based - phase_gate_state['phase_b_start_epoch']
+            
+            # Criterion 1: Minimum epochs
+            min_epochs_met = epochs_in_phase >= min_epochs
+            status['criteria'].append(f"min_epochs≥{min_epochs}")
+            if min_epochs_met:
+                status['met'].append(f"epochs={epochs_in_phase}✓")
+            else:
+                status['not_met'].append(f"epochs={epochs_in_phase}<{min_epochs}")
+                return False, status
+            
+            # Criterion 2: Shape mismatch rate (skip if threshold >= 1.0, i.e., disabled)
+            if shape_mismatch_max < 1.0:
+                if trm_metrics and 'shape_mismatch_count' in trm_metrics:
+                    total = trm_metrics.get('total_tasks', 1)
+                    shape_rate = trm_metrics['shape_mismatch_count'] / total if total > 0 else 1.0
+                    status['criteria'].append(f"shape_mismatch≤{shape_mismatch_max:.0%}")
+                    if shape_rate <= shape_mismatch_max:
+                        status['met'].append(f"shape={shape_rate:.0%}✓")
+                    else:
+                        status['not_met'].append(f"shape={shape_rate:.0%}>{shape_mismatch_max:.0%}")
+            # else: shape_mismatch check disabled (threshold=1.0)
+            
+            # Criterion 3: FG accuracy
+            if eval_metrics and 'fg_accuracy' in eval_metrics:
+                fg_acc = eval_metrics['fg_accuracy']
+                status['criteria'].append(f"fg_acc≥{fg_accuracy_min:.0%}")
+                if fg_acc >= fg_accuracy_min:
+                    status['met'].append(f"fg={fg_acc:.0%}✓")
+                else:
+                    status['not_met'].append(f"fg={fg_acc:.0%}<{fg_accuracy_min:.0%}")
+            
+            # Criterion 4: TTA exact match (skip if threshold == 0.0, i.e., disabled)
+            if tta_exact_min > 0:
+                if trm_metrics and 'exact_match' in trm_metrics:
+                    tta_exact = trm_metrics['exact_match']
+                    status['criteria'].append(f"tta_exact≥{tta_exact_min:.1%}")
+                    if tta_exact >= tta_exact_min:
+                        status['met'].append(f"tta={tta_exact:.1%}✓")
+                    else:
+                        status['not_met'].append(f"tta={tta_exact:.1%}<{tta_exact_min:.1%}")
+            # else: tta_exact_match check disabled (threshold=0.0)
+            
+            # Criterion 5: Vote tie rate
+            if trm_metrics and 'vote_tie_count' in trm_metrics:
+                total = trm_metrics.get('total_tasks', 1)
+                tie_rate = trm_metrics['vote_tie_count'] / total if total > 0 else 1.0
+                status['criteria'].append(f"vote_tie≤{vote_tie_max:.0%}")
+                if tie_rate <= vote_tie_max:
+                    status['met'].append(f"ties={tie_rate:.0%}✓")
+                else:
+                    status['not_met'].append(f"ties={tie_rate:.0%}>{vote_tie_max:.0%}")
+            
+            # Gate passes if all required criteria met
+            all_met = len(status['not_met']) == 0
+            if all_met:
+                phase_gate_state['b_to_c_consecutive_met'] += 1
+            else:
+                phase_gate_state['b_to_c_consecutive_met'] = 0
+            
+            ready = phase_gate_state['b_to_c_consecutive_met'] >= patience
+            status['consecutive'] = phase_gate_state['b_to_c_consecutive_met']
+            status['patience'] = patience
+            
+            return ready, status
+        
+        else:
+            # Phase C or beyond - no gate needed
+            return True, {'phase': current_phase, 'no_gate_needed': True}
+    
+    def get_effective_phase(epoch: int, eval_metrics: dict = None, trm_metrics: dict = None) -> tuple:
+        """
+        Get the effective phase considering both epoch and metric gates.
+        
+        Returns the phase the training should actually use, which may be behind
+        the epoch-based phase if metric gates haven't been passed.
+        
+        Args:
+            epoch: Current epoch (0-based)
+            eval_metrics: Latest eval metrics (or None if not yet evaluated)
+            trm_metrics: Latest TRM metrics (or None if not yet evaluated)
+            
+        Returns:
+            (phase_name, phase_config, gate_status)
+        """
+        # Get epoch-based phase
+        epoch_phase, epoch_phase_cfg = get_current_phase(epoch)
+        
+        if not use_metric_gating or not phased_training_enabled:
+            return epoch_phase, epoch_phase_cfg, {'gating': 'disabled'}
+        
+        epoch_1based = epoch + 1
+        current_effective = phase_gate_state['current_effective_phase']
+        
+        # If epoch-based phase is ahead of effective phase, check if we can advance
+        if epoch_phase == 'B' and current_effective == 'A':
+            # Check A→B gate
+            ready, status = check_phase_gate('A', epoch_1based, eval_metrics, trm_metrics)
+            phase_gate_state['last_gate_status'] = status
+            
+            if ready:
+                # Advance to Phase B
+                phase_gate_state['current_effective_phase'] = 'B'
+                phase_gate_state['phase_b_start_epoch'] = epoch_1based
+                phase_gate_state['epochs_in_current_phase'] = 0
+                phase_gate_state['a_to_b_consecutive_met'] = 0  # Reset counter
+                phase_gate_state['transition_log'].append((epoch_1based, 'A', 'B'))
+                return 'B', phased_training_config.get('phase_b', {}), status
+            else:
+                # Stay in Phase A
+                return 'A', phased_training_config.get('phase_a', {}), status
+                
+        elif epoch_phase == 'C' and current_effective == 'B':
+            # Check B→C gate
+            ready, status = check_phase_gate('B', epoch_1based, eval_metrics, trm_metrics)
+            phase_gate_state['last_gate_status'] = status
+            
+            if ready:
+                # Advance to Phase C
+                phase_gate_state['current_effective_phase'] = 'C'
+                phase_gate_state['epochs_in_current_phase'] = 0
+                phase_gate_state['b_to_c_consecutive_met'] = 0  # Reset counter
+                phase_gate_state['transition_log'].append((epoch_1based, 'B', 'C'))
+                return 'C', phased_training_config.get('phase_c', {}), status
+            else:
+                # Stay in Phase B
+                return 'B', phased_training_config.get('phase_b', {}), status
+                
+        elif epoch_phase == 'C' and current_effective == 'A':
+            # Need to pass through Phase B first
+            # Check A→B gate
+            ready, status = check_phase_gate('A', epoch_1based, eval_metrics, trm_metrics)
+            phase_gate_state['last_gate_status'] = status
+            
+            if ready:
+                phase_gate_state['current_effective_phase'] = 'B'
+                phase_gate_state['phase_b_start_epoch'] = epoch_1based
+                phase_gate_state['transition_log'].append((epoch_1based, 'A', 'B'))
+                # Now in Phase B, but don't auto-advance to C in same epoch
+                return 'B', phased_training_config.get('phase_b', {}), status
+            else:
+                return 'A', phased_training_config.get('phase_a', {}), status
+        
+        # Already at or past target phase
+        return current_effective, phased_training_config.get(f'phase_{current_effective.lower()}', {}), \
+               {'phase': current_effective, 'at_target': True}
+    
     # Store base augmentation config for restoration
     base_aug_config = config.get('data', {}).get('augmentation', {}).copy()
     
@@ -5512,13 +6003,53 @@ Config Overrides:
     # - Are we solving NEW puzzles or just repeating old ones?
     # - How many unique tasks out of total have ever been solved?
     # - Per-epoch: how many NEW tasks were solved vs previously solved?
+    #
+    # PATCH (Jan 2026): Added expected_task_count for stable denominator.
+    # The 'all_seen_task_ids' grows dynamically as batches are processed,
+    # but expected_task_count is computed once from the dataset.
     # =============================================================
+    
+    # Compute expected_task_count from dataset (stable denominator)
+    expected_task_count = None
+    dataset_unique_task_ids = None
+    if hasattr(train_loader, 'dataset'):
+        train_dataset = train_loader.dataset
+        if hasattr(train_dataset, 'tasks'):
+            dataset_unique_task_ids = set()
+            for t in train_dataset.tasks:
+                tid = t.get('task_id') if isinstance(t, dict) else getattr(t, 'task_id', None)
+                if tid is not None:
+                    dataset_unique_task_ids.add(tid)
+            expected_task_count = len(dataset_unique_task_ids)
+            print(f"\n{'='*60}")
+            print(f"TASK ID VALIDATION (Jan 2026 Patch)")
+            print(f"{'='*60}")
+            print(f"  Dataset tasks: {len(train_dataset.tasks)}")
+            print(f"  Unique task IDs: {expected_task_count}")
+            if expected_task_count < len(train_dataset.tasks) * 0.9:
+                print(f"  ⚠️ WARNING: Significant task_id collisions detected!")
+                print(f"     This may cause solve metrics to under-report.")
+                print(f"     Check merged training manifest for duplicate IDs.")
+            elif expected_task_count == len(train_dataset.tasks):
+                print(f"  ✓ All tasks have unique IDs.")
+            # Log sample of task IDs for debugging
+            sample_ids = list(dataset_unique_task_ids)[:5]
+            print(f"  Sample task IDs: {sample_ids}")
+            print(f"{'='*60}\n")
+        elif hasattr(train_dataset, '_cached_samples') and train_dataset._cached_samples:
+            # For cached samples, count unique task_ids
+            dataset_unique_task_ids = set(s.get('task_id') for s in train_dataset._cached_samples if s.get('task_id'))
+            expected_task_count = len(dataset_unique_task_ids)
+            print(f"  [Cached] Unique task IDs in cache: {expected_task_count}")
+    
     global_task_tracker = {
         'all_solved_task_ids': set(),       # Task IDs ever solved (across all epochs)
         'all_seen_task_ids': set(),         # All task IDs ever seen (should match dataset size)
         'per_epoch_new_solved': [],         # List of newly solved task counts per epoch
         'per_epoch_total_solved': [],       # List of total solved task counts per epoch
         'first_solve_epoch': {},            # Dict: task_id -> first epoch where it was solved
+        'expected_task_count': expected_task_count,  # Stable denominator from dataset
+        'dataset_unique_task_ids': dataset_unique_task_ids,  # Full set for validation
     }
     
     # ADAPTIVE BATCH SIZE TRACKING
@@ -5547,7 +6078,14 @@ Config Overrides:
         # PHASED TRAINING: Apply phase-specific config at epoch start
         # ================================================================
         # FIX (Jan 2026): Pass dataset to apply_phase_config for runtime augmentation update
-        current_phase_name, current_phase_cfg = get_current_phase(epoch)
+        # FIX (Jan 2026): Use effective phase from gate state when metric gating is enabled
+        if use_metric_gating and phased_training_enabled:
+            # Use the effective phase determined by the gate at previous epoch's eval
+            current_phase_name = phase_gate_state['current_effective_phase']
+            current_phase_cfg = phased_training_config.get(f'phase_{current_phase_name.lower()}', {})
+        else:
+            # Pure epoch-based phase selection
+            current_phase_name, current_phase_cfg = get_current_phase(epoch)
         phase_disable_flags = {}
         if phased_training_enabled and current_phase_cfg:
             # Get dataset from train_loader for runtime augmentation update
@@ -5557,9 +6095,23 @@ Config Overrides:
                 dataset=train_dataset  # Pass dataset for augmentation update
             )
             # Log phase transition
-            if epoch == start_epoch or (epoch > 0 and get_current_phase(epoch - 1)[0] != current_phase_name):
+            # Track previous phase for transition detection
+            if epoch == start_epoch:
+                prev_phase_name = None
+            elif use_metric_gating:
+                # With metric gating, check if we transitioned at the last eval
+                prev_phase_name = phase_gate_state.get('_prev_epoch_phase', current_phase_name)
+            else:
+                prev_phase_name = get_current_phase(epoch - 1)[0]
+            
+            # Store current phase for next epoch's comparison
+            phase_gate_state['_prev_epoch_phase'] = current_phase_name
+            
+            if epoch == start_epoch or (prev_phase_name is not None and prev_phase_name != current_phase_name):
                 print(f"\n{'='*60}")
                 print(f"  PHASE {current_phase_name} ACTIVE (epoch {epoch + 1})")
+                if use_metric_gating:
+                    print(f"  [Metric-gated: epochs_in_phase={phase_gate_state['epochs_in_current_phase']}]")
                 print(f"{'='*60}")
                 if phase_disable_flags.get('hyperlora'):
                     print(f"    HyperLoRA: DISABLED by phase")
@@ -6513,6 +7065,7 @@ Config Overrides:
         # GLOBAL TASK TRACKING SUMMARY (Jan 2026)
         # =============================================================
         # Report unique tasks solved across all epochs to track learning progress
+        # PATCH (Jan 2026): Use expected_task_count as stable denominator
         if global_task_tracker is not None:
             total_globally_solved = len(global_task_tracker['all_solved_task_ids'])
             total_ever_seen = len(global_task_tracker['all_seen_task_ids'])
@@ -6522,8 +7075,15 @@ Config Overrides:
             global_task_tracker['per_epoch_new_solved'].append(new_this_epoch)
             global_task_tracker['per_epoch_total_solved'].append(total_globally_solved)
             
-            solve_pct = (total_globally_solved / total_ever_seen * 100) if total_ever_seen > 0 else 0.0
-            print(f"  [Global Task Progress] Unique Solved: {total_globally_solved}/{total_ever_seen} ({solve_pct:.1f}%)")
+            # Use expected_task_count as stable denominator (Jan 2026 patch)
+            expected_total = global_task_tracker.get('expected_task_count', None)
+            if expected_total is not None and expected_total > 0:
+                solve_pct = (total_globally_solved / expected_total * 100)
+                print(f"  [Global Task Progress] Unique Solved: {total_globally_solved}/{expected_total} ({solve_pct:.1f}%)")
+            else:
+                # Fallback to dynamic count (backward compatible)
+                solve_pct = (total_globally_solved / total_ever_seen * 100) if total_ever_seen > 0 else 0.0
+                print(f"  [Global Task Progress] Unique Solved: {total_globally_solved}/{total_ever_seen} ({solve_pct:.1f}%)")
             print(f"    NEW puzzles solved this epoch: {new_this_epoch}")
             if len(global_task_tracker['per_epoch_new_solved']) > 1:
                 recent_new = global_task_tracker['per_epoch_new_solved'][-5:]  # Last 5 epochs
@@ -6568,25 +7128,29 @@ Config Overrides:
                 # Show tasks added this epoch (from exact matches)
                 diagnostics = train_losses.get('diagnostics', {})
                 tasks_added = diagnostics.get('hpm_tasks_added', 0)
-                skipped_no_support = diagnostics.get('hpm_add_skipped_no_support_features', 0)
+                write_attempts = diagnostics.get('hpm_write_attempts', 0)
+                writes_succeeded = diagnostics.get('hpm_writes_succeeded', 0)
+                skip_reasons = diagnostics.get('hpm_write_skip_reasons', {})
                 duplicates_skipped = diagnostics.get('hpm_duplicate_skipped', 0)
-                skipped_no_method = diagnostics.get('hpm_skipped_no_method', 0)
-                skipped_not_enabled = diagnostics.get('hpm_skipped_not_enabled', 0)
                 
-                # Always show HPM status for debugging (Jan 2026 fix)
-                print(f"  HPM Tasks Added (exact matches): {tasks_added}")
-                if duplicates_skipped > 0:
-                    print(f"    Duplicates skipped (same task, multiple matches): {duplicates_skipped}")
-                if skipped_no_support > 0:
-                    print(f"    ⚠️ Skipped (no support_features): {skipped_no_support}")
-                if skipped_no_method > 0:
-                    print(f"    ⚠️ Skipped (model lacks hpm_add_solved_task): {skipped_no_method}")
-                if skipped_not_enabled > 0:
-                    print(f"    ⚠️ Skipped (use_hpm=False AND hpm_memory_enabled=False): {skipped_not_enabled}")
-                if tasks_added == 0 and (skipped_no_support + skipped_no_method + skipped_not_enabled) == 0:
+                # Always show HPM status for debugging (Jan 2026 patch - improved diagnostics)
+                if write_attempts > 0:
+                    print(f"  HPM Write Attempts: {write_attempts} → Succeeded: {writes_succeeded}")
+                    # Show breakdown of skip reasons
+                    if skip_reasons.get('no_method', 0) > 0:
+                        print(f"    ⚠️ Skipped (model lacks hpm_add_solved_task): {skip_reasons['no_method']}")
+                    if skip_reasons.get('not_enabled', 0) > 0:
+                        print(f"    ⚠️ Skipped (use_hpm=False AND hpm_memory_enabled=False): {skip_reasons['not_enabled']}")
+                    if skip_reasons.get('global_duplicate', 0) > 0:
+                        print(f"    ℹ️ Skipped (already in buffer from prev epoch): {skip_reasons['global_duplicate']}")
+                    if skip_reasons.get('epoch_duplicate', 0) > 0:
+                        print(f"    ℹ️ Skipped (duplicate in same epoch): {skip_reasons['epoch_duplicate']}")
+                    if skip_reasons.get('no_support_features', 0) > 0:
+                        print(f"    ⚠️ Skipped (no support_features): {skip_reasons['no_support_features']}")
+                else:
                     # No exact matches occurred this epoch
                     exact_matches = diagnostics.get('exact_match_count', train_losses.get('exact_match', 0))
-                    print(f"    (No exact matches this epoch: {exact_matches})")
+                    print(f"  HPM Write Attempts: 0 (no exact matches this epoch: {exact_matches})")
                 
                 # Show HPM retrieval quality stats (P1 observability patch)
                 hpm_retrieval_count = diagnostics.get('hpm_retrieval_count', 0)
@@ -7820,6 +8384,29 @@ Config Overrides:
             
             eval_metrics = evaluate(eval_model, eval_loader, device, temperature=eval_temp)
             
+            # ============================================================
+            # CANONICAL TRAIN EVAL (Jan 2026 Patch)
+            # ============================================================
+            # Run deterministic eval on training data (no augmentation) for
+            # stable metrics that don't fluctuate with random augmentation.
+            # Useful for detecting true plateaus vs augmentation noise.
+            # ============================================================
+            canonical_train_cfg = config.get('evaluation', {}).get('canonical_train_eval', {})
+            if canonical_train_cfg.get('enabled', True):  # Enabled by default
+                canonical_max_tasks = canonical_train_cfg.get('max_tasks', 100)
+                canonical_metrics = evaluate_canonical_train(
+                    eval_model, train_loader, device, 
+                    temperature=eval_temp,
+                    max_tasks=canonical_max_tasks
+                )
+                if canonical_metrics.get('canonical_enabled', False):
+                    print(f"\\n  --- Canonical Train Eval (no augmentation, {canonical_metrics['canonical_total_tasks']} tasks) ---")
+                    print(f"  Canonical Task Accuracy: {canonical_metrics['canonical_correct_tasks']}/{canonical_metrics['canonical_total_tasks']} ({canonical_metrics['canonical_task_accuracy']*100:.1f}%)")
+                    print(f"  Canonical Pixel Accuracy: {canonical_metrics['canonical_pixel_accuracy']*100:.1f}%")
+                    # Store for comparison
+                    eval_metrics['canonical_task_accuracy'] = canonical_metrics['canonical_task_accuracy']
+                    eval_metrics['canonical_pixel_accuracy'] = canonical_metrics['canonical_pixel_accuracy']
+            
             # DIAGNOSTIC: Also eval training model to detect EMA lag
             if ema is not None:
                 train_model_metrics = evaluate(model, eval_loader, device, temperature=eval_temp)
@@ -7925,6 +8512,62 @@ Config Overrides:
                         print(f"  ⚠️ Moderate consensus: {consensus_ratio:.0%}")
                     else:
                         print(f"  ✅ Good consensus: {consensus_ratio:.0%}")
+                    
+                    # ============================================================
+                    # METRIC-BASED PHASE GATE CHECK (Jan 2026)
+                    # ============================================================
+                    # After TRM eval, check if phase gate criteria are met.
+                    # If ready, log phase transition for NEXT epoch.
+                    # The effective phase is updated via get_effective_phase().
+                    # ============================================================
+                    if use_metric_gating and phased_training_enabled:
+                        # Update stability counters based on this epoch's diagnostics
+                        if diagnostics:
+                            # Check for centroid collapse (tracked in training)
+                            centroid_spread = diagnostics.get('centroid_spread', 1.0)
+                            if centroid_spread < centroid_spread_critical:
+                                # Centroid collapsed - reset counter
+                                phase_gate_state['centroid_collapse_free_count'] = 0
+                            else:
+                                phase_gate_state['centroid_collapse_free_count'] += 1
+                        
+                        # Grad explosion counter reset at epoch start, track here
+                        grad_events_this_epoch = meta_escalation_state.get('grad_explosion_events_epoch', 0) if 'meta_escalation_state' in dir() else 0
+                        if grad_events_this_epoch > 0:
+                            phase_gate_state['grad_explosion_free_count'] = 0
+                        else:
+                            phase_gate_state['grad_explosion_free_count'] += 1
+                        
+                        # Increment epochs in current phase
+                        phase_gate_state['epochs_in_current_phase'] += 1
+                        
+                        # Check phase gate with current metrics
+                        epoch_1based = epoch + 1
+                        effective_phase, effective_cfg, gate_status = get_effective_phase(
+                            epoch, eval_metrics, trm_metrics
+                        )
+                        
+                        # Log gate status
+                        print(f"\n  --- Phase Gate Status (Epoch {epoch_1based}) ---")
+                        print(f"  Current Effective Phase: {phase_gate_state['current_effective_phase']}")
+                        
+                        if 'consecutive' in gate_status:
+                            status_parts = []
+                            for item in gate_status.get('met', []):
+                                status_parts.append(f"✓{item}")
+                            for item in gate_status.get('not_met', []):
+                                status_parts.append(f"✗{item}")
+                            print(f"  Gate Criteria: {' | '.join(status_parts)}")
+                            print(f"  Patience: {gate_status['consecutive']}/{gate_status['patience']} consecutive evals")
+                            
+                            if effective_phase != phase_gate_state['current_effective_phase']:
+                                # Phase transition happened!
+                                print(f"  🎯 PHASE TRANSITION: {phase_gate_state['current_effective_phase']} → {effective_phase}")
+                                # Update effective phase (already done in get_effective_phase)
+                        elif gate_status.get('at_target'):
+                            print(f"  Already at target phase {gate_status.get('phase', '?')}")
+                        elif gate_status.get('gating') == 'disabled':
+                            print(f"  Metric gating: disabled")
             
             # Core metrics (all computed over VALID pixels only, excluding padding)
             # 10-class encoding: class 0=black (BG), classes 1-9=colors (FG)

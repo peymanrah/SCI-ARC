@@ -18,6 +18,13 @@
 #
 # HARDWARE TARGET: RTX 3090 (24GB VRAM), 48 virtual CPUs, 128GB RAM
 #
+# VALIDATION CHECKLIST (Jan 2026 Patch):
+# ☐ Verify merged manifest exists: data/merged_training/merged_train_manifest.jsonl
+# ☐ At train start, check logs for "TASK ID VALIDATION" section
+# ☐ Expected: ~602 unique task IDs (AGI-1 400 + AGI-2 202)
+# ☐ If unique IDs << 602, check for task_id collisions in manifest
+# ☐ Canonical train eval should show stable metrics epoch-to-epoch
+#
 # ==========================
 
 model:
@@ -37,7 +44,12 @@ model:
   # =============================================================
   # BEST-STEP SELECTION (Dec 2025)
   # =============================================================
-  use_best_step_selection: false
+  # ENABLED (Jan 2026 Patch): Aligns inference with training by selecting
+  # the solver step with lowest entropy (most confident prediction).
+  # This improves exact match by allowing the model to "stop early" when
+  # it has the right answer rather than always using the last step.
+  # =============================================================
+  use_best_step_selection: true
   
   dsc_num_heads: 4
   lcr_num_heads: 4     # Not used
@@ -395,6 +407,47 @@ training:
       disable_equivariance: false
       disable_hpm: false
 
+    # =============================================================
+    # METRIC-BASED PHASE GATING (Jan 2026)
+    # =============================================================
+    # Optional: Require metric thresholds IN ADDITION to epoch boundaries.
+    # This prevents phase transitions before the model is ready.
+    #
+    # When use_metric_gating=true:
+    #   - At phase boundary epoch, checks if gate criteria are met
+    #   - If not met, stays in current phase until criteria pass
+    #   - Logs gate status at each evaluation
+    #
+    # Backward compatible: disabled by default
+    #
+    # IMPORTANT NOTE ON shape_mismatch (Jan 2026):
+    # The TRM eval set has 54/100 tasks where train output shape != test output shape.
+    # This is a DATASET PROPERTY (size-transform tasks), NOT a model failure.
+    # Setting shape_mismatch_max < 0.54 would block phase transitions forever.
+    # Set to 1.0 to disable this check and rely on model-dependent metrics.
+    # =============================================================
+    phase_readiness:
+      use_metric_gating: true  # Enable metric-based gating (false = epoch-only)
+      
+      # A→B Gate: Base solver must show learning before adding augmentation
+      gate_a_to_b:
+        min_epochs_in_phase_a: 10       # At least 10 epochs before checking gate
+        shape_mismatch_max: 1.0         # DISABLED: 54/100 eval tasks have shape mismatch (dataset property)
+        fg_accuracy_min: 0.35           # Eval FG accuracy ≥ 35% (lowered - early phase)
+        patience: 2                     # Consecutive evals meeting criteria
+        # Optional: Stability requirements
+        centroid_collapse_free_epochs: 0  # 0 = disabled; N = no collapse for N epochs
+        grad_explosion_free_epochs: 0     # 0 = disabled; N = no explosions for N epochs
+        
+      # B→C Gate: Solver + augmentation must show improvement before meta-learning
+      gate_b_to_c:
+        min_epochs_in_phase_b: 5        # At least 5 epochs in Phase B
+        shape_mismatch_max: 1.0         # DISABLED: Dataset property, not model metric
+        fg_accuracy_min: 0.45           # FG accuracy ≥ 45% (reasonable for Phase B exit)
+        tta_exact_match_min: 0.0        # DISABLED: Exact match is rare early; use fg_accuracy instead
+        patience: 2                     # Consecutive evals meeting criteria
+        vote_tie_max: 0.50              # Vote ties ≤ 50% (relaxed - consensus improves in Phase C)
+
   # =============================================================
   # META ESCALATION
   # =============================================================
@@ -550,6 +603,17 @@ evaluation:
   use_inverse_aug: true
   pass_ks: [1, 2, 3]
   max_eval_tasks: 100
+  
+  # =============================================================
+  # CANONICAL TRAIN EVAL (Jan 2026 Patch)
+  # =============================================================
+  # Provides a deterministic train accuracy by evaluating on canonical
+  # (non-augmented) samples. Useful for detecting true plateaus vs
+  # augmentation noise. Independent of random augmentation.
+  # =============================================================
+  canonical_train_eval:
+    enabled: true
+    max_tasks: 100  # Limit for speed
 
 # =============================================================
 # MONITORING
