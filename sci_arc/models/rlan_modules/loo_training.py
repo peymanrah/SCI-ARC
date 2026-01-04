@@ -962,7 +962,12 @@ class OutputEquivarianceLoss(nn.Module):
                     return_intermediates=False,
                 )
             
-            aug_logits = aug_outputs['logits']  # (B, C, H, W)
+            # FIX (Jan 2026): When return_intermediates=False, model returns
+            # logits tensor directly, not a dict. Handle both cases for robustness.
+            if isinstance(aug_outputs, dict):
+                aug_logits = aug_outputs['logits']  # (B, C, H, W)
+            else:
+                aug_logits = aug_outputs  # Model returned logits directly
             
             # Apply INVERSE augmentation to get back to original space
             inv_logits = self.apply_augmentation(aug_logits, aug_type, inverse=True)
@@ -1151,7 +1156,11 @@ class GroupMarginalizedNLLLoss(nn.Module):
             temperature=temperature,
             return_intermediates=False,
         )
-        original_logits = outputs['logits']  # (B, C, H, W)
+        # FIX (Jan 2026): Handle both dict and tensor returns
+        if isinstance(outputs, dict):
+            original_logits = outputs['logits']  # (B, C, H, W)
+        else:
+            original_logits = outputs  # Model returned logits directly
         original_probs = F.softmax(original_logits, dim=1)
         all_probs.append(original_probs)
         
@@ -1171,7 +1180,11 @@ class GroupMarginalizedNLLLoss(nn.Module):
                 temperature=temperature,
                 return_intermediates=False,
             )
-            aug_logits = aug_outputs['logits']
+            # FIX (Jan 2026): Handle both dict and tensor returns
+            if isinstance(aug_outputs, dict):
+                aug_logits = aug_outputs['logits']
+            else:
+                aug_logits = aug_outputs
             
             # Apply inverse augmentation to output
             inv_logits = self._aug_helper.apply_augmentation(aug_logits, aug_type, inverse=True)
