@@ -35,6 +35,16 @@ from .transform_families import (
     CONCEPT_ARC_MAP,
 )
 
+# Jan 2026: Rolling refresh cache for epoch-by-epoch augmentation diversity
+from .rolling_cache import (
+    RollingRefreshCache,
+    RollingCacheDataset,
+    AugmentationFingerprint,
+    EpochCoverageStats,
+    create_rolling_cache_from_config,
+    get_default_rolling_cache_config,
+)
+
 __all__ = [
     # Dataset
     'ARCDataset',
@@ -58,4 +68,11 @@ __all__ = [
     'infer_transform_from_grids',
     'get_rearc_transform_family',
     'CONCEPT_ARC_MAP',
+    # Rolling refresh cache (Jan 2026)
+    'RollingRefreshCache',
+    'RollingCacheDataset',
+    'AugmentationFingerprint',
+    'EpochCoverageStats',
+    'create_rolling_cache_from_config',
+    'get_default_rolling_cache_config',
 ]

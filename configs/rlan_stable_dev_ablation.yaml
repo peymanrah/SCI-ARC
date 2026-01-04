@@ -308,6 +308,25 @@ data:
   cache_samples: true            # was false - use RAM to cache decoded samples
   cache_load_percent: 100        # Load 100% of samples into RAM cache
 
+  # ===========================================================================
+  # ROLLING REFRESH CACHE (Jan 2026)
+  # ===========================================================================
+  # Two-tier cache for epoch-by-epoch augmentation diversity:
+  # - Tier A (decode cache): Stable decoded task representations
+  # - Tier B (augmented pool): Rolling refresh with new augmentations each epoch
+  #
+  # Key feature: CPU generates epoch e+1 while GPU trains epoch e (async prefetch)
+  # ===========================================================================
+  cache_samples_mode: static     # 'static' | 'rolling' (use rolling for diversity)
+  
+  rolling_cache:
+    pool_size: 128000            # Total samples in augmented pool
+    refresh_fraction: 0.25       # 25% refreshed each epoch
+    anti_repeat_window: 4        # Epochs before augmentation can repeat
+    prefetch_workers: 8          # CPU workers for async generation (48 vCPU / 6)
+    coverage_scheduling: true    # Balance dihedral/color/translation coverage
+    seed: 42                     # Base seed for reproducibility
+
   # NO global augmentation (phase controls it)
   augmentation:
     enabled: false

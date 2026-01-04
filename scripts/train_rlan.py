@@ -61,6 +61,10 @@ from sci_arc.models.rlan_modules import (
     ARPS, ARPSConfig, create_arps_from_config,
 )
 from sci_arc.data import ARCDataset, collate_sci_arc, BucketedBatchSampler
+# Jan 2026: Rolling cache for epoch-by-epoch augmentation diversity
+from sci_arc.data.rolling_cache import (
+    RollingRefreshCache, RollingCacheDataset, create_rolling_cache_from_config
+)
 # Jan 2026: Import constant for ignore_index consistency (single source of truth)
 PADDING_IGNORE_VALUE = ARCDataset.PADDING_IGNORE_VALUE  # -100, imported from dataset
 from sci_arc.evaluation.trm_style_evaluator import TRMStyleEvaluator
@@ -5047,6 +5051,61 @@ Config Overrides:
     print(f"Eval samples: {len(eval_dataset)}, batches: {len(eval_loader)}")
     
     # ================================================================
+    # ROLLING REFRESH CACHE (Jan 2026)
+    # ================================================================
+    # Two-tier cache for epoch-by-epoch augmentation diversity:
+    # - Tier A (decode cache): Stable decoded task representations
+    # - Tier B (augmented pool): Rolling refresh with new augmentations each epoch
+    # Key feature: CPU generates epoch e+1 while GPU trains epoch e (async prefetch)
+    # ================================================================
+    cache_samples_mode = data_cfg.get('cache_samples_mode', 'static')
+    rolling_cache = None
+    rolling_cache_dataset = None
+    
+    if cache_samples_mode == 'rolling' and data_cfg.get('cache_samples', False):
+        print(f"\n{'='*60}")
+        print("ROLLING REFRESH CACHE MODE ENABLED")
+        print(f"{'='*60}")
+        
+        # Get the dataset from train_loader
+        train_dataset = train_loader.dataset
+        
+        # Create rolling cache from config
+        rolling_cache = create_rolling_cache_from_config(
+            tasks=train_dataset.tasks,
+            generate_sample_fn=train_dataset._generate_sample,
+            config=config,
+            verbose=True,
+        )
+        
+        # Wrap in dataset for DataLoader compatibility
+        rolling_cache_dataset = RollingCacheDataset(rolling_cache)
+        
+        # Create new train_loader using rolling cache dataset
+        rolling_batch_size = initial_batch_override or train_cfg['batch_size']
+        train_loader = DataLoader(
+            rolling_cache_dataset,
+            batch_size=rolling_batch_size,
+            shuffle=True,  # Shuffle within epoch
+            num_workers=0,  # Cache is in main process memory
+            pin_memory=True,
+            collate_fn=collate_fn,
+            drop_last=True,  # Consistent batch sizes
+        )
+        
+        rc_config = data_cfg.get('rolling_cache', {})
+        print(f"  Pool Size: {rc_config.get('pool_size', 128000):,}")
+        print(f"  Refresh Fraction: {rc_config.get('refresh_fraction', 0.25)*100:.0f}%")
+        print(f"  Anti-Repeat Window: {rc_config.get('anti_repeat_window', 4)} epochs")
+        print(f"  Prefetch Workers: {rc_config.get('prefetch_workers', 4)}")
+        print(f"  Coverage Scheduling: {rc_config.get('coverage_scheduling', True)}")
+        print(f"  New train batches: {len(train_loader)}")
+        print(f"{'='*60}\n")
+    elif cache_samples_mode == 'rolling':
+        print(f"\n[WARNING] cache_samples_mode='rolling' but cache_samples=false")
+        print(f"  Rolling cache requires cache_samples=true. Using static mode.\n")
+
+    # ================================================================
     # MEMORY-AWARE BATCH SIZE VALIDATION
     # ================================================================
     # Use MemoryManager to validate batch size won't cause OOM
@@ -6357,6 +6416,26 @@ Config Overrides:
     
     for epoch in range(start_epoch, max_epochs):
         epoch_start = time.time()
+        
+        # ================================================================
+        # ROLLING CACHE: Swap to prefetched pool at epoch start
+        # ================================================================
+        # For epoch > 0, swap to the prefetched pool (generated during previous epoch)
+        # For epoch 0, the initial pool is already ready
+        # After swap, start prefetch for NEXT epoch so CPU works while GPU trains
+        if rolling_cache is not None:
+            if epoch > start_epoch:
+                swap_success = rolling_cache.swap_to_next_epoch()
+                if swap_success:
+                    coverage_stats = rolling_cache.get_coverage_stats(epoch)
+                    if coverage_stats:
+                        print(f"  [RollingCache] Epoch {epoch+1} coverage score: {coverage_stats.get_coverage_score():.3f}")
+                else:
+                    print(f"  [RollingCache] WARNING: Swap failed, using previous pool")
+            
+            # Start prefetch for next epoch (CPU works while GPU trains this epoch)
+            # This is non-blocking - generation happens in background threads
+            rolling_cache.prefetch_next_epoch(epoch + 1)
         
         # ================================================================
         # PHASED TRAINING: Apply phase-specific config at epoch start
@@ -9099,6 +9178,11 @@ Config Overrides:
     
     print("\n" + "=" * 60)
     print(f"Training complete! Best task accuracy: {best_task_accuracy:.4f}")
+    
+    # Cleanup rolling cache (shutdown prefetch executor)
+    if rolling_cache is not None:
+        rolling_cache.shutdown()
+        print("  [RollingCache] Shutdown complete")
     
     # Cleanup
     if tee_logger:

@@ -223,19 +223,19 @@ class DSLPrimitives:
         
         # VECTORIZED TRANSLATION using index arithmetic
         # Get all nonzero positions
-        src_rows = indices[:, 0]
-        src_cols = indices[:, 1]
+        src_rows = indices[:, 0].long()
+        src_cols = indices[:, 1].long()
         
         # Compute destination positions
-        dst_rows = src_rows + abs_offset_row
-        dst_cols = src_cols + abs_offset_col
+        dst_rows = (src_rows + abs_offset_row).long()
+        dst_cols = (src_cols + abs_offset_col).long()
         
         # Filter to valid bounds
         valid_mask = (dst_rows >= 0) & (dst_rows < H) & (dst_cols >= 0) & (dst_cols < W)
-        valid_dst_rows = dst_rows[valid_mask]
-        valid_dst_cols = dst_cols[valid_mask]
-        valid_src_rows = src_rows[valid_mask]
-        valid_src_cols = src_cols[valid_mask]
+        valid_dst_rows = dst_rows[valid_mask].clamp(0, H - 1)
+        valid_dst_cols = dst_cols[valid_mask].clamp(0, W - 1)
+        valid_src_rows = src_rows[valid_mask].clamp(0, H - 1)
+        valid_src_cols = src_cols[valid_mask].clamp(0, W - 1)
         
         # Create output and scatter
         translated_cpu = torch.zeros(H, W, dtype=selection_cpu.dtype)
@@ -274,19 +274,19 @@ class DSLPrimitives:
         if len(indices) == 0:
             return selection
         
-        src_rows = indices[:, 0]
-        src_cols = indices[:, 1]
+        src_rows = indices[:, 0].long()
+        src_cols = indices[:, 1].long()
         
         # Compute reflected positions
-        dst_rows = 2 * anchor_row - src_rows
+        dst_rows = (2 * anchor_row - src_rows).long()
         dst_cols = src_cols  # Column unchanged
         
         # Filter valid
         valid_mask = (dst_rows >= 0) & (dst_rows < H)
-        valid_dst_rows = dst_rows[valid_mask]
-        valid_dst_cols = dst_cols[valid_mask]
-        valid_src_rows = src_rows[valid_mask]
-        valid_src_cols = src_cols[valid_mask]
+        valid_dst_rows = dst_rows[valid_mask].clamp(0, H - 1)
+        valid_dst_cols = dst_cols[valid_mask].clamp(0, W - 1)
+        valid_src_rows = src_rows[valid_mask].clamp(0, H - 1)
+        valid_src_cols = src_cols[valid_mask].clamp(0, W - 1)
         
         result_cpu = torch.zeros(H, W, dtype=selection_cpu.dtype)
         if len(valid_dst_rows) > 0:
@@ -317,19 +317,19 @@ class DSLPrimitives:
         if len(indices) == 0:
             return selection
         
-        src_rows = indices[:, 0]
-        src_cols = indices[:, 1]
+        src_rows = indices[:, 0].long()
+        src_cols = indices[:, 1].long()
         
         # Compute reflected positions
         dst_rows = src_rows  # Row unchanged
-        dst_cols = 2 * anchor_col - src_cols
+        dst_cols = (2 * anchor_col - src_cols).long()
         
         # Filter valid
         valid_mask = (dst_cols >= 0) & (dst_cols < W)
-        valid_dst_rows = dst_rows[valid_mask]
-        valid_dst_cols = dst_cols[valid_mask]
-        valid_src_rows = src_rows[valid_mask]
-        valid_src_cols = src_cols[valid_mask]
+        valid_dst_rows = dst_rows[valid_mask].clamp(0, H - 1)
+        valid_dst_cols = dst_cols[valid_mask].clamp(0, W - 1)
+        valid_src_rows = src_rows[valid_mask].clamp(0, H - 1)
+        valid_src_cols = src_cols[valid_mask].clamp(0, W - 1)
         
         result_cpu = torch.zeros(H, W, dtype=selection_cpu.dtype)
         if len(valid_dst_rows) > 0:
@@ -361,8 +361,8 @@ class DSLPrimitives:
         if len(indices) == 0:
             return selection
         
-        src_rows = indices[:, 0]
-        src_cols = indices[:, 1]
+        src_rows = indices[:, 0].long()
+        src_cols = indices[:, 1].long()
         
         # Translate to anchor origin, rotate, translate back
         # Rotate 90° CW: (dr, dc) → (dc, -dr)
@@ -370,15 +370,15 @@ class DSLPrimitives:
         dc = src_cols - anchor_col
         new_dr = dc
         new_dc = -dr
-        dst_rows = anchor_row + new_dr
-        dst_cols = anchor_col + new_dc
+        dst_rows = (anchor_row + new_dr).long()
+        dst_cols = (anchor_col + new_dc).long()
         
         # Filter valid
         valid_mask = (dst_rows >= 0) & (dst_rows < H) & (dst_cols >= 0) & (dst_cols < W)
-        valid_dst_rows = dst_rows[valid_mask]
-        valid_dst_cols = dst_cols[valid_mask]
-        valid_src_rows = src_rows[valid_mask]
-        valid_src_cols = src_cols[valid_mask]
+        valid_dst_rows = dst_rows[valid_mask].clamp(0, H - 1)
+        valid_dst_cols = dst_cols[valid_mask].clamp(0, W - 1)
+        valid_src_rows = src_rows[valid_mask].clamp(0, H - 1)
+        valid_src_cols = src_cols[valid_mask].clamp(0, W - 1)
         
         result_cpu = torch.zeros(H, W, dtype=selection_cpu.dtype)
         if len(valid_dst_rows) > 0:
@@ -456,15 +456,15 @@ class DSLPrimitives:
         
         # Vectorized copy if indices match
         if len(src_indices) == len(dst_indices) and len(src_indices) > 0:
-            src_rows, src_cols = src_indices[:, 0], src_indices[:, 1]
-            dst_rows, dst_cols = dst_indices[:, 0], dst_indices[:, 1]
+            src_rows, src_cols = src_indices[:, 0].long(), src_indices[:, 1].long()
+            dst_rows, dst_cols = dst_indices[:, 0].long(), dst_indices[:, 1].long()
             
             # Filter valid destinations
             valid_mask = (dst_rows >= 0) & (dst_rows < H) & (dst_cols >= 0) & (dst_cols < W)
-            valid_src_rows = src_rows[valid_mask]
-            valid_src_cols = src_cols[valid_mask]
-            valid_dst_rows = dst_rows[valid_mask]
-            valid_dst_cols = dst_cols[valid_mask]
+            valid_src_rows = src_rows[valid_mask].clamp(0, H - 1)
+            valid_src_cols = src_cols[valid_mask].clamp(0, W - 1)
+            valid_dst_rows = dst_rows[valid_mask].clamp(0, H - 1)
+            valid_dst_cols = dst_cols[valid_mask].clamp(0, W - 1)
             
             # Vectorized assignment
             if len(valid_dst_rows) > 0:
@@ -961,34 +961,45 @@ class ARPS(nn.Module):
                         })
                         continue
                     
-                    # Verify on training demos with fail-fast
-                    is_valid, accuracy = ProgramVerifier.verify(
-                        program,
-                        train_inputs_cpu[b],
-                        train_outputs_cpu[b],
-                        demo_anchors,
-                        pair_mask_cpu[b] if pair_mask_cpu is not None else None,
-                        require_all_match=self.config.require_demo_exact_match,
-                    )
-                    
-                    # Only execute on test if verification passed (saves compute)
-                    if is_valid:
-                        predicted = ProgramExecutor.execute(
+                    try:
+                        # Verify on training demos with fail-fast
+                        is_valid, accuracy = ProgramVerifier.verify(
                             program,
-                            input_grid_cpu[b],
-                            primary_anchor,
+                            train_inputs_cpu[b],
+                            train_outputs_cpu[b],
+                            demo_anchors,
+                            pair_mask_cpu[b] if pair_mask_cpu is not None else None,
+                            require_all_match=self.config.require_demo_exact_match,
                         )
-                    else:
-                        # Skip test execution for invalid programs
-                        predicted = input_grid_cpu[b]
-                    
-                    batch_results.append({
-                        "program": program,
-                        "is_valid": is_valid,
-                        "accuracy": accuracy,
-                        "predicted": predicted,
-                        "length": len(program),
-                    })
+                        
+                        # Only execute on test if verification passed (saves compute)
+                        if is_valid:
+                            predicted = ProgramExecutor.execute(
+                                program,
+                                input_grid_cpu[b],
+                                primary_anchor,
+                            )
+                        else:
+                            # Skip test execution for invalid programs
+                            predicted = input_grid_cpu[b]
+                        
+                        batch_results.append({
+                            "program": program,
+                            "is_valid": is_valid,
+                            "accuracy": accuracy,
+                            "predicted": predicted,
+                            "length": len(program),
+                        })
+                    except Exception as e:
+                        # Gracefully handle any execution errors
+                        print(f"[ARPS WARNING] Program execution failed: {e}")
+                        batch_results.append({
+                            "program": program,
+                            "is_valid": False,
+                            "accuracy": 0.0,
+                            "predicted": input_grid_cpu[b],
+                            "length": len(program),
+                        })
                 
                 results.append(batch_results)
         
