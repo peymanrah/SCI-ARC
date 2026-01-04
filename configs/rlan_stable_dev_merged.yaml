@@ -129,8 +129,16 @@ training:
   use_torch_compile: false
   torch_compile_mode: 'reduce-overhead'
   
-  batch_size: 50    # Reduced for HyperLoRA activation headroom
-  grad_accumulation_steps: 7  # Effective batch_size = 50 × 7 = 350
+  # =============================================================
+  # BATCH SIZE (Jan 2026 MEMORY FIX)
+  # =============================================================
+  # Phase A peaks at ~18GB → batch_size=40 is safe (~20GB with headroom)
+  # Phase B adds solver_context → peaks ~25GB at batch=50 → need 38
+  # Phase C adds full meta → peaks ~30GB at batch=50 → need 32
+  # Per-phase batch_size in phased_training section overrides this.
+  # =============================================================
+  batch_size: 40    # Base batch size for Phase A (safe ~20GB peak)
+  grad_accumulation_steps: 9  # Effective batch_size = 40 × 9 = 360
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -323,6 +331,10 @@ training:
     # Goal: Verify base model can learn to solve ARC without help
     phase_a:
       end_epoch: 10
+      # Batch size for this phase (Jan 2026 MEMORY FIX)
+      # Phase A: No meta modules active → ~18GB peak at batch=50
+      # Safe: batch_size=40 → ~15GB peak with headroom
+      batch_size: 40
       # Override augmentation for this phase
       augmentation:
         rotation: false
@@ -343,6 +355,10 @@ training:
     phase_b:
       start_epoch: 11
       end_epoch: 20
+      # Batch size for this phase (Jan 2026 MEMORY FIX)
+      # Phase B: solver_context activates → ~25GB peak at batch=50
+      # Reduce to batch_size=32 → ~16GB peak with good headroom
+      batch_size: 32
       # Enable geometric augmentation
       augmentation:
         rotation: true
@@ -360,6 +376,11 @@ training:
     # Goal: Enable all components after base solver is competent
     phase_c:
       start_epoch: 21
+      # Batch size for this phase (Jan 2026 MEMORY FIX)
+      # Phase C: All meta modules → HyperLoRA + HPM + LOO → ~30GB peak at batch=50
+      # Reduce to batch_size=24 → ~15GB peak with excellent headroom
+      # Higher grad_accumulation compensates for effective batch size
+      batch_size: 24
       # Full augmentation
       augmentation:
         rotation: true

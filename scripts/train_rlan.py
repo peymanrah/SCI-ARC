@@ -4558,10 +4558,26 @@ Config Overrides:
     # Create initial train loader (with curriculum stage if enabled)
     # Note: If resuming, we might need to recreate this later with correct batch size
     # but we don't have loo_config parsed yet. The resume logic below handles the override.
+    # =============================================================
+    # PER-PHASE BATCH SIZE (Jan 2026 MEMORY FIX)
+    # =============================================================
+    # Check if phased training is enabled and get Phase A batch_size for initial loader
+    # This ensures we start with the correct batch size for the phase.
+    # On resume, this will be overridden if we're not in Phase A.
+    # =============================================================
+    phased_cfg = train_cfg.get('phased_training', {})
+    initial_batch_override = None
+    if phased_cfg.get('enabled', False):
+        phase_a_cfg = phased_cfg.get('phase_a', {})
+        initial_batch_override = phase_a_cfg.get('batch_size', None)
+        if initial_batch_override:
+            print(f"  [Phase A] Using initial batch_size={initial_batch_override} from phase config")
+    
     train_loader = create_train_loader(
         config,
         curriculum_stage=current_curriculum_stage,
         max_grid_size=max_grid_size,
+        batch_size_override=initial_batch_override,
     )
     
     # Eval dataset (no curriculum filtering - always full eval)
@@ -4762,6 +4778,48 @@ Config Overrides:
             batch_size_override=current_batch_size_override,
         )
     
+    # =============================================================
+    # PHASE-AWARE BATCH SIZE ON RESUME (Jan 2026 MEMORY FIX)
+    # =============================================================
+    # If resuming into Phase B or C, use that phase's batch_size.
+    # LOO override takes priority if active (LOO already reduces batch).
+    # =============================================================
+    if phased_cfg.get('enabled', False) and current_batch_size_override is None:
+        # Determine which phase we're resuming into
+        phase_a_end = phased_cfg.get('phase_a', {}).get('end_epoch', 10)
+        phase_b_start = phased_cfg.get('phase_b', {}).get('start_epoch', phase_a_end + 1)
+        phase_b_end = phased_cfg.get('phase_b', {}).get('end_epoch', 20)
+        phase_c_start = phased_cfg.get('phase_c', {}).get('start_epoch', phase_b_end + 1)
+        
+        epoch_1based = start_epoch + 1  # Convert 0-based to 1-based
+        
+        if epoch_1based <= phase_a_end:
+            resume_phase = 'A'
+            resume_phase_cfg = phased_cfg.get('phase_a', {})
+        elif epoch_1based >= phase_b_start and epoch_1based <= phase_b_end:
+            resume_phase = 'B'
+            resume_phase_cfg = phased_cfg.get('phase_b', {})
+        else:
+            resume_phase = 'C'
+            resume_phase_cfg = phased_cfg.get('phase_c', {})
+        
+        phase_batch_size = resume_phase_cfg.get('batch_size', None)
+        if phase_batch_size is not None:
+            current_batch_size_override = phase_batch_size
+            print(f"\n{'='*60}")
+            print(f"RESUMING INTO PHASE {resume_phase} (epoch {epoch_1based})")
+            print(f"{'='*60}")
+            print(f"  Phase batch_size: {phase_batch_size}")
+            print(f"{'='*60}\n")
+            
+            # Recreate loader with phase batch size
+            train_loader = create_train_loader(
+                config,
+                curriculum_stage=current_curriculum_stage,
+                max_grid_size=max_grid_size,
+                batch_size_override=current_batch_size_override,
+            )
+
     # Initialize EMA for stable evaluation
     # NOTE: Default is False to match rlan_stable.yaml (EMA disabled for short training)
     use_ema = config.get('training', {}).get('use_ema', False)
@@ -5528,12 +5586,29 @@ Config Overrides:
                 # =============================================================
                 data_cfg = config.get('data', {})
                 if data_cfg.get('num_workers', 0) > 0 and not data_cfg.get('cache_samples', False):
+                    # =============================================================
+                    # PER-PHASE BATCH SIZE (Jan 2026 MEMORY FIX)
+                    # =============================================================
+                    # Read batch_size from phase config to stay within VRAM limits.
+                    # Phase A: ~40 (no meta modules)
+                    # Phase B: ~32 (solver_context active)
+                    # Phase C: ~24 (full meta: HyperLoRA + HPM + LOO)
+                    # =============================================================
+                    phase_batch_size = current_phase_cfg.get('batch_size', None)
+                    if phase_batch_size is not None:
+                        # Phase-specific batch size takes priority
+                        effective_batch_override = phase_batch_size
+                        print(f"  [Phase Change] Using phase {current_phase_name} batch_size={phase_batch_size}")
+                    else:
+                        # Fall back to LOO override or base batch size
+                        effective_batch_override = current_batch_size_override
+                    
                     print(f"  [Phase Change] Recreating DataLoader to propagate augmentation config to workers...")
                     train_loader = create_train_loader(
                         config,
                         curriculum_stage=current_curriculum_stage if use_curriculum else 0,
                         max_grid_size=max_grid_size,
-                        batch_size_override=current_batch_size_override,
+                        batch_size_override=effective_batch_override,
                     )
                     # Re-apply augmentation config to the new dataset
                     train_dataset = train_loader.dataset if hasattr(train_loader, 'dataset') else None
@@ -5542,7 +5617,7 @@ Config Overrides:
                             current_phase_name, current_phase_cfg, epoch,
                             dataset=train_dataset
                         )
-                    print(f"  [Phase Change] DataLoader recreated with {len(train_loader)} batches")
+                    print(f"  [Phase Change] DataLoader recreated with {len(train_loader)} batches, batch_size={effective_batch_override or train_cfg['batch_size']}")
         
         # ================================================================
         # FIX #3: Enforce phase disable flags for module activation
