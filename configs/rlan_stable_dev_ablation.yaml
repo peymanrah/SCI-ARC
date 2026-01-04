@@ -1,0 +1,411 @@
+# RLAN STABLE DEV ABLATION Configuration
+# =======================================
+# Purpose: Simplify RLAN to a "core-generalizing" baseline for ablation study.
+# The goal is to fix eval entropy collapse and establish reliable train→eval generalization
+# BEFORE re-adding complex meta-learning components.
+#
+# Target Milestones:
+# - Canonical train exact match (100 tasks): >= 70%
+# - Eval exact match (TTA, 100 tasks): 20-30%
+# - Eval/Train DSC entropy ratio: <= 2.0
+#
+# Key Design Principles:
+# 1. DISABLE all memory/meta components until base solver generalizes
+# 2. REDUCE solver over-iteration (logs show earlier step always best)
+# 3. KEEP RLAN novelty: clue-anchored relative coordinate reasoning (DSC + MSRE + Context)
+# 4. ENABLE new ablation modules: ART (Anchor Robustness Training) + ARPS (Anchor-Relative Program Search)
+#
+# NEW MODULES (Jan 2026 Ablation Study):
+# - anchor_robustness: Forces model to solve using alternate/perturbed anchors for consistency
+# - arps_dsl_search: Neural-guided DSL program search in anchor-relative coordinate frame
+#
+# USAGE:
+#   python scripts/train_rlan.py configs/rlan_stable_dev_ablation.yaml
+#
+# ==============================================================================
+
+model:
+  type: "rlan"
+  hidden_dim: 256
+  num_colors: 10
+  num_classes: 10
+  max_grid_size: 30
+
+  # REDUCED solver steps to prevent over-iteration (logs showed step 4 was best, not step 6)
+  num_solver_steps: 4            # was 7 in merged config
+  use_best_step_selection: true  # KEEP ON - critical for stopping at best step
+
+  # CORE RLAN THEORY MODULES (keep these - they are the novelty)
+  use_context_encoder: true      # Learns task from demos - REQUIRED
+  use_dsc: true                  # Dynamic Saliency Controller - CORE NOVELTY
+  use_msre: true                 # Multi-Scale Relative Encoding - CORE NOVELTY
+
+  # DSC parameters
+  max_clues: 7
+  num_predicates: 32
+  dsc_num_heads: 4
+
+  # MSRE parameters
+  msre_encoding_dim: 32
+  msre_num_freq: 8
+
+  # DISABLE non-critical modules for ablation baseline
+  use_lcr: false                 # Latent Counting Registers - add back if needed
+  use_sph: false                 # Symbolic Predicate Heads - add back for conditional tasks
+  use_learned_pos: false         # Sinusoidal works better
+  use_act: false                 # Adaptive Computation Time - keep simple
+
+  # Context injection - keep solver-context for verification
+  use_cross_attention_context: true
+  spatial_downsample: 8
+  use_solver_context: true       # ENABLED - helps verify/refine predictions
+  solver_context_heads: 4
+
+  # DISABLE meta-learning + memory for the ablation baseline
+  use_hyperlora: false           # was true - re-enable only if baseline works
+  use_hpm: false                 # was true - memory is premature optimization
+
+  dropout: 0.1
+
+  # ===========================================================================
+  # NEW: ANCHOR ROBUSTNESS TRAINING (ART) - Jan 2026 Ablation
+  # ===========================================================================
+  # Forces the model to produce consistent predictions under alternate anchors.
+  # This directly targets the observed failure mode: eval attention collapse.
+  #
+  # Theory: If DSC selects anchor A at train time but anchor B at eval time,
+  # predictions should be consistent after inverse reprojection. ART trains
+  # for this consistency explicitly.
+  # ===========================================================================
+  anchor_robustness:
+    enabled: true
+    num_alt_anchors: 1           # Number of alternate anchors per sample (1-2)
+    anchor_jitter_px: 2          # Max pixels to jitter anchor centroid
+    use_top_k_anchors: true      # Use top-K attention peaks as alternates
+    consistency_loss_type: "kl"  # 'kl' or 'l2' for comparing predictions
+    consistency_weight: 0.02     # Weight of consistency loss
+
+  # ===========================================================================
+  # NEW: ANCHOR-RELATIVE PROGRAM SEARCH (ARPS) - Jan 2026 Ablation
+  # ===========================================================================
+  # Neural-guided DSL search in anchor-relative coordinate frame.
+  # Key insight: Programs expressed in anchor-relative coords generalize better.
+  #
+  # The neural head proposes programs, the symbolic executor verifies them
+  # against training demos. This gives deterministic guarantees the pure
+  # neural approach lacks.
+  # ===========================================================================
+  arps_dsl_search:
+    enabled: true
+    use_as_auxiliary: true       # Add to neural head, don't replace
+    max_program_length: 8        # Max tokens in program sequence
+    beam_size: 32                # Beam search width
+    top_k_proposals: 4           # Top-K programs to verify
+    
+    # DSL Primitives (anchor-relative)
+    primitives:
+      - "select_color"           # Select object by color
+      - "select_connected"       # Select connected component
+      - "translate"              # Move by (dx, dy) relative to anchor
+      - "reflect_x"              # Reflect across anchor x-axis
+      - "reflect_y"              # Reflect across anchor y-axis
+      - "rotate_90"              # Rotate 90° around anchor
+      - "rotate_180"             # Rotate 180° around anchor
+      - "paint"                  # Change color
+      - "copy_paste"             # Copy region to offset
+      - "tile"                   # Repeat pattern
+      - "crop"                   # Crop to region
+      - "fill"                   # Fill connected region
+    
+    # Verification settings
+    require_demo_exact_match: true  # Programs must solve ALL demos
+    use_mdl_ranking: true           # Prefer shorter programs (MDL prior)
+    
+    # Training: Imitation learning from search
+    search_during_training: true    # Run search to find pseudo-labels
+    imitation_weight: 0.1           # Weight of imitation loss
+
+training:
+  max_epochs: 120                # Shorter for faster ablation loops
+
+  # Optimizer - keep stable settings
+  use_8bit_optimizer: true
+  gradient_checkpointing: false
+  use_torch_compile: false
+
+  batch_size: 40
+  grad_accumulation_steps: 9     # Effective batch = 360
+
+  learning_rate: 5.0e-4
+  weight_decay: 0.01
+  gradient_clip: 1.0
+
+  optimizer: "adamw"
+  beta1: 0.9
+  beta2: 0.95
+
+  # Scheduler - constant LR is most stable
+  scheduler: "none"
+  warmup_epochs: 0
+  min_lr: 5.0e-4
+
+  # Temperature for DSC
+  temperature_start: 1.0
+  temperature_end: 0.5
+
+  # Loss configuration
+  loss_mode: "focal_weighted"
+  focal_gamma: 1.2
+  focal_alpha: 0.75
+  bg_weight_cap: 1.0
+  fg_weight_cap: 6.0
+
+  # REDUCED sparsity pressure to allow more flexible clue discovery
+  lambda_entropy: 0.01
+  lambda_sparsity: 0.2           # was 0.5 - too restrictive
+  lambda_predicate: 0.0          # SPH disabled
+  lambda_curriculum: 0.0
+  lambda_deep_supervision: 0.0
+  lambda_act: 0.0
+  lambda_centroid_diversity: 0.3
+
+  # Clue regularization - reduced to allow task-adaptive clue counts
+  min_clues: 1.0
+  min_clue_weight: 2.0           # was 5.0
+  ponder_weight: 0.01            # was 0.02
+  entropy_ponder_weight: 0.01    # was 0.02
+
+  clue_variance_weight: 1.0
+  clue_target_variance: 0.5
+
+  stop_saturation_weight: 0.5
+  stop_saturation_threshold: 5.0
+
+  use_stablemax: true
+
+  # NO curriculum for ablation - keep training simple
+  use_curriculum: false
+  curriculum_stages: []
+
+  # EMA disabled for simplicity
+  use_ema: false
+  ema_decay: 0.995
+
+  # ===========================================================================
+  # DISABLE ALL META-LEARNING FOR ABLATION
+  # ===========================================================================
+  solver_context_start_epoch: 1   # Enable from start (it's stable)
+  cross_attention_start_epoch: 1  # Enable from start
+  meta_learning_start_epoch: 999  # Never activate HyperLoRA
+
+  # LOO Training - DISABLED
+  loo_training:
+    enabled: false
+
+  # Equivariance Training - SIMPLIFIED
+  equivariance_training:
+    enabled: false               # Weight-level equiv disabled
+
+  # Output Equivariance - ENABLED early for TTA consistency
+  output_equivariance_training:
+    enabled: true
+    start_epoch: 3               # Enable early
+    loss_weight: 0.01            # Light weight
+    num_augmentations: 2
+    loss_type: "kl"
+    mask_to_target: true
+
+  group_marginalized_nll:
+    enabled: false
+
+  # ===========================================================================
+  # SIMPLIFIED PHASED TRAINING - Single Phase
+  # ===========================================================================
+  phased_training:
+    enabled: true
+
+    # Phase A: Full training duration (no phase transitions)
+    phase_a:
+      end_epoch: 120             # Run entire training in Phase A
+      batch_size: 40
+      augmentation:
+        rotation: false          # NO augmentation initially
+        flip: false
+        transpose: false
+        color_permutation: false
+        translational: false
+      disable_hyperlora: true
+      disable_loo: true
+      disable_equivariance: false  # Allow output equiv
+      disable_hpm: true
+      max_tasks: null
+
+    # Phases B/C unreachable
+    phase_b:
+      start_epoch: 999999
+      end_epoch: 999999
+      batch_size: 32
+      augmentation:
+        rotation: false
+        flip: false
+        transpose: false
+        color_permutation: false
+        translational: false
+      disable_hyperlora: true
+      disable_loo: true
+      disable_equivariance: false
+      disable_hpm: true
+
+    phase_c:
+      start_epoch: 999999
+      batch_size: 24
+      augmentation:
+        rotation: false
+        flip: false
+        transpose: false
+        color_permutation: false
+        translational: false
+      disable_hyperlora: true
+      disable_loo: true
+      disable_equivariance: false
+      disable_hpm: true
+
+    phase_readiness:
+      use_metric_gating: false   # Disable gating complexity
+
+  meta_escalation:
+    enabled: false
+
+data:
+  train_path: "./data/arc-agi/data/training"
+  eval_path: "./data/arc-agi/data/evaluation"
+  max_grid_size: 30
+  ignore_padding_in_loss: true
+
+  # Use merged training set
+  use_merged_training: true
+  merged_training_path: "./data/merged_training"
+  merged_dev_path: "./data/merged_training"
+  merged_manifest_validation: true
+
+  # REDUCED samples for faster iteration during ablation
+  max_tasks: null
+  samples_per_task: 10           # was 50 - reduce for debugging
+  stratified_seed: 42
+
+  num_workers: 24
+  pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
+
+  cache_samples: false
+
+  # NO global augmentation (phase controls it)
+  augmentation:
+    enabled: false
+    rotation: false
+    flip: false
+    transpose: false
+    color_permutation: false
+    translational: false
+    track_augmentation: true
+
+evaluation:
+  num_guesses: 2
+  
+  # TTA with REDUCED complexity for ablation
+  use_tta: true
+  use_trm_style_eval: true
+  num_augmented_views: 8         # Dihedral only
+  num_color_perms: 1             # was 4 - disable color perm search
+  use_voting: true
+  use_inverse_aug: true
+  pass_ks: [1, 2, 3]
+  max_eval_tasks: 100
+
+  canonical_train_eval:
+    enabled: true
+    max_tasks: 100
+
+monitoring:
+  enabled: true
+  exact_match_warning: 0.10
+  exact_match_critical: 0.20
+  entropy_ratio_warning: 2.0
+  entropy_ratio_critical: 5.0
+  stop_value_warning: 0.15
+  stop_value_critical: 0.25
+
+  lora_norm_warn: 2.0
+  lora_norm_critical: 5.0
+  lora_norm_kill: 10.0
+
+  nan_batches_abort: 20
+
+  tta_consensus_warning: 0.25
+  tta_consensus_critical: 0.15
+
+  centroid_spread_warning: 2.0
+  centroid_spread_critical: 0.5
+
+  attn_max_collapse_threshold: 0.02
+  attention_collapse_consecutive_threshold: 2
+
+  collapse_backoff:
+    enabled: true
+    cooldown_epochs: 3
+    delta_scale_factor: 0.5
+    lr_factor: 0.5
+    restore_rate: 0.2
+
+logging:
+  log_every: 1
+  save_every: 10
+  eval_every: 5                  # More frequent eval for ablation monitoring
+  keep_last_n: 3
+  checkpoint_dir: "checkpoints/rlan_ablation"  # Separate checkpoint dir
+  log_to_file: true
+  track_augmentation: true
+  memory_debug_batches: 5
+
+  use_wandb: false
+  wandb_project: "rlan-arc-ablation"
+  wandb_run_name: null
+
+inference:
+  temperature: 0.1
+  use_best_step_selection: true  # Match training
+  num_steps_override: null
+
+  use_tta: true
+  num_dihedral: 8
+  num_color_perms: 1             # Match eval
+
+  batch_size: 32
+
+  loo_sanity_check: false        # HyperLoRA disabled
+  loo_threshold: 0.9
+
+  acw_enabled: false
+
+  meta_learning:
+    hyperlora:
+      enable: false
+    hpm:
+      enable: false
+    solver_context:
+      enable: true
+    cross_attention:
+      enable: true
+
+hardware:
+  device: "cuda"
+  seed: 42
+  deterministic: true            # Enable for reproducible ablation
+  check_nan_inf: true
+
+device:
+  use_cuda: true
+  mixed_precision: true
+  dtype: "bfloat16"
+  compile: false

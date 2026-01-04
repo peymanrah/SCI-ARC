@@ -61,6 +61,22 @@ from .hpm import (
 )
 from .dynamic_buffer import DynamicMemoryBuffer
 
+# Jan 2026 Ablation Study Modules
+from .anchor_robustness import (
+    AnchorRobustnessTraining,
+    ARTConfig,
+    create_art_from_config,
+)
+from .arps import (
+    ARPS,
+    ARPSConfig,
+    DSLPrimitives,
+    ProgramProposalHead,
+    ProgramExecutor,
+    ProgramVerifier,
+    create_arps_from_config,
+)
+
 __all__ = [
     # Core modules
     "DynamicSaliencyController",
@@ -111,5 +127,17 @@ __all__ = [
     "STATIC_BANK_TYPES",
     "DYNAMIC_BANK_TYPES",
     "DynamicMemoryBuffer",
+    # Jan 2026 Ablation Study: Anchor Robustness Training (ART)
+    "AnchorRobustnessTraining",
+    "ARTConfig",
+    "create_art_from_config",
+    # Jan 2026 Ablation Study: Anchor-Relative Program Search (ARPS)
+    "ARPS",
+    "ARPSConfig",
+    "DSLPrimitives",
+    "ProgramProposalHead",
+    "ProgramExecutor",
+    "ProgramVerifier",
+    "create_arps_from_config",
 ]
 

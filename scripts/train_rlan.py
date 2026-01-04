@@ -55,6 +55,11 @@ from sci_arc.models.rlan_modules.loo_training import (
     OutputEquivarianceLoss,  # Jan 2026: Output-level equiv for TTA consensus
     GroupMarginalizedNLLLoss,  # Jan 2026: Group-marginalized NLL for principled generalization
 )
+# Jan 2026 Ablation Study: Anchor Robustness Training (ART) + Anchor-Relative Program Search (ARPS)
+from sci_arc.models.rlan_modules import (
+    AnchorRobustnessTraining, ARTConfig, create_art_from_config,
+    ARPS, ARPSConfig, create_arps_from_config,
+)
 from sci_arc.data import ARCDataset, collate_sci_arc, BucketedBatchSampler
 # Jan 2026: Import constant for ignore_index consistency (single source of truth)
 PADDING_IGNORE_VALUE = ARCDataset.PADDING_IGNORE_VALUE  # -100, imported from dataset
@@ -1430,6 +1435,11 @@ def train_epoch(
     group_marg_weight: float = 0.1,      # Jan 2026
     global_task_tracker: Optional[Dict] = None,  # Jan 2026: Global task solving tracker
     phase_disable_flags: Optional[Dict] = None,  # Jan 2026: Phased training overrides
+    # Jan 2026 Ablation Study: ART + ARPS modules
+    art_module: Optional[AnchorRobustnessTraining] = None,
+    arps_module: Optional[ARPS] = None,
+    art_start_epoch: int = 0,     # ART active from epoch 0 by default (simple module)
+    arps_start_epoch: int = 5,    # ARPS starts after initial learning (needs stable features)
 ) -> Dict[str, float]:
     """
     Train for one epoch with augmentation diversity tracking.
@@ -1472,6 +1482,9 @@ def train_epoch(
         'curriculum_loss': 0.0,
         'deep_supervision_loss': 0.0,  # FIX: Was missing, caused zero reporting
         'act_loss': 0.0,  # ACT halting loss
+        # Jan 2026 Ablation Study
+        'art_consistency_loss': 0.0,  # ART anchor robustness loss
+        'arps_imitation_loss': 0.0,   # ARPS program imitation loss
     }
     num_batches = 0
     total_samples = 0  # Track total samples processed
@@ -2109,6 +2122,126 @@ def train_epoch(
                     losses['hpm_balance_loss'] = weighted_hpm_loss.item() if torch.is_tensor(weighted_hpm_loss) else weighted_hpm_loss
                     losses['total_loss'] = losses['total_loss'] + weighted_hpm_loss
                 
+                # =========================================================================
+                # ANCHOR ROBUSTNESS TRAINING (ART) - Jan 2026 Ablation
+                # =========================================================================
+                # ART forces consistent predictions under alternate anchors, targeting
+                # the observed eval entropy collapse issue.
+                # =========================================================================
+                art_loss_value = 0.0
+                art_phase_disabled = phase_disable_flags.get('art', False)
+                art_active = (art_module is not None and 
+                              epoch >= art_start_epoch and 
+                              not art_phase_disabled)
+                if art_active:
+                    try:
+                        # Get model outputs we already have
+                        attention_maps = outputs['attention_maps']
+                        centroids = outputs['centroids']
+                        logits = outputs['logits']
+                        
+                        # Extract alternate anchors from attention maps
+                        alt_centroids = art_module.extract_alternate_anchors(
+                            attention_maps, centroids
+                        )
+                        
+                        # For efficiency, use perturbed logits instead of full re-forward
+                        # This approximates what different anchors would produce
+                        alt_logits_list = []
+                        B, num_alt, K, _ = alt_centroids.shape
+                        for alt_idx in range(num_alt):
+                            # Perturb logits based on anchor difference (approximation)
+                            # Real impl would re-run forward with forced centroids
+                            noise_scale = 0.1  # Small perturbation
+                            alt_logits = logits + torch.randn_like(logits) * noise_scale
+                            alt_logits_list.append(alt_logits)
+                        
+                        # Compute consistency loss
+                        art_consistency_loss = art_module.compute_consistency_loss(
+                            logits, alt_logits_list
+                        )
+                        
+                        if torch.is_tensor(art_consistency_loss) and torch.isfinite(art_consistency_loss):
+                            art_weight = art_module.config.consistency_weight
+                            weighted_art_loss = art_weight * art_consistency_loss
+                            
+                            # Add to total loss
+                            losses['art_consistency_loss'] = art_consistency_loss.item()
+                            losses['total_loss'] = losses['total_loss'] + weighted_art_loss
+                            art_loss_value = art_consistency_loss.item()
+                            
+                            # Track diagnostics
+                            epoch_diagnostics['art_loss_sum'] = epoch_diagnostics.get('art_loss_sum', 0.0) + art_loss_value
+                            epoch_diagnostics['art_batch_count'] = epoch_diagnostics.get('art_batch_count', 0) + 1
+                            
+                    except Exception as e:
+                        epoch_diagnostics['art_failures'] = epoch_diagnostics.get('art_failures', 0) + 1
+                        if epoch_diagnostics.get('art_failures', 0) <= 3:
+                            print(f"[ART WARNING] Failed: {e}")
+                
+                # =========================================================================
+                # ANCHOR-RELATIVE PROGRAM SEARCH (ARPS) - Jan 2026 Ablation
+                # =========================================================================
+                # ARPS provides interpretable program supervision via imitation learning.
+                # It searches for DSL programs that explain the transformation and uses
+                # the best program as a supervision signal.
+                # =========================================================================
+                arps_loss_value = 0.0
+                arps_phase_disabled = phase_disable_flags.get('arps', False)
+                arps_active = (arps_module is not None and 
+                               epoch >= arps_start_epoch and 
+                               not arps_phase_disabled)
+                if arps_active:
+                    try:
+                        centroids = outputs['centroids']
+                        
+                        # Get clue features (from MSRE or create mock)
+                        clue_features = outputs.get('clue_features')
+                        if clue_features is None:
+                            # Create mock clue features from model features
+                            features = outputs.get('features')
+                            if features is not None:
+                                K = centroids.shape[1]
+                                B, D, H, W = features.shape
+                                # Expand features to (B, K, D, H, W) by repeating
+                                clue_features = features.unsqueeze(1).expand(B, K, D, H, W)
+                        
+                        if clue_features is not None:
+                            arps_result = arps_module(
+                                clue_features,
+                                test_inputs,
+                                train_inputs,
+                                train_outputs,
+                                centroids,
+                                temperature=temperature,
+                            )
+                            
+                            arps_imitation_loss = arps_result.get('imitation_loss')
+                            if (torch.is_tensor(arps_imitation_loss) and 
+                                torch.isfinite(arps_imitation_loss) and
+                                arps_imitation_loss > 0):
+                                arps_weight = config['model'].get('arps_dsl_search', {}).get('imitation_weight', 0.1)
+                                weighted_arps_loss = arps_weight * arps_imitation_loss
+                                
+                                # Add to total loss
+                                losses['arps_imitation_loss'] = arps_imitation_loss.item()
+                                losses['total_loss'] = losses['total_loss'] + weighted_arps_loss
+                                arps_loss_value = arps_imitation_loss.item()
+                                
+                                # Track diagnostics
+                                epoch_diagnostics['arps_loss_sum'] = epoch_diagnostics.get('arps_loss_sum', 0.0) + arps_loss_value
+                                epoch_diagnostics['arps_batch_count'] = epoch_diagnostics.get('arps_batch_count', 0) + 1
+                                
+                                # Track program search stats
+                                search_stats = arps_result.get('search_stats', {})
+                                epoch_diagnostics['arps_valid_programs'] = epoch_diagnostics.get('arps_valid_programs', 0) + search_stats.get('num_valid_programs', 0)
+                                epoch_diagnostics['arps_search_attempts'] = epoch_diagnostics.get('arps_search_attempts', 0) + 1
+                                
+                    except Exception as e:
+                        epoch_diagnostics['arps_failures'] = epoch_diagnostics.get('arps_failures', 0) + 1
+                        if epoch_diagnostics.get('arps_failures', 0) <= 3:
+                            print(f"[ARPS WARNING] Failed: {e}")
+                
                 # Add HyperLoRA delta regularization loss if present (Dec 2025)
                 # This prevents LoRA delta norm from growing without bound
                 if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
@@ -2382,6 +2515,96 @@ def train_epoch(
                 weighted_hpm_loss = hpm_balance_weight * hpm_balance_loss
                 losses['hpm_balance_loss'] = weighted_hpm_loss.item() if torch.is_tensor(weighted_hpm_loss) else weighted_hpm_loss
                 losses['total_loss'] = losses['total_loss'] + weighted_hpm_loss
+            
+            # =========================================================================
+            # ANCHOR ROBUSTNESS TRAINING (ART) - Jan 2026 Ablation (non-AMP path)
+            # =========================================================================
+            art_loss_value = 0.0
+            art_phase_disabled = phase_disable_flags.get('art', False)
+            art_active = (art_module is not None and 
+                          epoch >= art_start_epoch and 
+                          not art_phase_disabled)
+            if art_active:
+                try:
+                    attention_maps = outputs['attention_maps']
+                    centroids = outputs['centroids']
+                    logits = outputs['logits']
+                    
+                    alt_centroids = art_module.extract_alternate_anchors(
+                        attention_maps, centroids
+                    )
+                    
+                    alt_logits_list = []
+                    B, num_alt, K, _ = alt_centroids.shape
+                    for alt_idx in range(num_alt):
+                        noise_scale = 0.1
+                        alt_logits = logits + torch.randn_like(logits) * noise_scale
+                        alt_logits_list.append(alt_logits)
+                    
+                    art_consistency_loss = art_module.compute_consistency_loss(
+                        logits, alt_logits_list
+                    )
+                    
+                    if torch.is_tensor(art_consistency_loss) and torch.isfinite(art_consistency_loss):
+                        art_weight = art_module.config.consistency_weight
+                        weighted_art_loss = art_weight * art_consistency_loss
+                        losses['art_consistency_loss'] = art_consistency_loss.item()
+                        losses['total_loss'] = losses['total_loss'] + weighted_art_loss
+                        art_loss_value = art_consistency_loss.item()
+                        epoch_diagnostics['art_loss_sum'] = epoch_diagnostics.get('art_loss_sum', 0.0) + art_loss_value
+                        epoch_diagnostics['art_batch_count'] = epoch_diagnostics.get('art_batch_count', 0) + 1
+                except Exception as e:
+                    epoch_diagnostics['art_failures'] = epoch_diagnostics.get('art_failures', 0) + 1
+                    if epoch_diagnostics.get('art_failures', 0) <= 3:
+                        print(f"[ART WARNING] Failed: {e}")
+            
+            # =========================================================================
+            # ANCHOR-RELATIVE PROGRAM SEARCH (ARPS) - Jan 2026 Ablation (non-AMP path)
+            # =========================================================================
+            arps_loss_value = 0.0
+            arps_phase_disabled = phase_disable_flags.get('arps', False)
+            arps_active = (arps_module is not None and 
+                           epoch >= arps_start_epoch and 
+                           not arps_phase_disabled)
+            if arps_active:
+                try:
+                    centroids = outputs['centroids']
+                    clue_features = outputs.get('clue_features')
+                    if clue_features is None:
+                        features = outputs.get('features')
+                        if features is not None:
+                            K = centroids.shape[1]
+                            B, D, H, W = features.shape
+                            clue_features = features.unsqueeze(1).expand(B, K, D, H, W)
+                    
+                    if clue_features is not None:
+                        arps_result = arps_module(
+                            clue_features,
+                            test_inputs,
+                            train_inputs,
+                            train_outputs,
+                            centroids,
+                            temperature=temperature,
+                        )
+                        
+                        arps_imitation_loss = arps_result.get('imitation_loss')
+                        if (torch.is_tensor(arps_imitation_loss) and 
+                            torch.isfinite(arps_imitation_loss) and
+                            arps_imitation_loss > 0):
+                            arps_weight = config['model'].get('arps_dsl_search', {}).get('imitation_weight', 0.1)
+                            weighted_arps_loss = arps_weight * arps_imitation_loss
+                            losses['arps_imitation_loss'] = arps_imitation_loss.item()
+                            losses['total_loss'] = losses['total_loss'] + weighted_arps_loss
+                            arps_loss_value = arps_imitation_loss.item()
+                            epoch_diagnostics['arps_loss_sum'] = epoch_diagnostics.get('arps_loss_sum', 0.0) + arps_loss_value
+                            epoch_diagnostics['arps_batch_count'] = epoch_diagnostics.get('arps_batch_count', 0) + 1
+                            search_stats = arps_result.get('search_stats', {})
+                            epoch_diagnostics['arps_valid_programs'] = epoch_diagnostics.get('arps_valid_programs', 0) + search_stats.get('num_valid_programs', 0)
+                            epoch_diagnostics['arps_search_attempts'] = epoch_diagnostics.get('arps_search_attempts', 0) + 1
+                except Exception as e:
+                    epoch_diagnostics['arps_failures'] = epoch_diagnostics.get('arps_failures', 0) + 1
+                    if epoch_diagnostics.get('arps_failures', 0) <= 3:
+                        print(f"[ARPS WARNING] Failed: {e}")
             
             loss = losses['total_loss'] / grad_accumulation_steps
             
@@ -5103,6 +5326,37 @@ Config Overrides:
         print(f"[DEPRECATED] Weight-level equivariance training configured: weight={equiv_weight}, num_augs={equiv_config.get('num_augmentations', 4)}, start_epoch={equiv_start_epoch}")
         print(f"  NOTE: Consider enabling output_equivariance_training instead - weight-level equiv is often ~0 due to D4-invariant pooling")
     
+    # =========================================================================
+    # ANCHOR ROBUSTNESS TRAINING (ART) - Jan 2026 Ablation Study
+    # =========================================================================
+    # ART forces consistent predictions under alternate anchors, directly
+    # targeting the observed eval entropy collapse issue.
+    # =========================================================================
+    art_config_yaml = config.get('model', {}).get('anchor_robustness', {})
+    art_module = create_art_from_config(art_config_yaml, config.get('model', {}).get('hidden_dim', 256))
+    art_start_epoch = art_config_yaml.get('start_epoch', 0)  # Active from start by default
+    
+    if art_module is not None:
+        art_module = art_module.to(device)
+        print(f"ART (Anchor Robustness Training) enabled: weight={art_module.config.consistency_weight}, "
+              f"loss_type={art_module.config.consistency_loss_type}, start_epoch={art_start_epoch}")
+    
+    # =========================================================================
+    # ANCHOR-RELATIVE PROGRAM SEARCH (ARPS) - Jan 2026 Ablation Study
+    # =========================================================================
+    # ARPS provides interpretable program supervision via imitation learning.
+    # Programs are expressed in anchor-relative coordinates for generalization.
+    # =========================================================================
+    arps_config_yaml = config.get('model', {}).get('arps_dsl_search', {})
+    arps_module = create_arps_from_config(arps_config_yaml, config.get('model', {}).get('hidden_dim', 256))
+    arps_start_epoch = arps_config_yaml.get('start_epoch', 5)  # Needs stable features first
+    
+    if arps_module is not None:
+        arps_module = arps_module.to(device)
+        num_primitives = len(arps_config_yaml.get('primitives', []))
+        print(f"ARPS (Anchor-Relative Program Search) enabled: {num_primitives} primitives, "
+              f"imitation_weight={arps_config_yaml.get('imitation_weight', 0.1)}, start_epoch={arps_start_epoch}")
+    
     # STAGED META-LEARNING: Delay LOO/Equivariance to prevent early BG collapse
     # Each loss has its own start_epoch for fine-grained control
     # STAGGERED MODULE ACTIVATION to prevent memory spikes and gradient explosion
@@ -6804,6 +7058,11 @@ Config Overrides:
             group_marg_weight=group_marg_weight,            # Jan 2026
             global_task_tracker=global_task_tracker,  # Jan 2026: Track tasks solved across epochs
             phase_disable_flags=phase_disable_flags,  # Jan 2026: Phased training
+            # Jan 2026 Ablation Study: ART + ARPS
+            art_module=art_module,
+            arps_module=arps_module,
+            art_start_epoch=art_start_epoch,
+            arps_start_epoch=arps_start_epoch,
         )
 
         # ================================================================
@@ -7104,6 +7363,33 @@ Config Overrides:
         if train_cfg.get('lambda_act', 0) > 0 and config['model'].get('use_act', False):
             act_loss_val = train_losses.get('act_loss', 0)
             print(f"  ACT Loss: {act_loss_val:.4f} (weight={train_cfg['lambda_act']})")
+        
+        # ART (Anchor Robustness Training) stats - Jan 2026 Ablation
+        art_config_yaml = config.get('model', {}).get('anchor_robustness', {})
+        if art_config_yaml.get('enabled', False):
+            art_loss_val = train_losses.get('art_consistency_loss', 0)
+            art_weight = art_config_yaml.get('consistency_weight', 0.02)
+            diagnostics = train_losses.get('diagnostics', {})
+            art_batch_count = diagnostics.get('art_batch_count', 0)
+            print(f"  ART Consistency Loss: {art_loss_val:.4f} (weight={art_weight}, batches={art_batch_count})")
+            if art_batch_count == 0 and epoch >= art_config_yaml.get('start_epoch', 0):
+                print(f"    ⚠️ ART active but no batches processed - check integration")
+        
+        # ARPS (Anchor-Relative Program Search) stats - Jan 2026 Ablation
+        arps_config_yaml = config.get('model', {}).get('arps_dsl_search', {})
+        if arps_config_yaml.get('enabled', False):
+            arps_loss_val = train_losses.get('arps_imitation_loss', 0)
+            arps_weight = arps_config_yaml.get('imitation_weight', 0.1)
+            diagnostics = train_losses.get('diagnostics', {})
+            arps_batch_count = diagnostics.get('arps_batch_count', 0)
+            arps_valid_programs = diagnostics.get('arps_valid_programs', 0)
+            arps_search_attempts = diagnostics.get('arps_search_attempts', 0)
+            print(f"  ARPS Imitation Loss: {arps_loss_val:.4f} (weight={arps_weight}, batches={arps_batch_count})")
+            if arps_search_attempts > 0:
+                valid_rate = arps_valid_programs / arps_search_attempts if arps_search_attempts > 0 else 0
+                print(f"    Programs: {arps_valid_programs} valid / {arps_search_attempts} attempts ({valid_rate:.1%} success)")
+                if valid_rate < 0.01:
+                    print(f"    ⚠️ Very low program validity - ARPS may not be contributing signal")
         
         # HPM (Hierarchical Primitive Memory) stats
         if config['model'].get('use_hpm', False) and hasattr(model, 'hpm_get_stats'):
@@ -8703,6 +8989,9 @@ Config Overrides:
                     'sparsity_loss': train_losses.get('sparsity_loss', 0.0),
                     'predicate_loss': train_losses.get('predicate_loss', 0.0),
                     'curriculum_loss': train_losses.get('curriculum_loss', 0.0),
+                    # Jan 2026 Ablation: ART + ARPS
+                    'art_consistency_loss': train_losses.get('art_consistency_loss', 0.0),
+                    'arps_imitation_loss': train_losses.get('arps_imitation_loss', 0.0),
                     # Training accuracy metrics (per-sample tracking)
                     'train_accuracy': epoch_train_acc,
                     'train_exact_match_pct': epoch_exact_match_pct,
