@@ -293,12 +293,20 @@ data:
   samples_per_task: 10           # was 50 - reduce for debugging
   stratified_seed: 42
 
-  num_workers: 24
+  # ===========================================================================
+  # OPTIMIZED DATA LOADING FOR 48 vCPU + 128GB RAM
+  # ===========================================================================
+  # With 48 vCPU: use ~80% for data loading (leave headroom for training)
+  # With 128GB RAM: aggressive prefetching and caching is safe
+  # ===========================================================================
+  num_workers: 32                # was 24 - leverage more vCPUs
   pin_memory: true
-  prefetch_factor: 4
+  prefetch_factor: 8             # was 4 - 2x more prefetch with 128GB RAM
   persistent_workers: true
-
-  cache_samples: false
+  
+  # Enable sample caching with 128GB RAM
+  cache_samples: true            # was false - use RAM to cache decoded samples
+  cache_load_percent: 100        # Load 100% of samples into RAM cache
 
   # NO global augmentation (phase controls it)
   augmentation:
@@ -381,7 +389,7 @@ inference:
   num_dihedral: 8
   num_color_perms: 1             # Match eval
 
-  batch_size: 32
+  batch_size: 64                 # Increased: 128GB RAM handles larger inference batches
 
   loo_sanity_check: false        # HyperLoRA disabled
   loo_threshold: 0.9
@@ -403,6 +411,7 @@ hardware:
   seed: 42
   deterministic: true            # Enable for reproducible ablation
   check_nan_inf: true
+  num_threads: 16                # PyTorch CPU parallelism (48 vCPU / 3 = ~16)
 
 device:
   use_cuda: true

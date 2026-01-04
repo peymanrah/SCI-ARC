@@ -39,6 +39,7 @@ Usage:
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict, Any, Callable
 from enum import Enum
+from collections import deque
 import math
 
 import torch
@@ -129,6 +130,8 @@ class DSLPrimitives:
         """
         Select connected component at offset from anchor.
         
+        OPTIMIZED: Uses deque for O(1) BFS + numpy conversion to avoid GPU sync.
+        
         Args:
             grid: (H, W) input grid
             seed_offset: (row_offset, col_offset) relative to anchor
@@ -140,35 +143,39 @@ class DSLPrimitives:
         H, W = grid.shape
         device = grid.device
         
+        # Move to CPU for fast Python operations (avoids GPU sync per pixel)
+        grid_cpu = grid.detach().cpu()
+        anchor_cpu = anchor.detach().cpu()
+        
         # Compute seed position in absolute coords
-        seed_row = int(anchor[0].item()) + seed_offset[0]
-        seed_col = int(anchor[1].item()) + seed_offset[1]
+        seed_row = int(anchor_cpu[0].item()) + seed_offset[0]
+        seed_col = int(anchor_cpu[1].item()) + seed_offset[1]
         
         # Clamp to grid bounds
         seed_row = max(0, min(H - 1, seed_row))
         seed_col = max(0, min(W - 1, seed_col))
         
-        # Get seed color
-        seed_color = grid[seed_row, seed_col].item()
+        # Get seed color (CPU access - fast)
+        seed_color = grid_cpu[seed_row, seed_col].item()
         
-        # BFS to find connected component
-        mask = torch.zeros(H, W, device=device)
-        visited = torch.zeros(H, W, dtype=torch.bool, device=device)
+        # BFS with deque (O(1) popleft vs O(n) pop(0))
+        mask_cpu = torch.zeros(H, W, dtype=torch.float32)
+        visited = [[False] * W for _ in range(H)]  # Python list faster for small grids
         
-        queue = [(seed_row, seed_col)]
-        visited[seed_row, seed_col] = True
+        queue = deque([(seed_row, seed_col)])
+        visited[seed_row][seed_col] = True
         
         while queue:
-            r, c = queue.pop(0)
-            if grid[r, c].item() == seed_color:
-                mask[r, c] = 1.0
+            r, c = queue.popleft()  # O(1) instead of O(n)
+            if grid_cpu[r, c].item() == seed_color:
+                mask_cpu[r, c] = 1.0
                 for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                     nr, nc = r + dr, c + dc
-                    if 0 <= nr < H and 0 <= nc < W and not visited[nr, nc]:
-                        visited[nr, nc] = True
+                    if 0 <= nr < H and 0 <= nc < W and not visited[nr][nc]:
+                        visited[nr][nc] = True
                         queue.append((nr, nc))
         
-        return mask
+        return mask_cpu.to(device)
     
     @staticmethod
     def translate(
@@ -178,6 +185,8 @@ class DSLPrimitives:
     ) -> torch.Tensor:
         """
         Translate selection by offset (relative to anchor frame).
+        
+        OPTIMIZED: Vectorized using roll + masking instead of Python loops.
         
         The offset is in anchor-relative coordinates, so (0, 0) means
         "move to anchor position".
@@ -193,34 +202,47 @@ class DSLPrimitives:
         H, W = selection.shape
         device = selection.device
         
-        # Find selection centroid
-        indices = torch.nonzero(selection)
+        # Move to CPU for computation
+        selection_cpu = selection.detach().cpu()
+        anchor_cpu = anchor.detach().cpu()
+        
+        # Find selection centroid using vectorized ops
+        # Use > 0 threshold to match original semantics for float masks
+        indices = torch.nonzero(selection_cpu > 0)
         if len(indices) == 0:
             return selection
         
         centroid = indices.float().mean(dim=0)
         
         # Compute absolute offset: selection_centroid → (anchor + offset)
-        target_row = anchor[0] + offset[0]
-        target_col = anchor[1] + offset[1]
+        target_row = anchor_cpu[0].item() + offset[0]
+        target_col = anchor_cpu[1].item() + offset[1]
         
-        abs_offset_row = int(target_row - centroid[0])
-        abs_offset_col = int(target_col - centroid[1])
+        abs_offset_row = int(target_row - centroid[0].item())
+        abs_offset_col = int(target_col - centroid[1].item())
         
-        # Apply translation WITHOUT wrap-around (proper ARC semantics)
-        # Pixels that move outside the grid are clipped, not wrapped
-        translated = torch.zeros_like(selection)
+        # VECTORIZED TRANSLATION using index arithmetic
+        # Get all nonzero positions
+        src_rows = indices[:, 0]
+        src_cols = indices[:, 1]
         
-        for r in range(H):
-            for c in range(W):
-                if selection[r, c] > 0:
-                    new_r = r + abs_offset_row
-                    new_c = c + abs_offset_col
-                    # Only keep pixels that stay within bounds (no wrap-around)
-                    if 0 <= new_r < H and 0 <= new_c < W:
-                        translated[new_r, new_c] = selection[r, c]
+        # Compute destination positions
+        dst_rows = src_rows + abs_offset_row
+        dst_cols = src_cols + abs_offset_col
         
-        return translated
+        # Filter to valid bounds
+        valid_mask = (dst_rows >= 0) & (dst_rows < H) & (dst_cols >= 0) & (dst_cols < W)
+        valid_dst_rows = dst_rows[valid_mask]
+        valid_dst_cols = dst_cols[valid_mask]
+        valid_src_rows = src_rows[valid_mask]
+        valid_src_cols = src_cols[valid_mask]
+        
+        # Create output and scatter
+        translated_cpu = torch.zeros(H, W, dtype=selection_cpu.dtype)
+        if len(valid_dst_rows) > 0:
+            translated_cpu[valid_dst_rows, valid_dst_cols] = selection_cpu[valid_src_rows, valid_src_cols]
+        
+        return translated_cpu.to(device)
     
     @staticmethod
     def reflect_x(
@@ -230,6 +252,8 @@ class DSLPrimitives:
         """
         Reflect selection across horizontal axis through anchor.
         
+        OPTIMIZED: Vectorized index computation.
+        
         Args:
             selection: (H, W) binary selection mask
             anchor: (2,) anchor position
@@ -238,18 +262,37 @@ class DSLPrimitives:
             reflected: (H, W) reflected mask
         """
         H, W = selection.shape
-        anchor_row = int(anchor[0].item())
+        device = selection.device
         
-        result = torch.zeros_like(selection)
-        for r in range(H):
-            for c in range(W):
-                if selection[r, c] > 0:
-                    # Reflect row around anchor_row
-                    new_r = 2 * anchor_row - r
-                    if 0 <= new_r < H:
-                        result[new_r, c] = selection[r, c]
+        # Move to CPU
+        selection_cpu = selection.detach().cpu()
+        anchor_cpu = anchor.detach().cpu()
+        anchor_row = int(anchor_cpu[0].item())
         
-        return result
+        # Get nonzero indices (use > 0 threshold for float mask correctness)
+        indices = torch.nonzero(selection_cpu > 0)
+        if len(indices) == 0:
+            return selection
+        
+        src_rows = indices[:, 0]
+        src_cols = indices[:, 1]
+        
+        # Compute reflected positions
+        dst_rows = 2 * anchor_row - src_rows
+        dst_cols = src_cols  # Column unchanged
+        
+        # Filter valid
+        valid_mask = (dst_rows >= 0) & (dst_rows < H)
+        valid_dst_rows = dst_rows[valid_mask]
+        valid_dst_cols = dst_cols[valid_mask]
+        valid_src_rows = src_rows[valid_mask]
+        valid_src_cols = src_cols[valid_mask]
+        
+        result_cpu = torch.zeros(H, W, dtype=selection_cpu.dtype)
+        if len(valid_dst_rows) > 0:
+            result_cpu[valid_dst_rows, valid_dst_cols] = selection_cpu[valid_src_rows, valid_src_cols]
+        
+        return result_cpu.to(device)
     
     @staticmethod
     def reflect_y(
@@ -258,19 +301,41 @@ class DSLPrimitives:
     ) -> torch.Tensor:
         """
         Reflect selection across vertical axis through anchor.
+        
+        OPTIMIZED: Vectorized index computation.
         """
         H, W = selection.shape
-        anchor_col = int(anchor[1].item())
+        device = selection.device
         
-        result = torch.zeros_like(selection)
-        for r in range(H):
-            for c in range(W):
-                if selection[r, c] > 0:
-                    new_c = 2 * anchor_col - c
-                    if 0 <= new_c < W:
-                        result[r, new_c] = selection[r, c]
+        # Move to CPU
+        selection_cpu = selection.detach().cpu()
+        anchor_cpu = anchor.detach().cpu()
+        anchor_col = int(anchor_cpu[1].item())
         
-        return result
+        # Get nonzero indices (use > 0 threshold for float mask correctness)
+        indices = torch.nonzero(selection_cpu > 0)
+        if len(indices) == 0:
+            return selection
+        
+        src_rows = indices[:, 0]
+        src_cols = indices[:, 1]
+        
+        # Compute reflected positions
+        dst_rows = src_rows  # Row unchanged
+        dst_cols = 2 * anchor_col - src_cols
+        
+        # Filter valid
+        valid_mask = (dst_cols >= 0) & (dst_cols < W)
+        valid_dst_rows = dst_rows[valid_mask]
+        valid_dst_cols = dst_cols[valid_mask]
+        valid_src_rows = src_rows[valid_mask]
+        valid_src_cols = src_cols[valid_mask]
+        
+        result_cpu = torch.zeros(H, W, dtype=selection_cpu.dtype)
+        if len(valid_dst_rows) > 0:
+            result_cpu[valid_dst_rows, valid_dst_cols] = selection_cpu[valid_src_rows, valid_src_cols]
+        
+        return result_cpu.to(device)
     
     @staticmethod
     def rotate_90(
@@ -279,28 +344,47 @@ class DSLPrimitives:
     ) -> torch.Tensor:
         """
         Rotate selection 90° clockwise around anchor.
+        
+        OPTIMIZED: Vectorized rotation using index arithmetic.
         """
         H, W = selection.shape
-        anchor_row = int(anchor[0].item())
-        anchor_col = int(anchor[1].item())
+        device = selection.device
         
-        result = torch.zeros_like(selection)
-        for r in range(H):
-            for c in range(W):
-                if selection[r, c] > 0:
-                    # Translate to anchor origin
-                    dr = r - anchor_row
-                    dc = c - anchor_col
-                    # Rotate 90° CW: (dr, dc) → (dc, -dr)
-                    new_dr = dc
-                    new_dc = -dr
-                    # Translate back
-                    new_r = anchor_row + new_dr
-                    new_c = anchor_col + new_dc
-                    if 0 <= new_r < H and 0 <= new_c < W:
-                        result[int(new_r), int(new_c)] = selection[r, c]
+        # Move to CPU
+        selection_cpu = selection.detach().cpu()
+        anchor_cpu = anchor.detach().cpu()
+        anchor_row = int(anchor_cpu[0].item())
+        anchor_col = int(anchor_cpu[1].item())
         
-        return result
+        # Get nonzero indices (use > 0 threshold for float mask correctness)
+        indices = torch.nonzero(selection_cpu > 0)
+        if len(indices) == 0:
+            return selection
+        
+        src_rows = indices[:, 0]
+        src_cols = indices[:, 1]
+        
+        # Translate to anchor origin, rotate, translate back
+        # Rotate 90° CW: (dr, dc) → (dc, -dr)
+        dr = src_rows - anchor_row
+        dc = src_cols - anchor_col
+        new_dr = dc
+        new_dc = -dr
+        dst_rows = anchor_row + new_dr
+        dst_cols = anchor_col + new_dc
+        
+        # Filter valid
+        valid_mask = (dst_rows >= 0) & (dst_rows < H) & (dst_cols >= 0) & (dst_cols < W)
+        valid_dst_rows = dst_rows[valid_mask]
+        valid_dst_cols = dst_cols[valid_mask]
+        valid_src_rows = src_rows[valid_mask]
+        valid_src_cols = src_cols[valid_mask]
+        
+        result_cpu = torch.zeros(H, W, dtype=selection_cpu.dtype)
+        if len(valid_dst_rows) > 0:
+            result_cpu[valid_dst_rows, valid_dst_cols] = selection_cpu[valid_src_rows, valid_src_cols]
+        
+        return result_cpu.to(device)
     
     @staticmethod
     def rotate_180(
@@ -350,25 +434,43 @@ class DSLPrimitives:
         offset: Tuple[int, int],
         anchor: torch.Tensor,
     ) -> torch.Tensor:
-        """Copy selected region and paste at offset from anchor."""
+        """
+        Copy selected region and paste at offset from anchor.
+        
+        OPTIMIZED: Vectorized index operations on CPU.
+        """
         translated_mask = DSLPrimitives.translate(selection, offset, anchor)
         
-        # Get colors from selection
         H, W = grid.shape
-        result = grid.clone()
+        device = grid.device
+        
+        # Move to CPU for fast indexing
+        grid_cpu = grid.detach().cpu()
+        selection_cpu = selection.detach().cpu()
+        translated_cpu = translated_mask.detach().cpu()
+        result_cpu = grid_cpu.clone()
         
         # Find where to copy from (original selection) and to (translated)
-        src_indices = torch.nonzero(selection > 0.5)
-        dst_indices = torch.nonzero(translated_mask > 0.5)
+        src_indices = torch.nonzero(selection_cpu > 0.5)
+        dst_indices = torch.nonzero(translated_cpu > 0.5)
         
-        if len(src_indices) == len(dst_indices):
-            for i in range(len(src_indices)):
-                sr, sc = src_indices[i]
-                dr, dc = dst_indices[i]
-                if 0 <= dr < H and 0 <= dc < W:
-                    result[dr, dc] = grid[sr, sc]
+        # Vectorized copy if indices match
+        if len(src_indices) == len(dst_indices) and len(src_indices) > 0:
+            src_rows, src_cols = src_indices[:, 0], src_indices[:, 1]
+            dst_rows, dst_cols = dst_indices[:, 0], dst_indices[:, 1]
+            
+            # Filter valid destinations
+            valid_mask = (dst_rows >= 0) & (dst_rows < H) & (dst_cols >= 0) & (dst_cols < W)
+            valid_src_rows = src_rows[valid_mask]
+            valid_src_cols = src_cols[valid_mask]
+            valid_dst_rows = dst_rows[valid_mask]
+            valid_dst_cols = dst_cols[valid_mask]
+            
+            # Vectorized assignment
+            if len(valid_dst_rows) > 0:
+                result_cpu[valid_dst_rows, valid_dst_cols] = grid_cpu[valid_src_rows, valid_src_cols]
         
-        return result
+        return result_cpu.to(device)
 
 
 class ProgramProposalHead(nn.Module):
@@ -612,6 +714,8 @@ class ProgramVerifier:
     Verifies programs against training demonstrations.
     
     A program is valid if it produces exact match outputs for ALL training pairs.
+    
+    OPTIMIZED: Fail-fast on first mismatch + CPU execution.
     """
     
     @staticmethod
@@ -621,9 +725,13 @@ class ProgramVerifier:
         train_outputs: torch.Tensor,
         anchors: torch.Tensor,
         pair_mask: Optional[torch.Tensor] = None,
+        require_all_match: bool = True,
     ) -> Tuple[bool, float]:
         """
         Verify program against training demos.
+        
+        OPTIMIZED: Fail-fast when require_all_match=True (default).
+        Exits immediately on first mismatch to avoid wasted computation.
         
         Args:
             program: DSL program
@@ -631,6 +739,7 @@ class ProgramVerifier:
             train_outputs: (N, H, W) training output grids
             anchors: (N, 2) anchor positions for each pair
             pair_mask: (N,) valid pair mask
+            require_all_match: If True, return early on first failure
             
         Returns:
             is_valid: True if program solves all demos
@@ -638,23 +747,34 @@ class ProgramVerifier:
         """
         N = train_inputs.shape[0]
         
+        # Move to CPU once for all verification (avoid GPU sync per pair)
+        train_inputs_cpu = train_inputs.detach().cpu()
+        train_outputs_cpu = train_outputs.detach().cpu()
+        anchors_cpu = anchors.detach().cpu()
+        pair_mask_cpu = pair_mask.detach().cpu() if pair_mask is not None else None
+        
         num_valid = 0
         num_correct = 0
         
         for i in range(N):
-            if pair_mask is not None and not pair_mask[i]:
+            if pair_mask_cpu is not None and not pair_mask_cpu[i]:
                 continue
             
             num_valid += 1
             
+            # Execute on CPU tensors (fast, no GPU sync)
             predicted = ProgramExecutor.execute(
                 program,
-                train_inputs[i],
-                anchors[i],
+                train_inputs_cpu[i],
+                anchors_cpu[i],
             )
             
-            if torch.equal(predicted, train_outputs[i]):
+            # Compare on CPU
+            if torch.equal(predicted.cpu(), train_outputs_cpu[i]):
                 num_correct += 1
+            elif require_all_match:
+                # FAIL-FAST: No need to check remaining demos
+                return False, num_correct / num_valid
         
         is_valid = (num_correct == num_valid) and (num_valid > 0)
         accuracy = num_correct / max(num_valid, 1)
@@ -743,6 +863,8 @@ class ARPS(nn.Module):
         """
         Decode token tensors to executable program.
         
+        OPTIMIZED: Move tensors to CPU once to avoid GPU sync per .item() call.
+        
         Args:
             tokens: (L,) program token indices
             colors: (L,) color arguments
@@ -753,8 +875,13 @@ class ARPS(nn.Module):
         """
         program = []
         
-        for i in range(len(tokens)):
-            token_idx = tokens[i].item()
+        # Move to CPU once to avoid GPU sync per .item() call
+        tokens_cpu = tokens.detach().cpu()
+        colors_cpu = colors.detach().cpu()
+        offsets_cpu = offsets.detach().cpu()
+        
+        for i in range(len(tokens_cpu)):
+            token_idx = tokens_cpu[i].item()
             if token_idx >= len(self.idx_to_primitive):
                 continue
             
@@ -763,8 +890,8 @@ class ARPS(nn.Module):
                 break
             
             args = {
-                "color": int(colors[i].item()),
-                "offset": (int(offsets[i, 0].item()), int(offsets[i, 1].item())),
+                "color": int(colors_cpu[i].item()),
+                "offset": (int(offsets_cpu[i, 0].item()), int(offsets_cpu[i, 1].item())),
             }
             program.append((primitive_name, args))
         
@@ -782,6 +909,9 @@ class ARPS(nn.Module):
         """
         Execute proposals and verify against training demos.
         
+        OPTIMIZED: Runs under inference_mode to avoid autograd overhead.
+        All symbolic execution happens on CPU to avoid GPU sync.
+        
         Args:
             proposals: List of proposal dicts from propose_programs
             input_grid: (B, H, W) test inputs
@@ -796,46 +926,71 @@ class ARPS(nn.Module):
         B = input_grid.shape[0]
         results = []
         
-        for b in range(B):
-            batch_results = []
-            primary_anchor = centroids[b, 0]  # Use first anchor
-            
-            # Create anchor tensor for each demo pair (use primary anchor for all)
-            N_demos = train_inputs[b].shape[0]
-            demo_anchors = primary_anchor.unsqueeze(0).expand(N_demos, 2)
-            
-            for proposal in proposals:
-                program = self.decode_program(
-                    proposal["program"][b],
-                    proposal["colors"][b],
-                    proposal["offsets"][b],
-                )
+        # Move all tensors to CPU ONCE at the start (avoids repeated transfers)
+        input_grid_cpu = input_grid.detach().cpu()
+        train_inputs_cpu = train_inputs.detach().cpu()
+        train_outputs_cpu = train_outputs.detach().cpu()
+        centroids_cpu = centroids.detach().cpu()
+        pair_mask_cpu = pair_mask.detach().cpu() if pair_mask is not None else None
+        
+        # Run symbolic execution without autograd (huge speedup)
+        with torch.inference_mode():
+            for b in range(B):
+                batch_results = []
+                primary_anchor = centroids_cpu[b, 0]  # Use first anchor
                 
-                # Verify on training demos (use same primary anchor for all demos)
-                is_valid, accuracy = ProgramVerifier.verify(
-                    program,
-                    train_inputs[b],
-                    train_outputs[b],
-                    demo_anchors,
-                    pair_mask[b] if pair_mask is not None else None,
-                )
+                # Create anchor tensor for each demo pair (use primary anchor for all)
+                N_demos = train_inputs_cpu[b].shape[0]
+                demo_anchors = primary_anchor.unsqueeze(0).expand(N_demos, 2)
                 
-                # Execute on test input
-                predicted = ProgramExecutor.execute(
-                    program,
-                    input_grid[b],
-                    primary_anchor,
-                )
+                for proposal in proposals:
+                    program = self.decode_program(
+                        proposal["program"][b],
+                        proposal["colors"][b],
+                        proposal["offsets"][b],
+                    )
+                    
+                    # Skip empty programs (fast path)
+                    if len(program) == 0:
+                        batch_results.append({
+                            "program": program,
+                            "is_valid": False,
+                            "accuracy": 0.0,
+                            "predicted": input_grid_cpu[b],
+                            "length": 0,
+                        })
+                        continue
+                    
+                    # Verify on training demos with fail-fast
+                    is_valid, accuracy = ProgramVerifier.verify(
+                        program,
+                        train_inputs_cpu[b],
+                        train_outputs_cpu[b],
+                        demo_anchors,
+                        pair_mask_cpu[b] if pair_mask_cpu is not None else None,
+                        require_all_match=self.config.require_demo_exact_match,
+                    )
+                    
+                    # Only execute on test if verification passed (saves compute)
+                    if is_valid:
+                        predicted = ProgramExecutor.execute(
+                            program,
+                            input_grid_cpu[b],
+                            primary_anchor,
+                        )
+                    else:
+                        # Skip test execution for invalid programs
+                        predicted = input_grid_cpu[b]
+                    
+                    batch_results.append({
+                        "program": program,
+                        "is_valid": is_valid,
+                        "accuracy": accuracy,
+                        "predicted": predicted,
+                        "length": len(program),
+                    })
                 
-                batch_results.append({
-                    "program": program,
-                    "is_valid": is_valid,
-                    "accuracy": accuracy,
-                    "predicted": predicted,
-                    "length": len(program),
-                })
-            
-            results.append(batch_results)
+                results.append(batch_results)
         
         return results
     
@@ -1016,11 +1171,15 @@ class ARPS(nn.Module):
         best_dicts = self.select_best_program(results)
         best_programs = [d["program"] if d is not None else None for d in best_dicts]
         
-        # 4. Get predictions from best programs
+        # 4. Get predictions from best programs (move back to original device)
         predicted_grids = []
         for b in range(B):
             if best_dicts[b] is not None:
-                predicted_grids.append(best_dicts[b]["predicted"])
+                pred = best_dicts[b]["predicted"]
+                # Ensure on correct device (predictions come from CPU execution)
+                if pred.device != device:
+                    pred = pred.to(device)
+                predicted_grids.append(pred)
             else:
                 # No valid program - return input unchanged
                 predicted_grids.append(input_grid[b])

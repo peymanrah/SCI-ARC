@@ -4693,6 +4693,12 @@ Config Overrides:
     set_seed(seed, deterministic)
     print(f"Seed: {seed}, Deterministic: {deterministic}")
     
+    # Set CPU thread count for PyTorch operations (ARPS symbolic execution, data loading)
+    num_threads = hw_cfg.get('num_threads', None)
+    if num_threads is not None:
+        torch.set_num_threads(num_threads)
+        print(f"CPU threads: {num_threads} (torch.set_num_threads)")
+    
     # Setup device
     if args.device:
         device = torch.device(args.device)

@@ -1057,6 +1057,9 @@ def main():
         args.num_color_perms = int(inference_cfg.get('num_color_perms', 4))
     if args.num_steps is None:
         args.num_steps = inference_cfg.get('num_steps_override', None)
+    # Batch size: CLI default is 16, but YAML inference.batch_size takes priority
+    if args.batch_size == 16 and 'batch_size' in inference_cfg:
+        args.batch_size = int(inference_cfg.get('batch_size', 16))
     
     # TTA: CLI takes priority, then YAML, then default False
     # --no-tta forces disable; --use-tta forces enable; otherwise use YAML
