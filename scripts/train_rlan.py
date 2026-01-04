@@ -3039,8 +3039,8 @@ def train_epoch(
                     )
                     logits = best_logits
                     # Track which step was selected for diagnostics
-                    epoch_diagnostics['best_step_histogram'][best_step] = \
-                        epoch_diagnostics['best_step_histogram'].get(best_step, 0) + 1
+                    if best_step < len(epoch_diagnostics['best_step_histogram']):
+                        epoch_diagnostics['best_step_histogram'][best_step] += 1
                     if best_step < len(all_logits) - 1:
                         epoch_diagnostics['earlier_step_was_best_count'] += 1
                     else:
