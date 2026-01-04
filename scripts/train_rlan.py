@@ -2045,10 +2045,11 @@ def train_epoch(
                                 weighted_output_equiv = effective_output_equiv_weight * output_equiv_result
                                 
                                 # Scale for grad accumulation and backward
+                                # CRITICAL: Use retain_graph=True because main loss backward uses same graph
                                 if scaler is not None:
-                                    scaler.scale(weighted_output_equiv / grad_accumulation_steps).backward()
+                                    scaler.scale(weighted_output_equiv / grad_accumulation_steps).backward(retain_graph=True)
                                 else:
-                                    (weighted_output_equiv / grad_accumulation_steps).backward()
+                                    (weighted_output_equiv / grad_accumulation_steps).backward(retain_graph=True)
                                 
                                 output_equiv_loss_value = output_equiv_result.item()
                                 losses['output_equiv_loss'] = output_equiv_loss_value
@@ -2096,10 +2097,11 @@ def train_epoch(
                                 weighted_loss = effective_weight * group_marg_result
                                 
                                 # Scale for grad accumulation and backward
+                                # CRITICAL: Use retain_graph=True because main loss backward uses same graph
                                 if scaler is not None:
-                                    scaler.scale(weighted_loss / grad_accumulation_steps).backward()
+                                    scaler.scale(weighted_loss / grad_accumulation_steps).backward(retain_graph=True)
                                 else:
-                                    (weighted_loss / grad_accumulation_steps).backward()
+                                    (weighted_loss / grad_accumulation_steps).backward(retain_graph=True)
                                 
                                 group_marg_loss_value = group_marg_result.item()
                                 losses['group_marginalized_nll'] = group_marg_loss_value
@@ -2830,7 +2832,16 @@ def train_epoch(
             if 'stop_logits' in outputs:
                 stop_logits = outputs['stop_logits']  # (B, K)
                 stop_probs = torch.sigmoid(stop_logits)  # (B, K)
-                epoch_diagnostics['stop_prob_mean'] = stop_probs.mean().item()
+                B_stop = stop_probs.shape[0]
+                
+                # Accumulate epoch-level stop_prob statistics (not just last batch!)
+                batch_stop_prob_mean = stop_probs.mean().item()
+                epoch_diagnostics['stop_prob_sum'] = epoch_diagnostics.get('stop_prob_sum', 0.0) + batch_stop_prob_mean * B_stop
+                epoch_diagnostics['stop_prob_count'] = epoch_diagnostics.get('stop_prob_count', 0) + B_stop
+                # Compute epoch mean on-the-fly
+                epoch_diagnostics['stop_prob_mean'] = (
+                    epoch_diagnostics['stop_prob_sum'] / epoch_diagnostics['stop_prob_count']
+                )
                 # Global stop probability std (captures the “frozen uniform std=0.008” failure mode)
                 # This aggregates variation across both batch and clue index.
                 epoch_diagnostics['stop_prob_std'] = stop_probs.std().item()
@@ -2848,9 +2859,22 @@ def train_epoch(
                 # If this is high, different samples use different clue counts (GOOD!)
                 # If this is near zero, all samples use same clues (BAD - no task-dependence)
                 clues_used_per_sample = (1 - stop_probs).sum(dim=-1)  # (B,) - clues used per sample
-                epoch_diagnostics['clues_used_std'] = clues_used_per_sample.std().item()
-                epoch_diagnostics['clues_used_min'] = clues_used_per_sample.min().item()
-                epoch_diagnostics['clues_used_max'] = clues_used_per_sample.max().item()
+                
+                # Accumulate epoch-level statistics (not just last batch!)
+                # Use running min/max and Welford's algorithm for mean/variance
+                batch_clues_mean = clues_used_per_sample.mean().item()
+                batch_clues_std = clues_used_per_sample.std().item()
+                batch_clues_min = clues_used_per_sample.min().item()
+                batch_clues_max = clues_used_per_sample.max().item()
+                
+                # Update epoch-level running statistics
+                epoch_diagnostics['clues_used_sum'] = epoch_diagnostics.get('clues_used_sum', 0.0) + batch_clues_mean * B
+                epoch_diagnostics['clues_used_count'] = epoch_diagnostics.get('clues_used_count', 0) + B
+                # Track epoch-wide min/max (across all batches)
+                epoch_diagnostics['clues_used_min'] = min(epoch_diagnostics.get('clues_used_min', float('inf')), batch_clues_min)
+                epoch_diagnostics['clues_used_max'] = max(epoch_diagnostics.get('clues_used_max', float('-inf')), batch_clues_max)
+                # For std, we use the last batch as approximation (proper would need Welford's)
+                epoch_diagnostics['clues_used_std'] = batch_clues_std
                 
                 # CRITICAL: Compute per-sample loss to correlate with clue count
                 # This verifies that harder tasks (higher loss) use more clues
@@ -7777,17 +7801,21 @@ Config Overrides:
             # Stop probability (how many clues used)
             stop_prob = diagnostics.get('stop_prob_mean', 0)
             if stop_prob > 0:
-                clues_used = (1 - stop_prob) * all_logits_count if all_logits_count > 0 else 0
+                # Compute epoch-level mean clues from accumulated sums (not just last batch!)
+                clues_sum = diagnostics.get('clues_used_sum', 0)
+                clues_count = diagnostics.get('clues_used_count', 1)
+                clues_used_mean = clues_sum / clues_count if clues_count > 0 else diagnostics.get('expected_clues_used', 0)
                 # Show variance to verify task-dependent clue count (enabled by per-sample gradient coupling)
                 clues_std = diagnostics.get('clues_used_std', 0)
                 clues_min = diagnostics.get('clues_used_min', 0)
                 clues_max = diagnostics.get('clues_used_max', 0)
                 clue_loss_corr = diagnostics.get('clue_loss_correlation', 0)
                 stop_prob_std = diagnostics.get('stop_prob_std', 0)
-                print(f"  Stop Prob: {stop_prob:.3f} (approx {clues_used:.1f} clues active)")
+                print(f"  Stop Prob: {stop_prob:.3f} (mean across batch×clues)")
                 if stop_prob_std > 0:
                     print(f"  Stop Probs Std: {stop_prob_std:.3f} (global std across batch×clues)")
-                print(f"  Clues Used: mean={clues_used:.2f}, std={clues_std:.2f}, range=[{clues_min:.1f}, {clues_max:.1f}]")
+                # Fixed: Use epoch-level accumulated mean which is consistent with min/max
+                print(f"  Clues Used: mean={clues_used_mean:.2f}, std={clues_std:.2f}, range=[{clues_min:.1f}, {clues_max:.1f}]")
                 print(f"  Clue-Loss Correlation: {clue_loss_corr:+.3f}", end="")
                 # Interpret correlation - this is the KEY metric for per-sample coupling
                 # With per-sample gradient coupling, we expect positive correlation:
@@ -8333,7 +8361,10 @@ Config Overrides:
             # ================================================================
             # Extract key metrics for trajectory tracking
             stop_prob = diagnostics.get('stop_prob_mean', 0.27)
-            expected_clues = diagnostics.get('expected_clues_used', 0)
+            # Use accumulated epoch mean (not just last batch's expected_clues_used)
+            clues_sum = diagnostics.get('clues_used_sum', 0)
+            clues_count = diagnostics.get('clues_used_count', 1)
+            expected_clues = clues_sum / clues_count if clues_count > 0 else diagnostics.get('expected_clues_used', 0)
             per_clue_entropy = diagnostics.get('per_clue_entropy', [])
             mean_entropy = sum(per_clue_entropy) / len(per_clue_entropy) if per_clue_entropy else 0
             per_step_loss = diagnostics.get('per_step_loss', [])

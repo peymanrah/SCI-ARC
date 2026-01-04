@@ -587,3 +587,115 @@ Epoch 4: █████████████████░░░ ~83% (proj
 4. **Health check: 5/8 passed** - improved from 4/6 last epoch
 5. **Monitor logit magnitudes** - if they exceed ±500, consider clamping
 
+
+---
+
+## Technical Metrics Reference
+
+This section provides exact formulas and calculation methods for all epoch metrics.
+Reference: `scripts/train_rlan.py` (January 2026)
+
+### Clue/DSC Metrics (Critical for Understanding)
+
+| Metric | Formula | Accumulation Method | Notes |
+|--------|---------|---------------------|-------|
+| **stop_prob_mean** | `mean(sigmoid(stop_logits))` | Epoch sum/count | Weighted by batch size. Range [0,1]. |
+| **clues_used (mean)** | `sum(1 - stop_probs)` per sample, then mean | Epoch sum/count | If K=7 clues and stop_prob=0.1, clues_used = 6.3 |
+| **clues_used (min/max)** | Min/max of batch-level min/max | Epoch-wide tracking | True extremes, not just last batch |
+| **clues_used (std)** | Std of per-sample clues_used | Last batch only | Approximation (proper would need Welford's) |
+| **expected_clues_used** | `(1 - stop_probs).sum(dim=-1).mean()` | From loss function | Same as clues_used mean, but computed in loss |
+| **clue_loss_correlation** | Pearson(clues_used, per_sample_loss) | Last batch only | Positive = harder tasks use more clues (GOOD) |
+
+**Clues Used Formula:**
+```python
+# stop_probs: (B, K) tensor from sigmoid(stop_logits)
+clues_used_per_sample = (1 - stop_probs).sum(dim=-1)  # Shape: (B,)
+# Each value in [0, K] represents expected clues used for that sample
+```
+
+**Epoch-Level Accumulation (Fixed January 2026):**
+```python
+# Per batch:
+epoch_diagnostics['clues_used_sum'] += batch_mean * B
+epoch_diagnostics['clues_used_count'] += B
+# Epoch mean:
+clues_used_mean = clues_used_sum / clues_used_count
+```
+
+### Per-Step Loss Metrics
+
+| Metric | Formula | Accumulation Method | Notes |
+|--------|---------|---------------------|-------|
+| **per_step_loss** | Cross-entropy at each solver step | Epoch sum per step | Divided by batch count for epoch average |
+| **step_improvement** | `(step0_loss - stepN_loss) / step0_loss * 100` | Computed from epoch avg | Positive = later steps better (GOOD) |
+| **best_step_histogram** | Count of batches where each step had lowest loss | Epoch accumulation | Shows which step is most often optimal |
+
+**Solver Health Check:**
+- `last_step_was_best_count`: Number of batches where final step had lowest loss
+- `earlier_step_was_best_count`: Number of batches where an earlier step was better
+- If `earlier_step_was_best_count` > 30%, solver may be over-iterating
+
+### Gradient Metrics
+
+| Metric | Formula | Accumulation Method | Notes |
+|--------|---------|---------------------|-------|
+| **grad_norm_before_clip** | L2 norm of all gradients | Last batch | Total gradient magnitude before clipping |
+| **dsc_grad_norm_sum** | Sum of DSC module grad norms | Epoch sum | Divide by batch count for average |
+| **solver_grad_norm_sum** | Sum of solver module grad norms | Epoch sum | Should be > 0 for learning |
+| **encoder_grad_norm_sum** | Sum of encoder grad norms | Epoch sum | Near-zero = encoder frozen |
+
+### Accuracy Metrics
+
+| Metric | Formula | Notes |
+|--------|---------|-------|
+| **Mean Accuracy** | `correct_pixels / total_valid_pixels` | Averaged across all samples |
+| **Exact Match** | Count of samples with 100% accuracy | Strict metric - all pixels must be correct |
+| **High Acc (>=90%)** | Count of samples with >=90% accuracy | Samples nearly correct |
+| **FG Accuracy** | Accuracy on foreground pixels (colors 1-9) | Harder than BG, more classes |
+| **BG Accuracy** | Accuracy on background pixels (color 0) | Usually high (dominant class) |
+
+### Meta-Learning Metrics
+
+| Metric | Formula | Notes |
+|--------|---------|-------|
+| **loo_loss** | Cross-entropy on holdout example | Leave-one-out generalization |
+| **loo_accuracy** | Accuracy on holdout after training on N-1 | Should increase over epochs |
+| **equiv_loss** | MSE between LoRA outputs for original vs augmented | Should decrease (augmentation invariance) |
+| **hyperlora_grad_norm** | L2 norm of HyperLoRA gradients | Near-zero = not learning |
+| **lora_delta_norm** | L2 norm of LoRA weight deltas | Should be non-zero if adapting |
+
+### Attention Metrics
+
+| Metric | Formula | Notes |
+|--------|---------|-------|
+| **attn_max_mean** | Mean of max attention values across batch | Higher = sharper focus |
+| **per_clue_entropy** | `-sum(p * log(p))` for attention distribution | Lower = more focused (max = 6.8 for 30x30 grid) |
+| **centroid_spread** | Mean pairwise distance of attention centroids | Higher = clues attend to different locations |
+
+### Numerical Stability Metrics
+
+| Metric | Healthy Range | Warning Threshold | Critical Threshold |
+|--------|--------------|-------------------|-------------------|
+| **logits_max** | [-50, 50] | +/-100 | +/-500 |
+| **logits_min** | [-50, 50] | +/-100 | +/-500 |
+| **stop_logits_mean** | [-3, 3] | +/-5 | +/-10 (saturated, no gradient) |
+| **grad_norm_before_clip** | [0.1, 10] | > clip_threshold | > 10x clip_threshold |
+
+### Interpretation Examples
+
+**Good Training Signs:**
+- `Stop Prob: 0.15` + `Clues Used: mean=5.9` -> Model uses ~6 of 7 clues
+- `Clue-Loss Correlation: +0.25` -> Harder tasks use more clues (per-sample coupling working)
+- `Per-Step Loss: [1.2, 0.8, 0.5, 0.3]` -> Later steps improve predictions (solver helping)
+- `Centroid Spread: 5.2` -> Clues attending to different grid regions
+
+**Warning Signs:**
+- `Stop Prob: 0.02` + `Clues Used: mean=6.9` -> Always using max clues (not selective)
+- `Clue-Loss Correlation: -0.15` -> Easier tasks using more clues (unexpected)
+- `Per-Step Loss: [0.5, 0.6, 0.7, 0.8]` -> Later steps worse (solver degradation)
+- `Centroid Spread: 0.5` -> All clues at same location (collapse)
+
+**Critical Issues:**
+- `stop_logits_mean: 8.5` -> Stop predictor saturated, cannot learn
+- `logits_max: 450` -> Near numerical explosion, may cause NaN
+- `dsc_grad_norm: 0.0001` -> DSC not receiving gradients
