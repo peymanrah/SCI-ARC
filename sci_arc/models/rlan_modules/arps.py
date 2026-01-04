@@ -800,6 +800,10 @@ class ARPS(nn.Module):
             batch_results = []
             primary_anchor = centroids[b, 0]  # Use first anchor
             
+            # Create anchor tensor for each demo pair (use primary anchor for all)
+            N_demos = train_inputs[b].shape[0]
+            demo_anchors = primary_anchor.unsqueeze(0).expand(N_demos, 2)
+            
             for proposal in proposals:
                 program = self.decode_program(
                     proposal["program"][b],
@@ -807,12 +811,12 @@ class ARPS(nn.Module):
                     proposal["offsets"][b],
                 )
                 
-                # Verify on training demos
+                # Verify on training demos (use same primary anchor for all demos)
                 is_valid, accuracy = ProgramVerifier.verify(
                     program,
                     train_inputs[b],
                     train_outputs[b],
-                    centroids[b, :train_inputs.shape[1]],
+                    demo_anchors,
                     pair_mask[b] if pair_mask is not None else None,
                 )
                 
