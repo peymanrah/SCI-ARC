@@ -5082,6 +5082,11 @@ Config Overrides:
         rolling_cache_dataset = RollingCacheDataset(rolling_cache)
         
         # Create new train_loader using rolling cache dataset
+        # NOTE: Using simple shuffle instead of BucketedBatchSampler because:
+        # 1. Cached samples are already padded to max_grid_size (30x30)
+        # 2. No memory savings from bucketing when all samples are same size
+        # 3. BucketedBatchSampler requires dataset to have get_grid_size() method
+        # If bucketing is needed, RollingCacheDataset would need to track grid sizes
         rolling_batch_size = initial_batch_override or train_cfg['batch_size']
         train_loader = DataLoader(
             rolling_cache_dataset,
@@ -5090,7 +5095,7 @@ Config Overrides:
             num_workers=0,  # Cache is in main process memory
             pin_memory=True,
             collate_fn=collate_fn,
-            drop_last=True,  # Consistent batch sizes
+            drop_last=False,  # Don't drop any samples (Jan 2026 fix)
         )
         
         rc_config = data_cfg.get('rolling_cache', {})
@@ -5100,6 +5105,7 @@ Config Overrides:
         print(f"  Prefetch Workers: {rc_config.get('prefetch_workers', 4)}")
         print(f"  Coverage Scheduling: {rc_config.get('coverage_scheduling', True)}")
         print(f"  New train batches: {len(train_loader)}")
+        print(f"  Note: Bucketed batching disabled (samples pre-padded to {max_grid_size}x{max_grid_size})")
         print(f"{'='*60}\n")
     elif cache_samples_mode == 'rolling':
         print(f"\n[WARNING] cache_samples_mode='rolling' but cache_samples=false")

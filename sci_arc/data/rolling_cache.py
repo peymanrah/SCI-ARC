@@ -17,7 +17,7 @@ Design Principles:
 Thread Safety:
 - Uses threading.Lock for producer/consumer handoff
 - Double-buffering pattern: current pool + next pool swap at epoch boundary
-- Watermark-based refresh triggering
+- Uses per-epoch RNG objects (not global seeds) to avoid thread interference
 
 Configuration (via YAML):
 ```yaml
@@ -62,6 +62,7 @@ for epoch in range(num_epochs):
 Author: SCI-ARC Team (Jan 2026)
 """
 
+import hashlib
 import random
 import threading
 import time
@@ -72,6 +73,15 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 
+def _stable_hash(data: bytes) -> int:
+    """Compute a stable hash that is reproducible across Python runs.
+    
+    Unlike Python's built-in hash(), this uses MD5 (truncated to 64 bits)
+    and is not affected by PYTHONHASHSEED randomization.
+    """
+    return int(hashlib.md5(data).hexdigest()[:16], 16)
+
+
 @dataclass
 class AugmentationFingerprint:
     """Compact fingerprint of an augmentation for anti-repeat tracking.
@@ -79,8 +89,11 @@ class AugmentationFingerprint:
     Stores the minimal information needed to identify a unique augmentation:
     - task_id: Which task this augmentation came from
     - dihedral_id: Which of the 8 dihedral transforms (0-7)
-    - color_perm_hash: Hash of the color permutation (or 0 if none)
+    - color_perm_hash: Stable hash of the color permutation (or 0 if none)
     - offset: Translation offset (r, c) tuple
+    
+    Uses stable hashing (MD5-based) instead of Python's hash() to ensure
+    reproducibility across runs and processes.
     """
     task_id: str
     dihedral_id: int
@@ -88,7 +101,9 @@ class AugmentationFingerprint:
     offset: Tuple[int, int]
     
     def __hash__(self):
-        return hash((self.task_id, self.dihedral_id, self.color_perm_hash, self.offset))
+        # Use stable hash for the tuple (reproducible across runs)
+        data = f"{self.task_id}:{self.dihedral_id}:{self.color_perm_hash}:{self.offset}".encode()
+        return _stable_hash(data)
     
     def __eq__(self, other):
         if not isinstance(other, AugmentationFingerprint):
@@ -254,14 +269,18 @@ class RollingRefreshCache:
         
         # Set epoch-sharded seed for reproducibility
         self._current_epoch = 0
+        
+        # Create per-epoch RNG objects (NOT global seeding - thread safe)
         epoch_seed = self._get_epoch_seed(0)
-        random.seed(epoch_seed)
-        np.random.seed(epoch_seed)
+        epoch_rng = random.Random(epoch_seed)
+        epoch_np_rng = np.random.default_rng(epoch_seed)
         
         # Generate samples with stratified task coverage
         self._current_pool = self._generate_stratified_samples(
             self.pool_size, 
-            epoch=0
+            epoch=0,
+            rng=epoch_rng,
+            np_rng=epoch_np_rng,
         )
         
         elapsed = time.time() - start_time
@@ -282,16 +301,33 @@ class RollingRefreshCache:
         num_samples: int, 
         epoch: int,
         exclude_fingerprints: Optional[Set[AugmentationFingerprint]] = None,
+        rng: Optional[random.Random] = None,
+        np_rng: Optional[np.random.Generator] = None,
     ) -> List[Dict[str, Any]]:
         """Generate samples with stratified task coverage.
         
         Ensures each task gets approximately equal representation in the pool.
         If `exclude_fingerprints` is provided, regenerates samples that would
         match excluded fingerprints (anti-repeat mechanism).
+        
+        Args:
+            num_samples: Number of samples to generate
+            epoch: Current epoch (for fingerprint tracking)
+            exclude_fingerprints: Set of fingerprints to avoid (anti-repeat)
+            rng: Per-epoch random.Random instance (thread-safe)
+            np_rng: Per-epoch numpy Generator instance (thread-safe)
         """
         num_tasks = len(self.tasks)
         if num_tasks == 0:
             return []
+        
+        # Use provided RNG or create a default one
+        if rng is None:
+            epoch_seed = self._get_epoch_seed(epoch)
+            rng = random.Random(epoch_seed)
+        if np_rng is None:
+            epoch_seed = self._get_epoch_seed(epoch)
+            np_rng = np.random.default_rng(epoch_seed)
         
         samples_per_task = num_samples // num_tasks
         extra_samples = num_samples % num_tasks
@@ -302,29 +338,49 @@ class RollingRefreshCache:
         # Build exclusion set from recent fingerprints
         exclude_set = exclude_fingerprints or set()
         
+        # Track how many anti-repeat retries we needed (for diagnostics)
+        total_retries = 0
+        accepted_despite_exclusion = 0
+        
         for task_idx in range(num_tasks):
             # Determine how many samples for this task
             task_samples = samples_per_task + (1 if task_idx < extra_samples else 0)
             
             for _ in range(task_samples):
                 # Generate with anti-repeat retry
-                max_retries = 5
+                # Increased max_retries and track statistics
+                max_retries = 10
+                sample = None
+                fingerprint = None
+                
                 for retry in range(max_retries):
                     sample = self.generate_sample_fn(task_idx)
                     fingerprint = self._extract_fingerprint(sample)
                     
-                    if fingerprint not in exclude_set or retry == max_retries - 1:
-                        # Accept this sample
-                        samples.append(sample)
-                        coverage_stats.update(sample)
-                        
-                        # Track this fingerprint
-                        self._fingerprint_history[fingerprint] = epoch
-                        self._recent_fingerprints.append((epoch, fingerprint))
+                    if fingerprint not in exclude_set:
+                        # Clean accept
                         break
+                    elif retry == max_retries - 1:
+                        # Exhausted retries - accept anyway but log it
+                        accepted_despite_exclusion += 1
+                    else:
+                        total_retries += 1
+                
+                # Accept this sample
+                samples.append(sample)
+                coverage_stats.update(sample)
+                
+                # Track this fingerprint
+                self._fingerprint_history[fingerprint] = epoch
+                self._recent_fingerprints.append((epoch, fingerprint))
         
-        # Shuffle to mix tasks
-        random.shuffle(samples)
+        # Log anti-repeat statistics if significant
+        if self.verbose and (total_retries > 100 or accepted_despite_exclusion > 0):
+            print(f"[RollingCache] Anti-repeat stats: {total_retries} retries, "
+                  f"{accepted_despite_exclusion} accepted despite exclusion")
+        
+        # Shuffle to mix tasks (using per-epoch RNG, not global)
+        rng.shuffle(samples)
         
         # Store coverage stats
         self._epoch_coverage_stats[epoch] = coverage_stats
@@ -332,19 +388,23 @@ class RollingRefreshCache:
         return samples
     
     def _extract_fingerprint(self, sample: Dict[str, Any]) -> AugmentationFingerprint:
-        """Extract augmentation fingerprint from a sample."""
+        """Extract augmentation fingerprint from a sample.
+        
+        Uses stable hashing (MD5-based) for color permutation to ensure
+        reproducibility across runs and processes.
+        """
         task_id = sample.get('task_id', 'unknown')
         aug_info = sample.get('aug_info', {})
         
         dihedral_id = aug_info.get('dihedral_id', 0)
         
-        # Hash color permutation
+        # Stable hash for color permutation (reproducible across runs)
         color_perm = aug_info.get('color_perm')
         if color_perm is not None:
             if hasattr(color_perm, 'tobytes'):
-                color_perm_hash = hash(color_perm.tobytes())
+                color_perm_hash = _stable_hash(color_perm.tobytes())
             else:
-                color_perm_hash = hash(tuple(color_perm))
+                color_perm_hash = _stable_hash(bytes(color_perm))
         else:
             color_perm_hash = 0
         
@@ -390,6 +450,9 @@ class RollingRefreshCache:
         2. Get excluded fingerprints from anti-repeat window
         3. Generate new samples (stratified across tasks)
         4. Merge with kept samples from current pool
+        
+        Uses per-epoch RNG objects to avoid polluting global random state
+        (critical for thread safety when called from prefetch worker).
         """
         num_to_refresh = int(self.pool_size * self.refresh_fraction)
         num_to_keep = self.pool_size - num_to_refresh
@@ -398,20 +461,21 @@ class RollingRefreshCache:
             print(f"[RollingCache] Epoch {epoch}: Refreshing {num_to_refresh:,} samples "
                   f"(keeping {num_to_keep:,})")
         
-        # Set epoch seed
+        # Create per-epoch RNG objects (NOT global seeding - thread safe)
         epoch_seed = self._get_epoch_seed(epoch)
-        random.seed(epoch_seed)
-        np.random.seed(epoch_seed)
+        epoch_rng = random.Random(epoch_seed)
+        epoch_np_rng = np.random.default_rng(epoch_seed)
         
         # Get excluded fingerprints
         excluded = self._get_excluded_fingerprints(epoch)
         if self.verbose and len(excluded) > 0:
             print(f"[RollingCache] Excluding {len(excluded):,} recent fingerprints")
         
-        # Keep random subset of current pool
+        # Keep random subset of current pool (using per-epoch RNG)
         with self._swap_lock:
             if len(self._current_pool) > num_to_keep:
-                kept_samples = random.sample(self._current_pool, num_to_keep)
+                # Use epoch_rng.sample() instead of random.sample()
+                kept_samples = epoch_rng.sample(self._current_pool, num_to_keep)
             else:
                 kept_samples = list(self._current_pool)
         
@@ -420,11 +484,13 @@ class RollingRefreshCache:
             num_to_refresh,
             epoch=epoch,
             exclude_fingerprints=excluded,
+            rng=epoch_rng,
+            np_rng=epoch_np_rng,
         )
         
-        # Merge and shuffle
+        # Merge and shuffle (using per-epoch RNG)
         merged = kept_samples + new_samples
-        random.shuffle(merged)
+        epoch_rng.shuffle(merged)
         
         # Cleanup old fingerprints
         self._cleanup_old_fingerprints(epoch)
@@ -482,8 +548,12 @@ class RollingRefreshCache:
                     print(f"[RollingCache] Prefetch for epoch {next_epoch} complete in {elapsed:.1f}s")
                     
             except Exception as e:
+                # On error, log and set flag but leave _next_pool as None
+                # swap_to_next_epoch will detect this and regenerate synchronously
                 print(f"[RollingCache] ERROR in prefetch: {e}")
-                self._prefetch_ready.set()  # Signal even on error
+                import traceback
+                traceback.print_exc()
+                self._prefetch_ready.set()  # Signal completion (with error)
         
         # Submit task
         self._prefetch_future = self._prefetch_executor.submit(generate_task)
@@ -494,23 +564,28 @@ class RollingRefreshCache:
         Blocks until prefetch is ready (with timeout).
         Call this at the end of each epoch BEFORE starting next epoch.
         
+        If prefetch failed or timed out, regenerates synchronously to ensure
+        training continues with fresh samples (never silently reuses old pool).
+        
         Args:
             timeout: Maximum seconds to wait for prefetch to complete
             
         Returns:
             True if swap successful, False if timeout or no prefetch available
         """
+        next_epoch = self._current_epoch + 1
+        
         if self._next_pool is None and self._prefetch_future is None:
             if self.verbose:
                 print(f"[RollingCache] Warning: No prefetch in progress, generating synchronously")
             # Fallback: generate synchronously
-            next_epoch = self._current_epoch + 1
             self._next_pool = self._generate_refresh_samples(next_epoch)
         
         # Wait for prefetch to complete
         if not self._prefetch_ready.wait(timeout=timeout):
-            print(f"[RollingCache] ERROR: Prefetch timeout after {timeout}s")
-            return False
+            print(f"[RollingCache] ERROR: Prefetch timeout after {timeout}s, regenerating synchronously")
+            # Timeout - regenerate synchronously to avoid stale pool
+            self._next_pool = self._generate_refresh_samples(next_epoch)
         
         # Swap pools
         with self._swap_lock:
@@ -523,8 +598,13 @@ class RollingRefreshCache:
                           f"({len(self._current_pool):,} samples)")
                 return True
             else:
-                print(f"[RollingCache] ERROR: Next pool is None after prefetch")
-                return False
+                # Prefetch failed and returned None - regenerate synchronously
+                print(f"[RollingCache] WARNING: Prefetch returned None, regenerating synchronously")
+                self._current_pool = self._generate_refresh_samples(next_epoch)
+                self._current_epoch += 1
+                print(f"[RollingCache] Regenerated epoch {self._current_epoch} synchronously "
+                      f"({len(self._current_pool):,} samples)")
+                return True  # Still return True - we recovered
     
     def get_coverage_stats(self, epoch: int) -> Optional[EpochCoverageStats]:
         """Get coverage statistics for a specific epoch."""
