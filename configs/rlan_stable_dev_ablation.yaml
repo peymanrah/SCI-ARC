@@ -345,10 +345,6 @@ data:
     color_permutation: true    # Color invariance
     color_permutation_prob: 0.3
     translational: true        # Translation invariance
-    flip: false
-    transpose: false
-    color_permutation: false
-    translational: false
     track_augmentation: true
 
 evaluation:
