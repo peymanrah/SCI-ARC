@@ -139,9 +139,9 @@ class AnchorRobustnessTraining(nn.Module):
         row_grid = torch.arange(H, device=device).float().view(1, 1, H, 1)
         col_grid = torch.arange(W, device=device).float().view(1, 1, 1, W)
         
-        # Primary centroid positions
-        p_row = primary_centroids[:, :, 0].view(B, K, 1, 1)
-        p_col = primary_centroids[:, :, 1].view(B, K, 1, 1)
+        # Primary centroid positions - SAFETY: Clamp to valid grid bounds
+        p_row = primary_centroids[:, :, 0].clamp(0, H - 1).view(B, K, 1, 1)
+        p_col = primary_centroids[:, :, 1].clamp(0, W - 1).view(B, K, 1, 1)
         
         # Distance from primary (suppress nearby region)
         dist_sq = (row_grid - p_row)**2 + (col_grid - p_col)**2
@@ -158,9 +158,17 @@ class AnchorRobustnessTraining(nn.Module):
         masked_flat = masked_attn.view(B, K, -1)
         peak_indices = masked_flat.argmax(dim=-1)  # (B, K)
         
+        # SAFETY: Clamp peak indices to valid range to prevent CUDA index overflow
+        max_index = H * W - 1
+        peak_indices = peak_indices.clamp(0, max_index)
+        
         # Convert flat indices to (row, col)
         peak_rows = (peak_indices // W).float()
         peak_cols = (peak_indices % W).float()
+        
+        # SAFETY: Clamp to grid bounds
+        peak_rows = peak_rows.clamp(0, H - 1)
+        peak_cols = peak_cols.clamp(0, W - 1)
         
         secondary_centroids = torch.stack([peak_rows, peak_cols], dim=-1)
         return secondary_centroids
@@ -221,11 +229,22 @@ class AnchorRobustnessTraining(nn.Module):
         for alt_logits in alt_logits_list:
             if loss_type == "kl":
                 # KL divergence between distributions
-                primary_probs = F.softmax(primary_logits / temperature, dim=1)
-                alt_log_probs = F.log_softmax(alt_logits / temperature, dim=1)
+                # SAFETY: Clamp logits to prevent NaN in softmax with extreme values
+                primary_clamped = (primary_logits / temperature).clamp(-100.0, 100.0)
+                alt_clamped = (alt_logits / temperature).clamp(-100.0, 100.0)
+                
+                primary_probs = F.softmax(primary_clamped, dim=1)
+                alt_log_probs = F.log_softmax(alt_clamped, dim=1)
+                
+                # SAFETY: Add epsilon to prevent NaN from log(0)
+                primary_probs = primary_probs + 1e-8
+                primary_probs = primary_probs / primary_probs.sum(dim=1, keepdim=True)
                 
                 # KL(primary || alt) - per-pixel
                 kl_div = F.kl_div(alt_log_probs, primary_probs, reduction='none')
+                
+                # SAFETY: Clamp KL div to prevent inf propagation
+                kl_div = kl_div.clamp(-100.0, 100.0)
                 kl_div = kl_div.sum(dim=1)  # Sum over classes
                 
                 if valid_mask is not None:
@@ -298,6 +317,20 @@ class AnchorRobustnessTraining(nn.Module):
         primary_logits = primary_outputs["logits"]
         attention_maps = primary_outputs["attention_maps"]
         primary_centroids = primary_outputs["centroids"]
+        
+        # SAFETY: Check for NaN/Inf in attention maps that would cause CUDA errors
+        if torch.isnan(attention_maps).any() or torch.isinf(attention_maps).any():
+            print("[ART WARNING] NaN/Inf in attention_maps, replacing with uniform")
+            attention_maps = torch.nan_to_num(attention_maps, nan=0.0, posinf=0.0, neginf=0.0)
+            # Normalize to valid probability distribution
+            attention_maps = attention_maps + 1e-8
+            attention_maps = attention_maps / attention_maps.sum(dim=(2, 3), keepdim=True).clamp(min=1e-8)
+        
+        # SAFETY: Clamp primary centroids to valid grid bounds
+        B, H, W = input_grid.shape
+        primary_centroids = primary_centroids.clone()
+        primary_centroids[:, :, 0] = primary_centroids[:, :, 0].clamp(0, H - 1)
+        primary_centroids[:, :, 1] = primary_centroids[:, :, 1].clamp(0, W - 1)
         
         # 2. Extract alternate anchors
         valid_mask = model.encoder.get_valid_mask(input_grid)
@@ -389,14 +422,19 @@ class AnchorRobustnessTraining(nn.Module):
         row_grid = torch.arange(H, device=device).float().view(1, 1, H, 1)
         col_grid = torch.arange(W, device=device).float().view(1, 1, 1, W)
         
-        c_row = forced_centroids[:, :, 0].view(B, K, 1, 1)
-        c_col = forced_centroids[:, :, 1].view(B, K, 1, 1)
+        # SAFETY: Clamp forced centroids to valid grid bounds
+        c_row = forced_centroids[:, :, 0].clamp(0, H - 1).view(B, K, 1, 1)
+        c_col = forced_centroids[:, :, 1].clamp(0, W - 1).view(B, K, 1, 1)
         
         # Gaussian attention around forced centroids
         sigma = 2.0  # Spread of attention
         dist_sq = (row_grid - c_row)**2 + (col_grid - c_col)**2
+        # SAFETY: Clamp dist_sq to prevent exp overflow
+        dist_sq = dist_sq.clamp(0, 1000.0)
         attention_maps = torch.exp(-dist_sq / (2 * sigma**2))
-        attention_maps = attention_maps / (attention_maps.sum(dim=(2, 3), keepdim=True) + 1e-6)
+        # SAFETY: Ensure normalization denominator is never zero
+        attention_sum = attention_maps.sum(dim=(2, 3), keepdim=True)
+        attention_maps = attention_maps / (attention_sum.clamp(min=1e-8))
         
         # Create stop logits (all active)
         stop_logits = torch.zeros(B, K, device=device) - 5.0  # Low = don't stop

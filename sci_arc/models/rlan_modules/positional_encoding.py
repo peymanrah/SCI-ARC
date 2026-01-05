@@ -274,6 +274,10 @@ class LearnedPositionEmbedding2D(nn.Module):
         h_pos = torch.arange(height, device=self.h_embed.weight.device)
         w_pos = torch.arange(width, device=self.w_embed.weight.device)
         
+        # SAFETY: Clamp positions to valid embedding range to prevent CUDA index overflow
+        h_pos = h_pos.clamp(0, self.h_embed.num_embeddings - 1)
+        w_pos = w_pos.clamp(0, self.w_embed.num_embeddings - 1)
+        
         h_emb = self.h_embed(h_pos)[:, None, :]  # (H, 1, D)
         w_emb = self.w_embed(w_pos)[None, :, :]  # (1, W, D)
         

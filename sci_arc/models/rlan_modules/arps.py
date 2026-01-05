@@ -623,18 +623,32 @@ class ProgramProposalHead(nn.Module):
             # Sample token with temperature and top-k
             if temperature > 0:
                 logits = token_logits / temperature
+                # SAFETY: Clamp logits to prevent NaN/Inf in softmax
+                logits = logits.clamp(-100.0, 100.0)
                 # Top-K filtering
                 topk_vals, topk_idx = torch.topk(logits, min(top_k, logits.shape[-1]))
                 probs = F.softmax(topk_vals, dim=-1)
+                # SAFETY: Handle NaN/Inf in probs that can crash multinomial
+                if torch.isnan(probs).any() or torch.isinf(probs).any():
+                    probs = torch.ones_like(probs) / probs.shape[-1]  # Uniform fallback
+                # SAFETY: Ensure probs sum > 0 (multinomial requires this)
+                probs = probs + 1e-8
+                probs = probs / probs.sum(dim=-1, keepdim=True)
                 sampled_idx = torch.multinomial(probs, 1)
                 token = topk_idx.gather(-1, sampled_idx).squeeze(-1)
             else:
                 token = token_logits.argmax(dim=-1)
             
+            # SAFETY: Clamp token to valid primitive range to prevent embedding overflow
+            token = token.clamp(0, self.num_primitives - 1)
+            
             # Sample arguments
             color = color_logits.argmax(dim=-1)
-            offset = offset_pred
-            
+            # SAFETY: Clamp color to valid range [0, 9] to prevent index overflow
+            color = color.clamp(0, 9)
+            # SAFETY: Clamp offsets to reasonable grid range to prevent overflow
+            offset = offset_pred.clamp(-30.0, 30.0)
+
             program.append(token)
             colors.append(color)
             offsets.append(offset)
@@ -852,6 +866,15 @@ class ARPS(nn.Module):
         Returns:
             proposals: List of proposal dicts with tokens, colors, offsets
         """
+        # SAFETY: Validate input shapes to prevent downstream CUDA errors
+        if clue_features.dim() != 5:
+            raise ValueError(f"[ARPS] clue_features must be 5D (B,K,D,H,W), got {clue_features.dim()}D")
+        
+        # SAFETY: Check for NaN/Inf in input that would propagate to embeddings
+        if torch.isnan(clue_features).any() or torch.isinf(clue_features).any():
+            print("[ARPS WARNING] NaN/Inf detected in clue_features, replacing with zeros")
+            clue_features = torch.nan_to_num(clue_features, nan=0.0, posinf=0.0, neginf=0.0)
+        
         B, K, D, H, W = clue_features.shape
         
         # Pool features to context
@@ -915,9 +938,15 @@ class ARPS(nn.Module):
             color_val = int(colors_cpu[i].item())
             color_val = max(0, min(9, color_val))
             
+            # SAFETY: Clamp offsets to reasonable grid range [-30, 30]
+            offset_row = int(offsets_cpu[i, 0].item())
+            offset_col = int(offsets_cpu[i, 1].item())
+            offset_row = max(-30, min(30, offset_row))
+            offset_col = max(-30, min(30, offset_col))
+            
             args = {
                 "color": color_val,
-                "offset": (int(offsets_cpu[i, 0].item()), int(offsets_cpu[i, 1].item())),
+                "offset": (offset_row, offset_col),
             }
             program.append((primitive_name, args))
         
@@ -1129,9 +1158,10 @@ class ARPS(nn.Module):
                 offsets = offsets[:max_tokens]
             
             # Convert to tensors
-            target_tokens = torch.tensor(tokens, device=device)
-            target_colors = torch.tensor(colors, device=device)
-            target_offsets = torch.tensor(offsets, device=device, dtype=torch.float)
+            # SAFETY: Clamp token indices to valid range
+            target_tokens = torch.tensor(tokens, device=device).clamp(0, len(self.primitives) - 1)
+            target_colors = torch.tensor(colors, device=device).clamp(0, 9)
+            target_offsets = torch.tensor(offsets, device=device, dtype=torch.float).clamp(-30.0, 30.0)
             
             # Compute teacher-forcing loss
             partial = None
@@ -1144,12 +1174,15 @@ class ARPS(nn.Module):
                     context[b:b+1], partial
                 )
                 
-                # Token loss
-                step_loss += F.cross_entropy(token_logits, target_tokens[t:t+1])
+                # Token loss - SAFETY: Clamp target to valid range for cross_entropy
+                safe_token_target = target_tokens[t:t+1].clamp(0, token_logits.shape[-1] - 1)
+                step_loss += F.cross_entropy(token_logits, safe_token_target)
                 
                 # Argument losses (only for non-END tokens)
                 if t < max_steps - 1:
-                    step_loss += F.cross_entropy(color_logits, target_colors[t:t+1]) * 0.5
+                    # SAFETY: Clamp color target to valid range
+                    safe_color_target = target_colors[t:t+1].clamp(0, color_logits.shape[-1] - 1)
+                    step_loss += F.cross_entropy(color_logits, safe_color_target) * 0.5
                     step_loss += F.mse_loss(offset_pred, target_offsets[t:t+1]) * 0.5
                 
                 # Update partial
