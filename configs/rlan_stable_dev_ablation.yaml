@@ -294,10 +294,11 @@ data:
   merged_manifest_validation: true
 
   # ABLATION TRAINING SETTINGS (Jan 2026)
-  # 50 samples/task × 400 tasks = 20K samples → ~55 iters/epoch @ batch 360
-  # 80 epochs × 55 iters = 4400 iterations (~4-6 hours on RTX 3090)
+  # With rolling cache pool_size=256K, this is less critical
+  # But we increase to 100 for better initial pool diversity
+  # 100 samples/task × 400 tasks = 40K initial decode cache
   max_tasks: null
-  samples_per_task: 50           # INCREASED from 10 for meaningful training
+  samples_per_task: 100          # INCREASED from 50 for richer initial pool
   stratified_seed: 42
 
   # ===========================================================================
@@ -327,10 +328,15 @@ data:
   cache_samples_mode: rolling    # 'static' | 'rolling' - use rolling for diversity
   
   rolling_cache:
-    pool_size: 128000            # Total samples in augmented pool
-    refresh_fraction: 0.25       # 25% refreshed each epoch
-    anti_repeat_window: 4        # Epochs before augmentation can repeat
-    prefetch_workers: 8          # CPU workers for async generation (48 vCPU / 6)
+    # POOL SIZE REASONING (Jan 2026):
+    # - 256K samples ÷ 400 tasks = 640 samples/task (excellent diversity)
+    # - 256K ÷ batch 360 = 711 iters/epoch (good training signal)
+    # - 256K × ~80 bytes/sample ≈ 20GB RAM (safe with 128GB)
+    # - 25% refresh = 64K new augmentations/epoch (massive diversity)
+    pool_size: 256000            # INCREASED from 128K for better generalization
+    refresh_fraction: 0.30       # INCREASED from 0.25 - more diversity per epoch
+    anti_repeat_window: 5        # INCREASED from 4 - longer before aug repeats
+    prefetch_workers: 12         # INCREASED from 8 - utilize 48 vCPU better
     coverage_scheduling: true    # Balance dihedral/color/translation coverage
     force_augmentation: true     # FORCE augmentation even when global is off
     seed: 42                     # Base seed for reproducibility
