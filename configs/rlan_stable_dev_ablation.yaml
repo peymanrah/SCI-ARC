@@ -229,11 +229,11 @@ training:
   # Phase A (epochs 1-60): Heavy augmentation for diversity and generalization
   # Phase B (epochs 61-80): Reduced augmentation for fine-tuning
   # 
-  # TIMELINE (with 400K pool, 1111 iters/epoch):
-  # - Phase A: 60 epochs × 1111 iters = 66,660 training steps
-  # - Phase B: 20 epochs × 1111 iters = 22,220 fine-tuning steps
-  # - Total: 80 epochs × 1111 iters = 88,880 gradient updates
-  # - Estimated time: 8-12 hours on RTX 3090/4090
+  # TIMELINE (with 240K pool, 6000 iters/epoch):
+  # - Phase A: 60 epochs × 6000 iters = 360,000 training steps
+  # - Phase B: 20 epochs × 6000 iters = 120,000 fine-tuning steps
+  # - Total: 80 epochs × 6000 iters = 480,000 gradient updates
+  # - Estimated time: 12-16 hours on RTX 3090/4090
   # ===========================================================================
   phased_training:
     enabled: true
@@ -306,7 +306,7 @@ data:
 
   # ABLATION TRAINING SETTINGS (Jan 2026)
   # NOTE: With cache_samples_mode=rolling, samples_per_task is IGNORED.
-  # Rolling cache uses: pool_size (400K) ÷ num_tasks (602) = 664 samples/task
+  # Rolling cache uses: pool_size (240K) ÷ num_tasks (602) = 399 samples/task
   # The samples_per_task below is only used if cache_samples_mode='static'
   max_tasks: null
   samples_per_task: 50           # Only used with cache_samples_mode='static'
@@ -340,15 +340,15 @@ data:
   
   rolling_cache:
     # POOL SIZE REASONING (Jan 2026):
-    # - 400K samples ÷ 602 merged tasks = 664 samples/task (maximum diversity)
-    # - 400K ÷ batch 360 = 1111 iters/epoch (strong training signal)
-    # - 400K × ~100 bytes/sample ≈ 40GB RAM (safe with 128GB)
-    # - 30% refresh = 120K new augmentations/epoch (massive diversity)
+    # - 240K samples ÷ 602 merged tasks = 399 samples/task (good diversity)
+    # - 240K ÷ batch 40 = 6,000 iters/epoch (manageable training time)
+    # - 80 epochs × 6K = 480K gradient updates (~12-16 hours on RTX 3090)
+    # - 30% refresh = 72K new augmentations/epoch (massive diversity)
     # GPU UTILIZATION: CUDAPrefetcher overlaps CPU→GPU transfer with GPU compute
-    pool_size: 400000            # INCREASED from 256K for maximum generalization
-    refresh_fraction: 0.30       # 30% refresh = 120K new samples per epoch
+    pool_size: 240000            # BALANCED - 399 samples/task, 6K iters/epoch
+    refresh_fraction: 0.30       # 30% refresh = 72K new samples per epoch
     anti_repeat_window: 5        # 5 epochs before augmentation can repeat
-    prefetch_workers: 16         # INCREASED - 48 vCPU / 3 = 16 for async gen
+    prefetch_workers: 16         # 48 vCPU / 3 = 16 for async gen
     coverage_scheduling: true    # Balance dihedral/color/translation coverage
     force_augmentation: true     # FORCE augmentation even when global is off
     seed: 42                     # Base seed for reproducibility
