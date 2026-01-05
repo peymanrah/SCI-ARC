@@ -474,6 +474,90 @@ def test_backward_compatibility_static_mode():
     print("✓ Backward compatibility (static mode) test passed")
 
 
+def test_generate_sample_uses_effective_augmentation():
+    """Test that _generate_sample uses _get_effective_*() methods (Jan 2026 fix).
+    
+    This test verifies the fix for the rolling cache augmentation bug where
+    samples were generated with no augmentation even when rolling cache mode
+    was enabled with coverage_scheduling=true.
+    
+    The bug was that _generate_sample() used self.augment directly instead of
+    self._get_effective_augment(), so runtime overrides from set_augmentation_config()
+    were ignored.
+    """
+    import tempfile
+    import json
+    import os
+    from sci_arc.data.dataset import ARCDataset
+    
+    # Create a minimal test dataset
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create a simple task file
+        task = {
+            'train': [
+                {'input': [[0, 1], [1, 0]], 'output': [[1, 0], [0, 1]]}
+            ],
+            'test': [
+                {'input': [[0, 1], [1, 0]], 'output': [[1, 0], [0, 1]]}
+            ]
+        }
+        task_path = os.path.join(tmpdir, 'test_task.json')
+        with open(task_path, 'w') as f:
+            json.dump(task, f)
+        
+        # Create dataset with augmentation DISABLED (like the config)
+        dataset = ARCDataset(
+            data_path=tmpdir,
+            max_size=30,
+            augment=False,  # Disabled in config
+            color_permutation=False,  # Disabled in config
+            translational_augment=False,  # Disabled in config
+            cache_samples=False,
+        )
+        
+        # Generate samples - should have no augmentation
+        samples_no_aug = []
+        for _ in range(20):
+            sample = dataset._generate_sample(0)
+            samples_no_aug.append(sample['aug_info']['dihedral_id'])
+        
+        # All should be identity (0) since augmentation is disabled
+        assert all(d == 0 for d in samples_no_aug), \
+            f"With augment=False, all samples should have dihedral_id=0, got {samples_no_aug}"
+        
+        # Now enable augmentation via runtime override (like rolling cache does)
+        dataset.set_augmentation_config(
+            augment=True,
+            color_permutation=True,
+            color_permutation_prob=0.5,
+            translational_augment=True,
+        )
+        
+        # Generate samples - should now have augmentation diversity
+        samples_with_aug = []
+        color_perms_applied = 0
+        for _ in range(100):
+            sample = dataset._generate_sample(0)
+            samples_with_aug.append(sample['aug_info']['dihedral_id'])
+            if sample['aug_info']['color_perm'] is not None:
+                color_perms_applied += 1
+        
+        # Check dihedral diversity
+        unique_dihedrals = set(samples_with_aug)
+        assert len(unique_dihedrals) > 1, \
+            f"With runtime augment=True, should have dihedral diversity, got only {unique_dihedrals}"
+        
+        # Check color permutation applied (should be ~50% with prob=0.5)
+        # Allow wide margin due to randomness
+        assert color_perms_applied > 20, \
+            f"With color_permutation=True (prob=0.5), expected ~50 color perms, got {color_perms_applied}"
+        
+        print(f"  Dihedral diversity: {len(unique_dihedrals)} unique transforms")
+        print(f"  Color perms applied: {color_perms_applied}/100 samples")
+    
+    print("✓ _generate_sample uses effective augmentation test passed")
+
+
 def run_all_tests():
     """Run all smoke tests."""
     print("\n" + "=" * 60)
@@ -491,6 +575,7 @@ def run_all_tests():
         test_config_helper,
         test_arps_vectorized_indexing,
         test_backward_compatibility_static_mode,
+        test_generate_sample_uses_effective_augmentation,  # Jan 2026 fix
     ]
     
     passed = 0

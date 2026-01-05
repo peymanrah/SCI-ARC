@@ -1010,15 +1010,23 @@ class ARCDataset(Dataset):
         # Forward: color_perm → dihedral
         # Inverse: inverse_dihedral → inverse_color
         
+        # FIX (Jan 2026): Use _get_effective_*() methods to respect runtime overrides.
+        # This is critical for rolling cache mode where we need augmentation
+        # even if the global config has augmentation disabled.
+        effective_augment = self._get_effective_augment()
+        effective_color_perm = self._get_effective_color_perm()
+        effective_color_perm_prob = self._get_effective_color_perm_prob()
+        effective_translational = self._get_effective_translational()
+        
         # Step 1: Apply color permutation FIRST (like TRM)
-        if self.color_permutation and random.random() < self.color_permutation_prob:
+        if effective_color_perm and random.random() < effective_color_perm_prob:
             train_inputs, train_outputs, test_input, test_output, color_perm = self._augment_color(
                 train_inputs, train_outputs, test_input, test_output
             )
             aug_info['color_perm'] = color_perm  # Store actual array for inverse!
         
         # Step 2: Apply dihedral augmentation SECOND (like TRM)
-        if self.augment:
+        if effective_augment:
             train_inputs, train_outputs, test_input, test_output, dihedral_id = self._augment_dihedral_tracked(
                 train_inputs, train_outputs, test_input, test_output
             )
@@ -1026,7 +1034,7 @@ class ARCDataset(Dataset):
         
         # Compute translational offset
         offset = None
-        if self.translational_augment:
+        if effective_translational:
             all_grids = train_inputs + train_outputs + [test_input, test_output]
             max_h = max(g.shape[0] for g in all_grids)
             max_w = max(g.shape[1] for g in all_grids)

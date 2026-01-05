@@ -4002,8 +4002,21 @@ def evaluate_canonical_train(
                 total_tasks += 1
                 
             except Exception as e:
-                # Skip problematic tasks
+                # FIX (Jan 2026): Log first few errors to help debug "0 tasks" issue
+                # Don't spam logs - only log up to 3 errors per eval run
+                if not hasattr(evaluate_canonical_train, '_error_count'):
+                    evaluate_canonical_train._error_count = 0
+                if evaluate_canonical_train._error_count < 3:
+                    import traceback
+                    task_id = task.get('task_id', 'unknown') if isinstance(task, dict) else 'unknown'
+                    print(f"[canonical_train_eval] Error on task {task_id}: {e}")
+                    evaluate_canonical_train._error_count += 1
+                    if evaluate_canonical_train._error_count == 3:
+                        print(f"[canonical_train_eval] (suppressing further error messages...)")
                 continue
+    
+    # Reset error count for next eval run
+    evaluate_canonical_train._error_count = 0
     
     # Compute metrics
     canonical_task_accuracy = total_correct_tasks / max(total_tasks, 1)
@@ -5073,6 +5086,25 @@ Config Overrides:
         
         # Get the dataset from train_loader
         train_dataset = train_loader.dataset
+        
+        # FIX (Jan 2026): Force augmentation when using rolling cache mode.
+        # The rolling cache depends on _generate_sample() applying augmentations.
+        # Without this, samples have NO diversity regardless of coverage_scheduling.
+        # Use runtime overrides so global config flags are respected as defaults,
+        # but rolling cache always gets diverse samples.
+        rc_config = data_cfg.get('rolling_cache', {})
+        force_augmentation = rc_config.get('force_augmentation', True)  # Default: enable
+        if force_augmentation:
+            print(f"  Enabling augmentation overrides for rolling cache diversity:")
+            # Get color perm probability from config or use default
+            color_perm_prob = aug_cfg.get('color_permutation_prob', 0.5)
+            train_dataset.set_augmentation_config(
+                augment=True,
+                color_permutation=True,
+                color_permutation_prob=color_perm_prob,
+                translational_augment=True,
+            )
+            print(f"    dihedral=True, color_perm=True (prob={color_perm_prob:.2f}), translational=True")
         
         # Create rolling cache from config
         rolling_cache = create_rolling_cache_from_config(
