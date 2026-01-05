@@ -5097,8 +5097,9 @@ Config Overrides:
         force_augmentation = rc_config.get('force_augmentation', True)  # Default: enable
         if force_augmentation:
             print(f"  Enabling augmentation overrides for rolling cache diversity:")
-            # Get color perm probability from config or use default
-            color_perm_prob = aug_cfg.get('color_permutation_prob', 0.5)
+            # Get color perm probability from data augmentation config
+            aug_config = data_cfg.get('augmentation', {})
+            color_perm_prob = aug_config.get('color_permutation_prob', 0.5)
             train_dataset.set_augmentation_config(
                 augment=True,
                 color_permutation=True,
