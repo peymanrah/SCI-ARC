@@ -294,11 +294,11 @@ data:
   merged_manifest_validation: true
 
   # ABLATION TRAINING SETTINGS (Jan 2026)
-  # With rolling cache pool_size=256K, this is less critical
-  # But we increase to 100 for better initial pool diversity
-  # 100 samples/task × 400 tasks = 40K initial decode cache
+  # NOTE: With cache_samples_mode=rolling, samples_per_task is IGNORED.
+  # Rolling cache uses: pool_size (256K) ÷ num_tasks (400) = 640 samples/task
+  # The samples_per_task below is only used if cache_samples_mode='static'
   max_tasks: null
-  samples_per_task: 100          # INCREASED from 50 for richer initial pool
+  samples_per_task: 50           # Only used with cache_samples_mode='static'
   stratified_seed: 42
 
   # ===========================================================================
