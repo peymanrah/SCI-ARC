@@ -7971,16 +7971,13 @@ Config Overrides:
                 elif abs(stop_logits_mean) > 3.0:
                     print(f"    [!] Stop logits approaching saturation |mean|={abs(stop_logits_mean):.1f}")
                 
-                # Check for task-dependent clue count (the goal of per-sample gradient coupling)
-                if clues_std < 0.1:
-                    print(f"    [!] Low variance - clue count not adapting per-task!")
-                elif clues_std > 0.5:
-                    print(f"    [+] High variance - strong per-task clue adaptation!")
-                elif clues_std > 0.3:
-                    print(f"    Clue count varies by task (per-sample coupling active)")
+                # NOTE: clues_std variance is printed below AFTER checking per-clue entropy
+                # This allows us to detect the misleading case where clue COUNT varies
+                # but clue CONTENT (entropy) is uniform (all clues identical)
             
-            # Per-clue entropy breakdown
+            # Per-clue entropy breakdown - check FIRST before interpreting clues_std
             per_clue_entropy = diagnostics.get('per_clue_entropy', [])
+            clues_all_identical = False  # Track for later warning
             if per_clue_entropy:
                 entropy_str = ', '.join(f"{e:.2f}" for e in per_clue_entropy)
                 mean_entropy = sum(per_clue_entropy) / len(per_clue_entropy)
@@ -7990,7 +7987,12 @@ Config Overrides:
                 # Check if all clues have similar entropy (bad - not differentiating)
                 if len(per_clue_entropy) > 1:
                     entropy_std = (sum((e - mean_entropy)**2 for e in per_clue_entropy) / len(per_clue_entropy)) ** 0.5
-                    if entropy_std < 0.1:
+                    if entropy_std < 0.01:  # More strict: < 0.01 means truly identical
+                        clues_all_identical = True
+                        print(f"    [🚨 CRITICAL] All clues IDENTICAL (entropy_std={entropy_std:.4f})")
+                        print(f"    DSC is not differentiating between clues!")
+                        print(f"    This nullifies clue count adaptation - all samples look the same!")
+                    elif entropy_std < 0.1:
                         print(f"    [!] Clues have uniform entropy (std={entropy_std:.3f}) - not differentiating!")
                 
                 # Check if entropy is too high (attention too diffuse)
@@ -7998,6 +8000,22 @@ Config Overrides:
                     print(f"    [!] High entropy ({mean_entropy:.2f}) - attention still diffuse!")
                 elif mean_entropy < 3.0:
                     print(f"    Good entropy ({mean_entropy:.2f}) - attention is focused!")
+            
+            # NOW print clue count variance analysis (after knowing if clues are identical)
+            if stop_prob > 0:
+                clues_std = diagnostics.get('clues_used_std', 0)
+                if clues_all_identical and clues_std > 0.3:
+                    # CONTRADICTION: clue count varies but all clues are identical
+                    print(f"  Clue Count Variance: std={clues_std:.2f}")
+                    print(f"    [⚠️ MISLEADING] Clue count varies (std={clues_std:.2f}) BUT all clues are identical!")
+                    print(f"    The stop predictor is choosing 'how many identical copies' - not 'which unique clues'")
+                    print(f"    Fix: Increase lambda_centroid_diversity or check DSC attention mechanism")
+                elif clues_std < 0.1:
+                    print(f"    [!] Low clue count variance - not adapting per-task!")
+                elif clues_std > 0.5:
+                    print(f"    [+] High clue count variance - per-task adaptation working!")
+                elif clues_std > 0.3:
+                    print(f"    Clue count varies by task (per-sample coupling active)")
             
             # Centroid spread
             # P1.6: Enhanced centroid diversity monitoring (821b111 showed spread=0.19 collapse)
@@ -8678,6 +8696,19 @@ Config Overrides:
                     health_warnings.append(f"⚠ Centroids clustered ({centroid_spread:.1f}) - early epoch OK")
             else:
                 health_critical.append(f"✗ Centroid COLLAPSE ({centroid_spread:.1f} < {centroid_spread_critical})")
+            
+            # === CHECK 3b: Per-Clue Entropy Diversity (clues should be different) ===
+            # If all clues have identical entropy, DSC is not differentiating
+            per_clue_entropy = diagnostics.get('per_clue_entropy', [])
+            if len(per_clue_entropy) > 1:
+                entropy_mean = sum(per_clue_entropy) / len(per_clue_entropy)
+                entropy_std = (sum((e - entropy_mean)**2 for e in per_clue_entropy) / len(per_clue_entropy)) ** 0.5
+                if entropy_std >= 0.1:
+                    health_checks.append(f"✓ Clues differentiating (entropy_std={entropy_std:.2f})")
+                elif entropy_std >= 0.01:
+                    health_warnings.append(f"⚠ Clues similar (entropy_std={entropy_std:.3f})")
+                else:
+                    health_critical.append(f"✗ Clues IDENTICAL (entropy_std={entropy_std:.4f}) - DSC broken!")
             
             # === CHECK 4: Confidence-Stop Coupling (should be positive) ===
             # POSITIVE correlation = sharp attention leads to stopping = HEALTHY
