@@ -141,13 +141,25 @@ Should prevent centroid collapse. If still observing spread < 0.5, consider:
 
 ### 3.1 Current Configuration
 
+**IMPORTANT:** Different configs use different solver steps:
+
+| Config | num_solver_steps | Purpose |
+|--------|-----------------|---------|
+| `rlan_stable_dev.yaml` | 7 | Production training |
+| `rlan_stable_dev_ablation.yaml` | 4 | Ablation study (reduced to prevent over-iteration) |
+| `rlan_stable_prod.yaml` | 5 | Memory-optimized production |
+
 ```yaml
-# rlan_stable_dev.yaml
+# rlan_stable_dev_ablation.yaml (ABLATION)
 model:
-  num_solver_steps: 7   # Increased from 5 for more iteration capacity
+  num_solver_steps: 4  # REDUCED - logs showed step 4 was best, not step 6
+
+# rlan_stable_dev.yaml (PRODUCTION)  
+model:
+  num_solver_steps: 7  # Full capacity for complex tasks
 ```
 
-The config already uses **7 solver steps**, not 4.
+**If you see 4 solver losses in logs, you are using the ablation config.** This is intentional.
 
 ### 3.2 Evidence for Step Selection
 
@@ -276,13 +288,15 @@ Current settings are conservative. For production generalization, consider:
 - Enable `use_best_step_selection: true` at inference
 - No change needed for step count
 
-### ⚠️ RECOMMENDATION: Increase ARPS Search Depth
+### ⚠️ RECOMMENDATION: Increase ARPS Search Depth ✅ APPLIED
 
-| Parameter | Current | Recommended | Reason |
-|-----------|---------|-------------|--------|
+| Parameter | Previous | Updated | Reason |
+|-----------|----------|---------|--------|
 | `max_program_length` | 8 | 12 | Complex tasks need longer programs |
 | `beam_size` | 32 | 64 | More exploration for diverse solutions |
 | `top_k_proposals` | 4 | 8 | More candidates for verification |
+
+**Status:** These defaults have been updated in the codebase (Jan 2026).
 
 ---
 

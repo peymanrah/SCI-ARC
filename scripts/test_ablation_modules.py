@@ -201,7 +201,9 @@ def test_arps_config():
         
         config = ARPSConfig()
         assert config.enabled == True
-        assert config.max_program_length == 8
+        assert config.max_program_length == 12  # Updated default (was 8)
+        assert config.beam_size == 64           # Updated default (was 32)
+        assert config.top_k_proposals == 8      # Updated default (was 4)
         assert len(config.primitives) > 0
         results.record("ARPSConfig default values", True)
         

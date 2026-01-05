@@ -5075,7 +5075,8 @@ Config Overrides:
     # - Tier B (augmented pool): Rolling refresh with new augmentations each epoch
     # Key feature: CPU generates epoch e+1 while GPU trains epoch e (async prefetch)
     # ================================================================
-    cache_samples_mode = data_cfg.get('cache_samples_mode', 'static')
+    # DEFAULT: 'rolling' for better augmentation diversity (Jan 2026 fix)
+    cache_samples_mode = data_cfg.get('cache_samples_mode', 'rolling')
     rolling_cache = None
     rolling_cache_dataset = None
     

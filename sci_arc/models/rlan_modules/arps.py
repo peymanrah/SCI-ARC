@@ -69,9 +69,9 @@ class ARPSConfig:
     """Configuration for Anchor-Relative Program Search."""
     enabled: bool = True
     use_as_auxiliary: bool = True       # Add to neural head, don't replace
-    max_program_length: int = 8
-    beam_size: int = 32
-    top_k_proposals: int = 4
+    max_program_length: int = 12        # INCREASED from 8 for complex multi-step tasks
+    beam_size: int = 64                 # INCREASED from 32 for better exploration  
+    top_k_proposals: int = 8            # INCREASED from 4 for more candidate verification
     
     # Primitives to use
     primitives: List[str] = field(default_factory=lambda: [
@@ -1310,9 +1310,9 @@ def create_arps_from_config(config: dict, hidden_dim: int = 256) -> Optional[ARP
     arps_config = ARPSConfig(
         enabled=True,
         use_as_auxiliary=config.get('use_as_auxiliary', True),
-        max_program_length=config.get('max_program_length', 8),
-        beam_size=config.get('beam_size', 32),
-        top_k_proposals=config.get('top_k_proposals', 4),
+        max_program_length=config.get('max_program_length', 12),  # Updated default
+        beam_size=config.get('beam_size', 64),                     # Updated default
+        top_k_proposals=config.get('top_k_proposals', 8),          # Updated default
         primitives=config.get('primitives', [
             "select_color", "select_connected", "translate",
             "reflect_x", "reflect_y", "rotate_90", "rotate_180",
