@@ -5116,6 +5116,15 @@ Config Overrides:
             verbose=True,
         )
         
+        # Log task count for verification
+        num_tasks_in_cache = len(train_dataset.tasks)
+        print(f"  Tasks in rolling cache: {num_tasks_in_cache}")
+        if num_tasks_in_cache < 600:
+            print(f"    [WARNING] Expected 602 merged tasks, got {num_tasks_in_cache}")
+            print(f"    Check use_merged_training and merged_training_path config")
+        elif num_tasks_in_cache >= 602:
+            print(f"    ✓ All merged tasks loaded (AGI-1 + AGI-2)")
+        
         # Wrap in dataset for DataLoader compatibility
         rolling_cache_dataset = RollingCacheDataset(rolling_cache)
         
@@ -5137,7 +5146,10 @@ Config Overrides:
         )
         
         rc_config = data_cfg.get('rolling_cache', {})
-        print(f"  Pool Size: {rc_config.get('pool_size', 128000):,}")
+        pool_size = rc_config.get('pool_size', 128000)
+        samples_per_task_rolling = pool_size // max(1, num_tasks_in_cache)
+        print(f"  Pool Size: {pool_size:,}")
+        print(f"  Samples/Task (computed): {samples_per_task_rolling} ({pool_size:,} / {num_tasks_in_cache} tasks)")
         print(f"  Refresh Fraction: {rc_config.get('refresh_fraction', 0.25)*100:.0f}%")
         print(f"  Anti-Repeat Window: {rc_config.get('anti_repeat_window', 4)} epochs")
         print(f"  Prefetch Workers: {rc_config.get('prefetch_workers', 4)}")
