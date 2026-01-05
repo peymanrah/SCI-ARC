@@ -8619,21 +8619,31 @@ Config Overrides:
             
             n = len(learning_trajectory['epochs'])
             
-            # === CHECK 1: Attention Entropy (should DECREASE) ===
+            # === CHECK 1a: DSC Clue Entropy (should DECREASE toward task-specific values) ===
             # Normalized entropy: 0=sharp (good), 1=uniform (bad)
             # For 30x30 grid, max entropy = log(900) ≈ 6.8
             max_entropy = 6.8  # log(30*30)
             normalized_entropy = mean_entropy / max_entropy if max_entropy > 0 else 1.0
             
             if normalized_entropy < 0.7:
-                health_checks.append(f"✓ Attention sharpening ({normalized_entropy:.2f} < 0.7)")
+                health_checks.append(f"✓ DSC clue entropy OK ({normalized_entropy:.2f} < 0.7)")
             elif normalized_entropy < 0.9:
-                health_warnings.append(f"⚠ Attention still diffuse ({normalized_entropy:.2f})")
+                health_warnings.append(f"⚠ DSC clue entropy high ({normalized_entropy:.2f})")
             else:
                 if epoch > 5:
-                    health_critical.append(f"✗ Attention uniform ({normalized_entropy:.2f} ≈ 1.0)")
+                    health_critical.append(f"✗ DSC clue entropy uniform ({normalized_entropy:.2f} ≈ 1.0)")
                 else:
-                    health_warnings.append(f"⚠ Attention uniform ({normalized_entropy:.2f}) - early epoch OK")
+                    health_warnings.append(f"⚠ DSC clue entropy uniform ({normalized_entropy:.2f}) - early epoch OK")
+            
+            # === CHECK 1b: Spatial Attention Max (should be >> 0.01 for focused attention) ===
+            # attn_max < 0.01 = uniform attention (BAD), > 0.1 = focused (GOOD)
+            attn_max = diagnostics.get('attn_max_mean', 0)
+            if attn_max >= 0.1:
+                health_checks.append(f"✓ Spatial attention focused (max={attn_max:.3f} >= 0.1)")
+            elif attn_max >= 0.02:
+                health_warnings.append(f"⚠ Spatial attention diffuse (max={attn_max:.3f})")
+            elif attn_max > 0:
+                health_critical.append(f"✗ Spatial attention COLLAPSED (max={attn_max:.3f} < 0.02)")
             
             # === CHECK 2: Stop Probabilities (should adapt, not uniform) ===
             per_clue_stop = diagnostics.get('per_clue_stop_prob', [])
