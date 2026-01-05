@@ -554,6 +554,7 @@ def create_train_loader(
     curriculum_stage: int = 0,
     max_grid_size: int = 30,
     batch_size_override: Optional[int] = None,
+    rolling_cache_dataset: Optional['RollingCacheDataset'] = None,
 ) -> DataLoader:
     """
     Create training dataloader with optional curriculum filtering and caching.
@@ -578,6 +579,27 @@ def create_train_loader(
     """
     data_cfg = config['data']
     train_cfg = config['training']
+    
+    # ==================================================================
+    # ROLLING CACHE FAST PATH: If rolling cache is provided, use it!
+    # ==================================================================
+    # This prevents the bug where phase changes/curriculum recreate the
+    # loader with static cache, destroying the rolling cache.
+    if rolling_cache_dataset is not None:
+        batch_size = batch_size_override or train_cfg['batch_size']
+        collate_fn = partial(collate_sci_arc, max_grid_size=max_grid_size)
+        
+        train_loader = DataLoader(
+            rolling_cache_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,  # Cache is in main process memory
+            pin_memory=True,
+            collate_fn=collate_fn,
+            drop_last=False,
+        )
+        return train_loader
+    # ==================================================================
     
     augment_cfg = data_cfg.get('augmentation', {})
     augment_enabled = augment_cfg.get('enabled', True)
@@ -5337,6 +5359,7 @@ Config Overrides:
             curriculum_stage=current_curriculum_stage,
             max_grid_size=max_grid_size,
             batch_size_override=current_batch_size_override,
+            rolling_cache_dataset=rolling_cache_dataset,
         )
     
     # =============================================================
@@ -5379,6 +5402,7 @@ Config Overrides:
                 curriculum_stage=current_curriculum_stage,
                 max_grid_size=max_grid_size,
                 batch_size_override=current_batch_size_override,
+                rolling_cache_dataset=rolling_cache_dataset,
             )
 
     # Initialize EMA for stable evaluation
@@ -6591,6 +6615,7 @@ Config Overrides:
                         curriculum_stage=current_curriculum_stage if use_curriculum else 0,
                         max_grid_size=max_grid_size,
                         batch_size_override=effective_batch_override,
+                        rolling_cache_dataset=rolling_cache_dataset,
                     )
                     # Re-apply augmentation config to the new dataset
                     train_dataset = train_loader.dataset if hasattr(train_loader, 'dataset') else None
@@ -6653,6 +6678,7 @@ Config Overrides:
                     curriculum_stage=current_curriculum_stage,
                     max_grid_size=max_grid_size,
                     batch_size_override=current_batch_size_override,  # Preserve LOO batch size if active
+                    rolling_cache_dataset=rolling_cache_dataset,
                 )
                 print(f"  New train samples: {len(train_loader.dataset)}, batches: {len(train_loader)}")
         
@@ -7154,6 +7180,7 @@ Config Overrides:
                 curriculum_stage=current_curriculum_stage,
                 max_grid_size=max_grid_size,
                 batch_size_override=loo_batch_size,
+                rolling_cache_dataset=rolling_cache_dataset,
             )
             print(f"    New batches per epoch: {len(train_loader)}")
             
