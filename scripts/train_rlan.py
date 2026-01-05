@@ -607,20 +607,23 @@ def create_train_loader(
     
     # Determine task count and get task paths based on training set source
     merged_task_paths = None  # Will be set if use_merged_training=True
+    merged_task_uids = None  # Path->task_uid mapping (solves AGI-1/AGI-2 collisions)
     if use_merged_training:
         merged_path = data_cfg.get('merged_training_path', './data/merged_training')
         try:
-            from sci_arc.data.merged_loader import get_training_stats, get_merged_task_paths, should_use_merged_training
+            from sci_arc.data.merged_loader import get_training_stats, get_merged_task_info, should_use_merged_training
             
             # Validate that merged training is actually available
             if should_use_merged_training(data_cfg):
                 merged_stats = get_training_stats(merged_path)
                 base_task_count = merged_stats['total_train_tasks']
                 
-                # Get the actual task paths from the manifest
-                merged_task_paths = get_merged_task_paths(merged_path)
+                # Get the actual task paths AND task_uids from the manifest
+                # task_uids solve the AGI-1/AGI-2 filename collision problem
+                # (same filename can exist in both with different content)
+                merged_task_paths, merged_task_uids = get_merged_task_info(merged_path)
                 print(f"  [Merged Training] Using {base_task_count} tasks from merged set")
-                print(f"  [Merged Training] Loaded {len(merged_task_paths)} task paths from manifest")
+                print(f"  [Merged Training] Loaded {len(merged_task_paths)} task paths with unique UIDs")
             else:
                 print(f"  [WARNING] use_merged_training=True but manifest not found, falling back to train_path")
                 base_task_count = 400
@@ -707,6 +710,7 @@ def create_train_loader(
         max_tasks=max_tasks,  # Limit tasks for testing (stratified sampling)
         stratified_seed=stratified_seed,  # Seed for reproducible stratified sampling
         task_paths=merged_task_paths,  # Explicit task paths for merged training (Jan 2026)
+        task_uids=merged_task_uids,  # Path->task_uid mapping (solves AGI-1/AGI-2 collisions)
     )
     
     # ADAPTIVE BATCH SIZE: Use override if provided (for LOO memory management)

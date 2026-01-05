@@ -317,7 +317,7 @@ data:
   #
   # Key feature: CPU generates epoch e+1 while GPU trains epoch e (async prefetch)
   # ===========================================================================
-  cache_samples_mode: static     # 'static' | 'rolling' (use rolling for diversity)
+  cache_samples_mode: rolling    # 'static' | 'rolling' - use rolling for diversity
   
   rolling_cache:
     pool_size: 128000            # Total samples in augmented pool

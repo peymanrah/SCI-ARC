@@ -98,6 +98,36 @@ def get_merged_task_paths(
     return [record.path for record in records]
 
 
+def get_merged_task_info(
+    merged_training_path: str,
+    manifest_name: str = "merged_train_manifest.jsonl",
+) -> Tuple[List[str], Dict[str, str]]:
+    """
+    Get list of task file paths and a mapping from path to unique task_uid.
+    
+    This function solves the task ID collision problem where AGI-1 and AGI-2
+    can have tasks with the same filename (e.g., 'f0f8a26d.json' exists in both).
+    The task_uid includes the source prefix (e.g., 'agi1_train:f0f8a26d') making
+    it globally unique.
+    
+    Args:
+        merged_training_path: Path to the merged training directory
+        manifest_name: Name of the manifest file (default: merged_train_manifest.jsonl)
+        
+    Returns:
+        Tuple of:
+            - List of absolute paths to task JSON files
+            - Dict mapping file path -> task_uid for unique identification
+    """
+    manifest_path = Path(merged_training_path) / manifest_name
+    records = load_manifest(str(manifest_path))
+    
+    paths = [record.path for record in records]
+    path_to_uid = {record.path: record.task_uid for record in records}
+    
+    return paths, path_to_uid
+
+
 def get_merged_dev_paths(merged_training_path: str) -> List[str]:
     """
     Get list of task file paths from the merged dev manifest.

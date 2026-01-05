@@ -678,6 +678,15 @@ class RollingCacheDataset:
         This triggers async prefetch for the next epoch.
         """
         self.cache.prefetch_next_epoch(epoch + 1)
+    
+    @property
+    def tasks(self) -> List[Dict[str, Any]]:
+        """Forward tasks attribute from underlying cache.
+        
+        This property is needed for task tracking in train_rlan.py which
+        looks for train_loader.dataset.tasks to count unique task IDs.
+        """
+        return self.cache.tasks
 
 
 # ===========================================================================

@@ -486,6 +486,7 @@ class ARCDataset(Dataset):
         max_tasks: int = None,  # NEW: Limit number of tasks loaded (for testing)
         stratified_seed: int = 42,  # NEW: Seed for deterministic stratified sampling
         task_paths: list = None,  # NEW: Explicit list of task file paths (for merged training)
+        task_uids: dict = None,  # NEW: Path->task_uid mapping (solves AGI-1/AGI-2 collisions)
     ):
         """
         Initialize ARCDataset.
@@ -518,9 +519,15 @@ class ARCDataset(Dataset):
                         Used for merged training (ARC-AGI-1 + ARC-AGI-2) where tasks
                         come from a manifest file rather than a single directory.
                         Default: None (use data_path for discovery)
+            task_uids: Optional dict mapping task file path -> unique task_uid.
+                       Used for merged training to avoid ID collisions between AGI-1
+                       and AGI-2 (same filename can exist in both with different content).
+                       When provided, uses task_uid as task_id instead of filename stem.
+                       Default: None (use filename stem as task_id)
         """
         self.data_path = Path(data_path)
         self.task_paths = task_paths  # Explicit task paths (for merged training)
+        self.task_uids = task_uids if task_uids else {}  # Path -> unique task_uid mapping
         self.max_size = max_size
         self.augment = augment
         self.color_permutation = color_permutation
@@ -594,11 +601,15 @@ class ARCDataset(Dataset):
             print(f"  [Merged Training] Loading {len(self.task_paths)} tasks from explicit paths...")
             for task_path in self.task_paths:
                 try:
+                    task_path_str = str(task_path)
                     task_path = Path(task_path)
                     with open(task_path, 'r') as f:
                         task_data = json.load(f)
+                    # Use task_uid if available (solves AGI-1/AGI-2 filename collisions)
+                    # Otherwise fall back to filename stem for backward compatibility
+                    task_id = self.task_uids.get(task_path_str, task_path.stem)
                     tasks.append({
-                        'task_id': task_path.stem,
+                        'task_id': task_id,
                         'train': task_data.get('train', []),
                         'test': task_data.get('test', [])
                     })
