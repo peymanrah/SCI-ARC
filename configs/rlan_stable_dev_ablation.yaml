@@ -11,7 +11,7 @@
 #
 # Key Design Principles:
 # 1. DISABLE all memory/meta components until base solver generalizes
-# 2. REDUCE solver over-iteration (logs show earlier step always best)
+# 2. USE best-step selection to handle solver over-iteration automatically
 # 3. KEEP RLAN novelty: clue-anchored relative coordinate reasoning (DSC + MSRE + Context)
 # 4. ENABLE new ablation modules: ART (Anchor Robustness Training) + ARPS (Anchor-Relative Program Search)
 #
@@ -31,8 +31,10 @@ model:
   num_classes: 10
   max_grid_size: 30
 
-  # REDUCED solver steps to prevent over-iteration (logs showed step 4 was best, not step 6)
-  num_solver_steps: 4            # was 7 in merged config
+  # Solver steps: 6 is a good balance between capacity and efficiency
+  # With use_best_step_selection=true, over-iteration is mitigated automatically
+  # (logs showed earlier steps often best, but best-step selection handles this)
+  num_solver_steps: 6            # BALANCED - 6 steps with best-step selection
   use_best_step_selection: true  # KEEP ON - critical for stopping at best step
 
   # CORE RLAN THEORY MODULES (keep these - they are the novelty)

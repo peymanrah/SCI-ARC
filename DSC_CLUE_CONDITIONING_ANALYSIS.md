@@ -146,13 +146,13 @@ Should prevent centroid collapse. If still observing spread < 0.5, consider:
 | Config | num_solver_steps | Purpose |
 |--------|-----------------|---------|
 | `rlan_stable_dev.yaml` | 7 | Production training |
-| `rlan_stable_dev_ablation.yaml` | 4 | Ablation study (reduced to prevent over-iteration) |
+| `rlan_stable_dev_ablation.yaml` | 6 | Ablation study (balanced with best-step selection) |
 | `rlan_stable_prod.yaml` | 5 | Memory-optimized production |
 
 ```yaml
 # rlan_stable_dev_ablation.yaml (ABLATION)
 model:
-  num_solver_steps: 4  # REDUCED - logs showed step 4 was best, not step 6
+  num_solver_steps: 6  # BALANCED - with best-step selection mitigates over-iteration
 
 # rlan_stable_dev.yaml (PRODUCTION)  
 model:
