@@ -154,6 +154,8 @@ class DynamicSaliencyController(nn.Module):
         
         # Add spatial diversity: use sinusoidal position encoding over query index
         # This gives each query a unique "identity" that helps them specialize
+        # INCREASED SCALE (Jan 2026): 0.1 was too small compared to xavier init (~0.05 std)
+        # New scale 0.3 makes the spatial bias more prominent at training start
         with torch.no_grad():
             for k in range(max_clues):
                 # Encode query index as phase offset in sinusoidal encoding
@@ -162,9 +164,9 @@ class DynamicSaliencyController(nn.Module):
                 for d in range(hidden_dim):
                     freq = d / hidden_dim
                     if d % 2 == 0:
-                        self.clue_queries.data[k, d] += 0.1 * math.sin(phase + freq * 10)
+                        self.clue_queries.data[k, d] += 0.3 * math.sin(phase + freq * 10)
                     else:
-                        self.clue_queries.data[k, d] += 0.1 * math.cos(phase + freq * 10)
+                        self.clue_queries.data[k, d] += 0.3 * math.cos(phase + freq * 10)
         
         # Query projection for attention
         self.query_proj = nn.Linear(hidden_dim, hidden_dim)

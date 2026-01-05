@@ -154,9 +154,9 @@ training:
   warmup_epochs: 0
   min_lr: 5.0e-4
 
-  # Temperature for DSC
-  temperature_start: 1.0
-  temperature_end: 0.5
+  # Temperature for DSC - FASTER ANNEALING for sharper attention
+  temperature_start: 0.8           # was 1.0 - start sharper
+  temperature_end: 0.3             # was 0.5 - end sharper
 
   # Loss configuration
   loss_mode: "focal_weighted"
@@ -172,7 +172,7 @@ training:
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.0
   lambda_act: 0.0
-  lambda_centroid_diversity: 0.8  # INCREASED from 0.3 - critical to prevent clue collapse
+  lambda_centroid_diversity: 1.2  # INCREASED from 0.8 - critical to prevent clue collapse
 
   # Clue regularization - reduced to allow task-adaptive clue counts
   min_clues: 1.0

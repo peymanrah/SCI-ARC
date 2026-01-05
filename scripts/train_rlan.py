@@ -3052,6 +3052,17 @@ def train_epoch(
                     centroid_mean = centroids.mean(dim=1, keepdim=True)  # (B, 1, 2)
                     spread = ((centroids - centroid_mean) ** 2).sum(dim=-1).sqrt().mean()
                     epoch_diagnostics['centroid_spread'] = spread.item()
+                    
+                    # DIAGNOSTIC (Jan 2026): Log centroid details at batch 0 to debug collapse
+                    if batch_idx == 0:
+                        # Per-clue centroid positions (first sample in batch)
+                        c0 = centroids[0]  # (K, 2)
+                        centroid_strs = [f"({c0[k,0].item():.1f},{c0[k,1].item():.1f})" for k in range(min(7, c0.shape[0]))]
+                        print(f"    [DSC Centroids b0] {' '.join(centroid_strs)}")
+                        # Pairwise distances between centroids
+                        pairwise = torch.cdist(c0.unsqueeze(0), c0.unsqueeze(0)).squeeze(0)
+                        min_dist = pairwise[~torch.eye(c0.shape[0], dtype=bool, device=pairwise.device)].min().item() if c0.shape[0] > 1 else 0
+                        print(f"    [DSC Centroids b0] spread={spread.item():.2f}, min_pairwise_dist={min_dist:.2f}")
         
         # ================================================================
         # PER-SAMPLE ACCURACY TRACKING (every batch, not just batch_idx==0)
