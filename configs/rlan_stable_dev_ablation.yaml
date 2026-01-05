@@ -172,7 +172,7 @@ training:
   lambda_curriculum: 0.0
   lambda_deep_supervision: 0.0
   lambda_act: 0.0
-  lambda_centroid_diversity: 0.3
+  lambda_centroid_diversity: 0.8  # INCREASED from 0.3 - critical to prevent clue collapse
 
   # Clue regularization - reduced to allow task-adaptive clue counts
   min_clues: 1.0
@@ -224,21 +224,21 @@ training:
     enabled: false
 
   # ===========================================================================
-  # SIMPLIFIED PHASED TRAINING - Single Phase
+  # SIMPLIFIED PHASED TRAINING - Single Phase with Augmentation
   # ===========================================================================
   phased_training:
     enabled: true
 
-    # Phase A: Full training duration (no phase transitions)
+    # Phase A: Full training duration with augmentation for generalization
     phase_a:
       end_epoch: 80              # Run entire training in Phase A (matches max_epochs)
       batch_size: 40
       augmentation:
-        rotation: false          # NO augmentation initially
-        flip: false
-        transpose: false
-        color_permutation: false
-        translational: false
+        rotation: true           # ENABLED - dihedral group for invariance
+        flip: true               # ENABLED - dihedral group for invariance
+        transpose: true          # ENABLED - dihedral group for invariance
+        color_permutation: true  # ENABLED - color invariance
+        translational: true      # ENABLED - translation invariance
       disable_hyperlora: true
       disable_loo: true
       disable_equivariance: false  # Allow output equiv
@@ -332,12 +332,19 @@ data:
     anti_repeat_window: 4        # Epochs before augmentation can repeat
     prefetch_workers: 8          # CPU workers for async generation (48 vCPU / 6)
     coverage_scheduling: true    # Balance dihedral/color/translation coverage
+    force_augmentation: true     # FORCE augmentation even when global is off
     seed: 42                     # Base seed for reproducibility
 
-  # NO global augmentation (phase controls it)
+  # AUGMENTATION ENABLED (Jan 2026 fix - was disabled causing overfitting)
+  # Rolling cache needs augmentation to generate diverse samples!
   augmentation:
-    enabled: false
-    rotation: false
+    enabled: true              # ENABLED - required for generalization
+    rotation: true             # Dihedral group
+    flip: true                 # Dihedral group
+    transpose: true            # Dihedral group
+    color_permutation: true    # Color invariance
+    color_permutation_prob: 0.3
+    translational: true        # Translation invariance
     flip: false
     transpose: false
     color_permutation: false
