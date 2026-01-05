@@ -499,7 +499,8 @@ class ProgramProposalHead(nn.Module):
         self.token_embed = nn.Embedding(num_primitives + 1, hidden_dim)  # +1 for start token
         
         # Positional embedding for sequence
-        self.pos_embed = nn.Embedding(max_length, hidden_dim)
+        # Note: +2 for start token + safety margin (sequence grows to max_length+1 during autoregressive decode)
+        self.pos_embed = nn.Embedding(max_length + 2, hidden_dim)
         
         # Transformer decoder layers
         decoder_layer = nn.TransformerDecoderLayer(
@@ -545,11 +546,23 @@ class ProgramProposalHead(nn.Module):
         
         L = partial_program.shape[1]
         
+        # SAFETY: Clamp sequence length to max_length+1 to prevent position index overflow
+        # This can happen if programs exceed expected length during training
+        max_pos = self.max_length + 1
+        if L > max_pos:
+            partial_program = partial_program[:, -max_pos:]  # Keep last max_pos tokens
+            L = max_pos
+        
+        # SAFETY: Clamp token indices to valid range to prevent embedding index overflow
+        partial_program = partial_program.clamp(0, self.num_primitives)
+        
         # Embed tokens
         token_emb = self.token_embed(partial_program)  # (B, L, D)
         
         # Add positional embeddings
+        # SAFETY: Clamp positions to valid embedding range
         positions = torch.arange(L, device=device).unsqueeze(0).expand(B, -1)
+        positions = positions.clamp(0, self.pos_embed.num_embeddings - 1)
         pos_emb = self.pos_embed(positions)
         token_emb = token_emb + pos_emb
         
@@ -630,6 +643,10 @@ class ProgramProposalHead(nn.Module):
             if partial is None:
                 partial = torch.full((B, 1), self.num_primitives, device=device)
             partial = torch.cat([partial, token.unsqueeze(-1)], dim=-1)
+            
+            # SAFETY: Stop if partial exceeds max_length to prevent index overflow
+            if partial.shape[1] >= self.max_length + 1:
+                break
             
             # Check for END tokens (in actual impl, would track per-batch)
         
@@ -880,17 +897,26 @@ class ARPS(nn.Module):
         colors_cpu = colors.detach().cpu()
         offsets_cpu = offsets.detach().cpu()
         
-        for i in range(len(tokens_cpu)):
-            token_idx = tokens_cpu[i].item()
-            if token_idx >= len(self.idx_to_primitive):
+        # SAFETY: Limit loop iterations to prevent runaway
+        max_iterations = min(len(tokens_cpu), self.config.max_program_length)
+        
+        for i in range(max_iterations):
+            token_idx = int(tokens_cpu[i].item())
+            
+            # SAFETY: Skip invalid token indices
+            if token_idx < 0 or token_idx >= len(self.idx_to_primitive):
                 continue
             
             primitive_name = self.idx_to_primitive[token_idx]
             if primitive_name == "end":
                 break
             
+            # SAFETY: Clamp color to valid range [0, 9]
+            color_val = int(colors_cpu[i].item())
+            color_val = max(0, min(9, color_val))
+            
             args = {
-                "color": int(colors_cpu[i].item()),
+                "color": color_val,
                 "offset": (int(offsets_cpu[i, 0].item()), int(offsets_cpu[i, 1].item())),
             }
             program.append((primitive_name, args))
@@ -1094,6 +1120,14 @@ class ARPS(nn.Module):
             if not tokens:
                 continue
             
+            # SAFETY: Truncate programs to max_length to prevent index overflow
+            # Programs longer than max_length-1 (+ END token) would cause pos_embed OOB
+            max_tokens = self.config.max_program_length
+            if len(tokens) > max_tokens:
+                tokens = tokens[:max_tokens]
+                colors = colors[:max_tokens]
+                offsets = offsets[:max_tokens]
+            
             # Convert to tensors
             target_tokens = torch.tensor(tokens, device=device)
             target_colors = torch.tensor(colors, device=device)
@@ -1103,7 +1137,9 @@ class ARPS(nn.Module):
             partial = None
             step_loss = 0.0
             
-            for t in range(len(tokens)):
+            # SAFETY: Limit iterations to prevent sequence overflow
+            max_steps = min(len(tokens), self.config.max_program_length)
+            for t in range(max_steps):
                 token_logits, color_logits, offset_pred = self.proposal_head(
                     context[b:b+1], partial
                 )
@@ -1112,7 +1148,7 @@ class ARPS(nn.Module):
                 step_loss += F.cross_entropy(token_logits, target_tokens[t:t+1])
                 
                 # Argument losses (only for non-END tokens)
-                if t < len(tokens) - 1:
+                if t < max_steps - 1:
                     step_loss += F.cross_entropy(color_logits, target_colors[t:t+1]) * 0.5
                     step_loss += F.mse_loss(offset_pred, target_offsets[t:t+1]) * 0.5
                 
@@ -1120,8 +1156,12 @@ class ARPS(nn.Module):
                 if partial is None:
                     partial = torch.full((1, 1), len(self.primitives), device=device)
                 partial = torch.cat([partial, target_tokens[t:t+1].unsqueeze(-1)], dim=-1)
+                
+                # SAFETY: Stop early if partial would exceed position embedding size
+                if partial.shape[1] >= self.config.max_program_length:
+                    break
             
-            total_loss += step_loss / len(tokens)
+            total_loss += step_loss / max(max_steps, 1)
             num_valid += 1
         
         if num_valid == 0:
