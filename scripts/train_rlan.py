@@ -4875,10 +4875,15 @@ def load_checkpoint(
         state_dict = remapped_state_dict
         print(f"  [Checkpoint Remap] Remapped {len(remapped_state_dict)} keys with 'base_rlan.' prefix")
     
+    # Track if we did remapping (needs strict=False because primitive_head won't be in old checkpoint)
+    did_remap = model_is_wrapper and checkpoint_is_plain and not checkpoint_is_wrapper
+    
     # Load model weights
-    # Use strict=False when reset_optimizer=True (warm-starting from old checkpoint)
+    # Use strict=False when:
+    #   1. reset_optimizer=True (warm-starting from old checkpoint)
+    #   2. We remapped keys (plain RLAN -> ProgramGuidedRLAN, missing primitive_head)
     # This allows loading weights even if new parameters were added to the model
-    if reset_optimizer:
+    if reset_optimizer or did_remap:
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
             print(f"  [Warm-start] New parameters (randomly initialized): {len(missing)}")
