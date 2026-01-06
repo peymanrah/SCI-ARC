@@ -635,14 +635,22 @@ class ProgramGuidedRLAN(nn.Module):
             # Apply curriculum: gradually increase primitive loss weight
             weight = self._get_primitive_weight()
             
-            if weight > 0 and primitive_targets.get('has_program', torch.tensor(False)).any():
+            has_program = primitive_targets.get('has_program', False)
+            # Handle both bool and tensor types
+            has_any_program = has_program.any() if hasattr(has_program, 'any') else bool(has_program)
+            
+            if weight > 0 and has_any_program:
+                # Ensure has_program is a tensor for mask computation
+                if not isinstance(has_program, torch.Tensor):
+                    has_program = torch.tensor([has_program], device=total_loss.device)
+                
                 # Prepare targets (use first step of trace)
                 prim_targets = {
                     'primitive_ids': primitive_targets['primitive_ids'][:, 0],  # First step
                     'param_discrete': primitive_targets['param_discrete'][:, 0],
                     'param_continuous': primitive_targets['param_continuous'][:, 0],
                 }
-                mask = primitive_targets['has_program'].float()
+                mask = has_program.float()
                 
                 prim_loss_dict = self.primitive_loss_fn(
                     primitive_outputs, prim_targets, mask
@@ -682,12 +690,18 @@ class ProgramGuidedRLAN(nn.Module):
                 'primitive_weight': torch.tensor(weight, device=outputs['logits'].device),
             }
 
-        has_program = primitive_targets.get('has_program', torch.tensor(False, device=outputs['logits'].device))
-        if not has_program.any():
+        has_program = primitive_targets.get('has_program', False)
+        # Handle both bool and tensor types
+        has_any_program = has_program.any() if hasattr(has_program, 'any') else bool(has_program)
+        if not has_any_program:
             return {
                 'primitive_loss': torch.tensor(0.0, device=outputs['logits'].device),
                 'primitive_weight': torch.tensor(weight, device=outputs['logits'].device),
             }
+        
+        # Ensure has_program is a tensor for mask computation
+        if not isinstance(has_program, torch.Tensor):
+            has_program = torch.tensor([has_program], device=outputs['logits'].device)
 
         prim_targets = {
             'primitive_ids': primitive_targets['primitive_ids'][:, 0],
