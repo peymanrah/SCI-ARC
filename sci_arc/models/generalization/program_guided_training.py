@@ -740,6 +740,33 @@ class ProgramGuidedRLAN(nn.Module):
     def load_program_cache(self, path: str):
         """Load programs from cache file."""
         self.label_generator.cache = ProgramCache(path)
+    
+    def count_parameters(self) -> Dict[str, int]:
+        """Count parameters, delegating to base RLAN and adding PrimitiveHead.
+        
+        Returns:
+            Dict with parameter counts by module
+        """
+        # Get base RLAN counts
+        if hasattr(self.base_rlan, 'count_parameters'):
+            counts = self.base_rlan.count_parameters()
+        else:
+            # Fallback: compute manually
+            counts = {
+                'total': sum(p.numel() for p in self.base_rlan.parameters()),
+                'trainable': sum(p.numel() for p in self.base_rlan.parameters() if p.requires_grad),
+            }
+        
+        # Add PrimitiveHead counts
+        if self.primitive_head is not None:
+            prim_total = sum(p.numel() for p in self.primitive_head.parameters())
+            prim_trainable = sum(p.numel() for p in self.primitive_head.parameters() if p.requires_grad)
+            counts['primitive_head'] = prim_total
+            counts['primitive_head_trainable'] = prim_trainable
+            counts['total'] = counts.get('total', 0) + prim_total
+            counts['trainable'] = counts.get('trainable', 0) + prim_trainable
+        
+        return counts
 
 
 def create_program_guided_rlan(
