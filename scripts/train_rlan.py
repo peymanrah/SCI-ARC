@@ -4852,11 +4852,34 @@ def load_checkpoint(
     """
     checkpoint = torch.load(path, map_location='cpu')
     
+    # Get the state dict from checkpoint
+    state_dict = checkpoint['model_state_dict']
+    
+    # =============================================================
+    # HANDLE ProgramGuidedRLAN WRAPPER (Jan 2026)
+    # =============================================================
+    # If loading a plain RLAN checkpoint into ProgramGuidedRLAN,
+    # we need to remap keys: "encoder.*" -> "base_rlan.encoder.*"
+    # =============================================================
+    model_is_wrapper = hasattr(model, 'base_rlan')
+    checkpoint_is_plain = any(k.startswith('encoder.') or k.startswith('dsc.') for k in state_dict.keys())
+    checkpoint_is_wrapper = any(k.startswith('base_rlan.') for k in state_dict.keys())
+    
+    if model_is_wrapper and checkpoint_is_plain and not checkpoint_is_wrapper:
+        print(f"  [Checkpoint Remap] Converting plain RLAN checkpoint to ProgramGuidedRLAN format...")
+        remapped_state_dict = {}
+        for key, value in state_dict.items():
+            # Add base_rlan. prefix to all base model keys
+            new_key = f"base_rlan.{key}"
+            remapped_state_dict[new_key] = value
+        state_dict = remapped_state_dict
+        print(f"  [Checkpoint Remap] Remapped {len(remapped_state_dict)} keys with 'base_rlan.' prefix")
+    
     # Load model weights
     # Use strict=False when reset_optimizer=True (warm-starting from old checkpoint)
     # This allows loading weights even if new parameters were added to the model
     if reset_optimizer:
-        missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
             print(f"  [Warm-start] New parameters (randomly initialized): {len(missing)}")
             for k in missing[:10]:  # Show first 10
@@ -4868,7 +4891,7 @@ def load_checkpoint(
             for k in unexpected[:5]:
                 print(f"    - {k}")
     else:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(state_dict)
     
     # Restore HPM dynamic buffers using canonical load_state_dict API (P1 patch)
     # Backward compatible: handles both old format and new state_dict format
