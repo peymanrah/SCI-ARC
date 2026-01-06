@@ -792,7 +792,6 @@ class ProgramGuidedRLAN(nn.Module):
             # Fallback: compute manually
             counts = {
                 'total': sum(p.numel() for p in self.base_rlan.parameters()),
-                'trainable': sum(p.numel() for p in self.base_rlan.parameters() if p.requires_grad),
             }
         
         # Add PrimitiveHead counts
@@ -802,7 +801,9 @@ class ProgramGuidedRLAN(nn.Module):
             counts['primitive_head'] = prim_total
             counts['primitive_head_trainable'] = prim_trainable
             counts['total'] = counts.get('total', 0) + prim_total
-            counts['trainable'] = counts.get('trainable', 0) + prim_trainable
+        
+        # Compute total trainable across entire wrapper (base_rlan + primitive_head)
+        counts['trainable'] = sum(p.numel() for p in self.parameters() if p.requires_grad)
         
         return counts
 

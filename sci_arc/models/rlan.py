@@ -1536,6 +1536,7 @@ class RLAN(nn.Module):
             "hpm": sum(p.numel() for p in self.hpm.parameters()) if self.hpm else 0,
         }
         counts["total"] = sum(counts.values())
+        counts["trainable"] = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return counts
     
     # =========================================================================
