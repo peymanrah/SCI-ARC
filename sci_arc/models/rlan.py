@@ -86,7 +86,7 @@ class RLANConfig:
     # DSC parameters
     max_clues: int = 5
     dsc_num_heads: int = 4
-    dsc_use_complexity_signals: bool = False  # Jan 2026: Task-aware stop prediction (set True for new training)
+    dsc_use_complexity_signals: bool = True  # Jan 2026: Task-aware stop prediction (ENABLED by default)
     
     # MSRE parameters
     msre_encoding_dim: int = 32

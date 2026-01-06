@@ -46,6 +46,7 @@ model:
   max_clues: 7
   num_predicates: 32
   dsc_num_heads: 4
+  dsc_use_complexity_signals: true  # Jan 2026: Task-aware stop prediction
 
   # MSRE parameters
   msre_encoding_dim: 32

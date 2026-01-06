@@ -89,6 +89,7 @@ model:
   use_best_step_selection: false
   
   dsc_num_heads: 4
+  dsc_use_complexity_signals: true  # Jan 2026: Task-aware stop prediction
   lcr_num_heads: 4     # Not used
   
   msre_encoding_dim: 32
