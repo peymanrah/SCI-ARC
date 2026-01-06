@@ -110,8 +110,8 @@ model:
   hpm_use_concept_bank: false         # Domain knowledge (optional)
   
   # Dynamic banks
-  hpm_use_procedural_bank: true       # HyperLoRA codes (requires HyperLoRA enabled)
-  hpm_use_instance_bank: true         # ContextEncoder cache (retrieval-augmented reasoning)
+  hpm_use_procedural_bank: false      # DISABLED - requires HyperLoRA
+  hpm_use_instance_bank: false        # DISABLED - HPM is off
   
   # HPM Buffer Storage
   hpm_buffer_path: "checkpoints/rlan_stable_merged/hpm"  # Merged config path
