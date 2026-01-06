@@ -55,6 +55,12 @@ from sci_arc.models.rlan_modules.loo_training import (
     OutputEquivarianceLoss,  # Jan 2026: Output-level equiv for TTA consensus
     GroupMarginalizedNLLLoss,  # Jan 2026: Group-marginalized NLL for principled generalization
 )
+# Jan 2026: Program-guided training with NS-TEPS integration
+from sci_arc.models.generalization.program_guided_training import (
+    ProgramGuidedRLAN, ProgramGuidedConfig, create_program_guided_rlan,
+    PseudoLabelGenerator,  # P0 fix: For primitive loss targets
+)
+from sci_arc.models.generalization.primitive_head import PrimitiveHeadConfig
 # Jan 2026 Ablation Study: Anchor Robustness Training (ART) + Anchor-Relative Program Search (ARPS)
 from sci_arc.models.rlan_modules import (
     AnchorRobustnessTraining, ARTConfig, create_art_from_config,
@@ -1041,6 +1047,74 @@ def create_model(config: dict) -> RLAN:
     
     model = RLAN(config=rlan_config)
     
+    # =========================================================================
+    # PROGRAM-GUIDED TRAINING WRAPPER (Jan 2026)
+    # =========================================================================
+    # If program_guided.enabled is true in config, wrap RLAN with ProgramGuidedRLAN.
+    # This adds PrimitiveHead for NS-TEPS guided search and joint training.
+    # =========================================================================
+    pg_config = config.get('program_guided', {})
+    if pg_config.get('enabled', False):
+        print("\n" + "="*60)
+        print("PROGRAM-GUIDED TRAINING ENABLED")
+        print("="*60)
+        
+        # Build PrimitiveHeadConfig from YAML
+        ph_cfg = pg_config.get('primitive_head', {})
+        primitive_head_config = PrimitiveHeadConfig(
+            enabled=ph_cfg.get('enabled', True),
+            num_primitives=ph_cfg.get('num_primitives', 17),
+            max_objects=ph_cfg.get('max_objects', 20),
+            num_params=ph_cfg.get('num_params', 8),
+            param_vocab_size=ph_cfg.get('param_vocab_size', 32),
+            hidden_dim=ph_cfg.get('hidden_dim', model_config['hidden_dim']),
+            num_heads=ph_cfg.get('num_heads', 4),
+            dropout=ph_cfg.get('dropout', 0.1),
+            primitive_loss_weight=ph_cfg.get('primitive_loss_weight', 0.5),
+            object_loss_weight=ph_cfg.get('object_loss_weight', 0.3),
+            param_loss_weight=ph_cfg.get('param_loss_weight', 0.2),
+            top_k_primitives=ph_cfg.get('top_k_primitives', 5),
+            temperature=ph_cfg.get('temperature', 1.0),
+        )
+        
+        # Build ProgramGuidedConfig
+        from sci_arc.models.generalization.ns_teps import NSTEPSConfig
+        nsteps_cfg = pg_config.get('nsteps', {})
+        nsteps_config = NSTEPSConfig(
+            enabled=nsteps_cfg.get('enabled', True),
+            max_search_steps=nsteps_cfg.get('max_search_steps', 500),
+            timeout_seconds=nsteps_cfg.get('timeout_seconds', 2.0),
+            max_trace_length=nsteps_cfg.get('max_trace_length', 3),
+            min_object_size=nsteps_cfg.get('min_object_size', 1),
+            max_objects=nsteps_cfg.get('max_objects', 20),
+            sample_count=nsteps_cfg.get('sample_count', 200),
+            match_threshold=nsteps_cfg.get('match_threshold', 0.95),
+        )
+        
+        program_guided_config = ProgramGuidedConfig(
+            enabled=True,
+            primitive_head=primitive_head_config,
+            primitive_loss_weight=pg_config.get('primitive_loss_weight', 0.3),
+            consistency_loss_weight=pg_config.get('consistency_loss_weight', 0.1),
+            use_cached_programs=pg_config.get('use_cached_programs', True),
+            cache_path=pg_config.get('cache_path', './cache/program_cache.json'),
+            online_mining=pg_config.get('online_mining', False),
+            mining_frequency=pg_config.get('mining_frequency', 100),
+            min_confidence=pg_config.get('min_confidence', 0.95),
+            warmup_epochs=pg_config.get('warmup_epochs', 3),
+            curriculum_epochs=pg_config.get('curriculum_epochs', 5),
+            nsteps_config=nsteps_config,
+        )
+        
+        # Wrap RLAN with ProgramGuidedRLAN
+        model = create_program_guided_rlan(model, program_guided_config)
+        
+        print(f"  PrimitiveHead: {primitive_head_config.num_primitives} primitives")
+        print(f"  Primitive loss weight: {program_guided_config.primitive_loss_weight}")
+        print(f"  Online mining: {program_guided_config.online_mining}")
+        print(f"  Warmup epochs: {program_guided_config.warmup_epochs}")
+        print("="*60 + "\n")
+    
     return model
 
 
@@ -1104,13 +1178,15 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     dsc_lr_mult = train_config.get('dsc_lr_multiplier', 10.0)
     msre_lr_mult = train_config.get('msre_lr_multiplier', 10.0)
     hyperlora_lr_mult = train_config.get('hyperlora_lr_multiplier', 10.0)  # HyperLoRA often needs higher LR
+    primitive_head_lr_mult = train_config.get('primitive_head_lr_multiplier', 2.0)  # PrimitiveHead for program-guided training
     
     # Separate parameters into groups:
     # 1. DSC parameters (higher LR)
     # 2. MSRE parameters (higher LR)
     # 3. HyperLoRA parameters (higher LR - critical for meta-learning)
-    # 4. Other parameters with decay
-    # 5. Other parameters without decay (bias, norm, embedding)
+    # 4. PrimitiveHead parameters (moderate LR boost)
+    # 5. Other parameters with decay
+    # 6. Other parameters without decay (bias, norm, embedding)
     
     dsc_decay_params = []
     dsc_no_decay_params = []
@@ -1118,6 +1194,8 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     msre_no_decay_params = []
     hyperlora_decay_params = []
     hyperlora_no_decay_params = []
+    primitive_head_decay_params = []
+    primitive_head_no_decay_params = []
     other_decay_params = []
     other_no_decay_params = []
     
@@ -1144,6 +1222,12 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
                 hyperlora_no_decay_params.append(param)
             else:
                 hyperlora_decay_params.append(param)
+        elif 'primitive_head' in name:
+            # PrimitiveHead params for program-guided training
+            if is_no_decay:
+                primitive_head_no_decay_params.append(param)
+            else:
+                primitive_head_decay_params.append(param)
         else:
             if is_no_decay:
                 other_no_decay_params.append(param)
@@ -1200,6 +1284,22 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
             'lr': base_lr * hyperlora_lr_mult,
             'name': 'hyperlora_no_decay'
         })
+
+    # PrimitiveHead params with moderate LR boost (program-guided training)
+    if primitive_head_decay_params:
+        param_groups.append({
+            'params': primitive_head_decay_params,
+            'weight_decay': weight_decay,
+            'lr': base_lr * primitive_head_lr_mult,
+            'name': 'primitive_head_decay'
+        })
+    if primitive_head_no_decay_params:
+        param_groups.append({
+            'params': primitive_head_no_decay_params,
+            'weight_decay': 0.0,
+            'lr': base_lr * primitive_head_lr_mult,
+            'name': 'primitive_head_no_decay'
+        })
     
     # Other params with base LR
     if other_decay_params:
@@ -1221,12 +1321,15 @@ def create_optimizer(model: nn.Module, config: dict, steps_per_epoch: int = None
     dsc_count = len(dsc_decay_params) + len(dsc_no_decay_params)
     msre_count = len(msre_decay_params) + len(msre_no_decay_params)
     hyperlora_count = len(hyperlora_decay_params) + len(hyperlora_no_decay_params)
+    primitive_head_count = len(primitive_head_decay_params) + len(primitive_head_no_decay_params)
     other_count = len(other_decay_params) + len(other_no_decay_params)
     print(f"  Optimizer param groups:")
     print(f"    DSC: {dsc_count} params @ {dsc_lr_mult}x LR ({base_lr * dsc_lr_mult:.2e})")
     print(f"    MSRE: {msre_count} params @ {msre_lr_mult}x LR ({base_lr * msre_lr_mult:.2e})")
     if hyperlora_count > 0:
         print(f"    HyperLoRA: {hyperlora_count} params @ {hyperlora_lr_mult}x LR ({base_lr * hyperlora_lr_mult:.2e}) [META-LEARNING]")
+    if primitive_head_count > 0:
+        print(f"    PrimitiveHead: {primitive_head_count} params @ {primitive_head_lr_mult}x LR ({base_lr * primitive_head_lr_mult:.2e}) [PROGRAM-GUIDED]")
     print(f"    Other: {other_count} params @ 1x LR ({base_lr:.2e})")
     
     # Get optimizer betas (TRM uses beta2=0.95 instead of default 0.999)
@@ -1470,6 +1573,8 @@ def train_epoch(
     arps_module: Optional[ARPS] = None,
     art_start_epoch: int = 0,     # ART active from epoch 0 by default (simple module)
     arps_start_epoch: int = 5,    # ARPS starts after initial learning (needs stable features)
+    # Jan 2026: Program-guided training with primitive loss
+    pseudo_label_generator: Optional[PseudoLabelGenerator] = None,
 ) -> Dict[str, float]:
     """
     Train for one epoch with augmentation diversity tracking.
@@ -1515,6 +1620,8 @@ def train_epoch(
         # Jan 2026 Ablation Study
         'art_consistency_loss': 0.0,  # ART anchor robustness loss
         'arps_imitation_loss': 0.0,   # ARPS program imitation loss
+        # Jan 2026: Program-guided training
+        'primitive_loss': 0.0,  # Primitive prediction loss from PrimitiveHead
     }
     num_batches = 0
     total_samples = 0  # Track total samples processed
@@ -2274,6 +2381,83 @@ def train_epoch(
                         if epoch_diagnostics.get('arps_failures', 0) <= 3:
                             print(f"[ARPS WARNING] Failed: {e}")
                 
+                # =========================================================================
+                # PROGRAM-GUIDED TRAINING: Primitive Loss (Jan 2026)
+                # =========================================================================
+                # Computes primitive classification loss from PrimitiveHead outputs.
+                # Uses pseudo-labels from NS-TEPS program mining.
+                # =========================================================================
+                primitive_loss_value = 0.0
+                primitive_phase_disabled = phase_disable_flags.get('primitive', False)
+                if (isinstance(model, ProgramGuidedRLAN) and 
+                    pseudo_label_generator is not None and
+                    not primitive_phase_disabled):
+                    try:
+                        # Update epoch for curriculum
+                        model.set_epoch(epoch)
+                        
+                        # Get primitive outputs from forward (already computed)
+                        primitive_outputs = outputs.get('primitive_outputs')
+                        
+                        if primitive_outputs is not None:
+                            # Get task_id from batch if available
+                            task_id = batch.get('task_id', None)
+                            if task_id is None:
+                                # Generate from input hash (stable identifier)
+                                import hashlib
+                                grid_bytes = train_inputs[0, 0].detach().cpu().numpy().tobytes()
+                                task_id = hashlib.sha256(grid_bytes).hexdigest()[:16]
+                            elif isinstance(task_id, list):
+                                task_id = task_id[0]  # Use first in batch
+
+                            # Compute input_hash for augmented/cache lookup
+                            import hashlib
+                            input_hash = hashlib.sha256(train_inputs[0, 0].detach().cpu().numpy().tobytes()).hexdigest()[:16]
+
+                            # Fast path: cache-only lookup (no numpy pair conversion)
+                            primitive_targets = pseudo_label_generator.get_cached_targets(
+                                task_id=str(task_id),
+                                input_hash=input_hash,
+                            )
+
+                            # Slow path: only if online mining is enabled
+                            if primitive_targets is None and getattr(pseudo_label_generator, 'nsteps', None) is not None:
+                                train_inputs_np = [train_inputs[0, i].detach().cpu().numpy() 
+                                                  for i in range(train_inputs.shape[1]) 
+                                                  if pair_mask is None or pair_mask[0, i].item()]
+                                train_outputs_np = [train_outputs[0, i].detach().cpu().numpy() 
+                                                   for i in range(train_outputs.shape[1])
+                                                   if pair_mask is None or pair_mask[0, i].item()]
+
+                                if len(train_inputs_np) > 0 and len(train_outputs_np) > 0:
+                                    primitive_targets = pseudo_label_generator.mine_program(
+                                        train_inputs_np, train_outputs_np, str(task_id)
+                                    )
+
+                            if primitive_targets is not None:
+                                prim_losses = model.compute_primitive_loss(
+                                    outputs=outputs,
+                                    primitive_targets=primitive_targets,
+                                )
+
+                                primitive_loss = prim_losses.get('primitive_loss', torch.tensor(0.0, device=outputs['logits'].device))
+                                if torch.is_tensor(primitive_loss) and primitive_loss > 0:
+                                    if scaler is not None:
+                                        scaler.scale(primitive_loss / grad_accumulation_steps).backward(retain_graph=True)
+                                    else:
+                                        (primitive_loss / grad_accumulation_steps).backward(retain_graph=True)
+
+                                    primitive_loss_value = primitive_loss.item()
+                                    losses['primitive_loss'] = primitive_loss_value
+                                    epoch_diagnostics['primitive_loss_sum'] = epoch_diagnostics.get('primitive_loss_sum', 0.0) + primitive_loss_value
+                                    epoch_diagnostics['primitive_batch_count'] = epoch_diagnostics.get('primitive_batch_count', 0) + 1
+                            else:
+                                epoch_diagnostics['primitive_no_program_count'] = epoch_diagnostics.get('primitive_no_program_count', 0) + 1
+                    except Exception as e:
+                        epoch_diagnostics['primitive_failures'] = epoch_diagnostics.get('primitive_failures', 0) + 1
+                        if epoch_diagnostics.get('primitive_failures', 0) <= 3:
+                            print(f"[PRIMITIVE WARNING] Failed: {e}")
+                
                 # Add HyperLoRA delta regularization loss if present (Dec 2025)
                 # This prevents LoRA delta norm from growing without bound
                 if 'lora_deltas' in outputs and outputs['lora_deltas'] is not None:
@@ -2637,6 +2821,68 @@ def train_epoch(
                     epoch_diagnostics['arps_failures'] = epoch_diagnostics.get('arps_failures', 0) + 1
                     if epoch_diagnostics.get('arps_failures', 0) <= 3:
                         print(f"[ARPS WARNING] Failed: {e}")
+            
+            # =========================================================================
+            # PROGRAM-GUIDED TRAINING: Primitive Loss (Jan 2026) - Non-AMP path
+            # =========================================================================
+            primitive_loss_value = 0.0
+            primitive_phase_disabled = phase_disable_flags.get('primitive', False)
+            if (isinstance(model, ProgramGuidedRLAN) and 
+                pseudo_label_generator is not None and
+                not primitive_phase_disabled):
+                try:
+                    model.set_epoch(epoch)
+                    primitive_outputs = outputs.get('primitive_outputs')
+                    
+                    if primitive_outputs is not None:
+                        task_id = batch.get('task_id', None)
+                        if task_id is None:
+                            import hashlib
+                            grid_bytes = train_inputs[0, 0].detach().cpu().numpy().tobytes()
+                            task_id = hashlib.sha256(grid_bytes).hexdigest()[:16]
+                        elif isinstance(task_id, list):
+                            task_id = task_id[0]
+
+                        import hashlib
+                        input_hash = hashlib.sha256(train_inputs[0, 0].detach().cpu().numpy().tobytes()).hexdigest()[:16]
+
+                        primitive_targets = pseudo_label_generator.get_cached_targets(
+                            task_id=str(task_id),
+                            input_hash=input_hash,
+                        )
+
+                        if primitive_targets is None and getattr(pseudo_label_generator, 'nsteps', None) is not None:
+                            train_inputs_np = [train_inputs[0, i].detach().cpu().numpy() 
+                                              for i in range(train_inputs.shape[1]) 
+                                              if pair_mask is None or pair_mask[0, i].item()]
+                            train_outputs_np = [train_outputs[0, i].detach().cpu().numpy() 
+                                               for i in range(train_outputs.shape[1])
+                                               if pair_mask is None or pair_mask[0, i].item()]
+                            
+                            if len(train_inputs_np) > 0 and len(train_outputs_np) > 0:
+                                primitive_targets = pseudo_label_generator.mine_program(
+                                    train_inputs_np, train_outputs_np, str(task_id)
+                                )
+
+                        if primitive_targets is not None:
+                            prim_losses = model.compute_primitive_loss(
+                                outputs=outputs,
+                                primitive_targets=primitive_targets,
+                            )
+
+                            primitive_loss = prim_losses.get('primitive_loss', torch.tensor(0.0, device=outputs['logits'].device))
+                            if torch.is_tensor(primitive_loss) and primitive_loss > 0:
+                                (primitive_loss / grad_accumulation_steps).backward(retain_graph=True)
+                                primitive_loss_value = primitive_loss.item()
+                                losses['primitive_loss'] = primitive_loss_value
+                                epoch_diagnostics['primitive_loss_sum'] = epoch_diagnostics.get('primitive_loss_sum', 0.0) + primitive_loss_value
+                                epoch_diagnostics['primitive_batch_count'] = epoch_diagnostics.get('primitive_batch_count', 0) + 1
+                        else:
+                            epoch_diagnostics['primitive_no_program_count'] = epoch_diagnostics.get('primitive_no_program_count', 0) + 1
+                except Exception as e:
+                    epoch_diagnostics['primitive_failures'] = epoch_diagnostics.get('primitive_failures', 0) + 1
+                    if epoch_diagnostics.get('primitive_failures', 0) <= 3:
+                        print(f"[PRIMITIVE WARNING] Failed: {e}")
             
             loss = losses['total_loss'] / grad_accumulation_steps
             
@@ -5537,6 +5783,31 @@ Config Overrides:
         print(f"ARPS (Anchor-Relative Program Search) enabled: {num_primitives} primitives, "
               f"imitation_weight={arps_config_yaml.get('imitation_weight', 0.1)}, start_epoch={arps_start_epoch}")
     
+    # =========================================================================
+    # PROGRAM-GUIDED TRAINING: PseudoLabelGenerator (Jan 2026)
+    # =========================================================================
+    # Creates training targets from NS-TEPS discovered programs. Required for
+    # primitive loss computation during training.
+    # =========================================================================
+    pseudo_label_generator = None
+    program_guided_config = None
+    pg_config = config.get('program_guided', {})
+    if pg_config.get('enabled', False) and isinstance(model, ProgramGuidedRLAN):
+        # Get the config from the wrapped model
+        program_guided_config = model.config
+        pseudo_label_generator = PseudoLabelGenerator(program_guided_config, device=str(device))
+        print(f"[PROGRAM-GUIDED] PseudoLabelGenerator initialized:")
+        print(f"  Online mining: {program_guided_config.online_mining}")
+        print(f"  Cache path: {program_guided_config.cache_path}")
+        print(f"  Warmup epochs: {program_guided_config.warmup_epochs}")
+        # Log cache stats for debugging
+        cache_size = len(pseudo_label_generator.cache)
+        if cache_size == 0 and not program_guided_config.online_mining:
+            print(f"  ⚠️  WARNING: Cache is empty and online_mining is disabled!")
+            print(f"      Primitive loss will be INACTIVE. Build cache first or enable online_mining.")
+        elif cache_size > 0:
+            print(f"  ✓ Cache loaded: {cache_size} programs available")
+    
     # STAGED META-LEARNING: Delay LOO/Equivariance to prevent early BG collapse
     # Each loss has its own start_epoch for fine-grained control
     # STAGGERED MODULE ACTIVATION to prevent memory spikes and gradient explosion
@@ -7266,6 +7537,8 @@ Config Overrides:
             arps_module=arps_module,
             art_start_epoch=art_start_epoch,
             arps_start_epoch=arps_start_epoch,
+            # Jan 2026: Program-guided training
+            pseudo_label_generator=pseudo_label_generator,
         )
 
         # ================================================================
@@ -7593,6 +7866,29 @@ Config Overrides:
                 print(f"    Programs: {arps_valid_programs} valid / {arps_search_attempts} attempts ({valid_rate:.1%} success)")
                 if valid_rate < 0.01:
                     print(f"    ⚠️ Very low program validity - ARPS may not be contributing signal")
+        
+        # Program-Guided Training / Primitive Loss stats - Jan 2026
+        pg_config_yaml = config.get('program_guided', {})
+        if pg_config_yaml.get('enabled', False):
+            diagnostics = train_losses.get('diagnostics', {})
+            prim_loss_sum = diagnostics.get('primitive_loss_sum', 0.0)
+            prim_batch_count = diagnostics.get('primitive_batch_count', 0)
+            prim_no_program = diagnostics.get('primitive_no_program_count', 0)
+            prim_failures = diagnostics.get('primitive_failures', 0)
+            prim_weight = pg_config_yaml.get('primitive_loss_weight', 0.3)
+            
+            avg_prim_loss = prim_loss_sum / prim_batch_count if prim_batch_count > 0 else 0.0
+            total_attempts = prim_batch_count + prim_no_program
+            cache_hit_rate = prim_batch_count / total_attempts if total_attempts > 0 else 0.0
+            
+            print(f"  Primitive Loss: {avg_prim_loss:.4f} (weight={prim_weight}, batches={prim_batch_count})")
+            print(f"    Cache hit rate: {cache_hit_rate:.1%} ({prim_batch_count}/{total_attempts} batches with programs)")
+            if prim_no_program > 0:
+                print(f"    ⚠️ {prim_no_program} batches had no cached program - primitive loss skipped")
+            if prim_failures > 0:
+                print(f"    ⚠️ {prim_failures} batches failed - check primitive target generation")
+            if prim_batch_count == 0 and epoch >= pg_config_yaml.get('warmup_epochs', 3):
+                print(f"    ⚠️ No primitive loss computed - check cache population or online_mining setting")
         
         # HPM (Hierarchical Primitive Memory) stats
         if config['model'].get('use_hpm', False) and hasattr(model, 'hpm_get_stats'):

@@ -132,6 +132,68 @@ model:
   hpm_solver_context_logit_clamp: 5.0
   hpm_solver_context_disable_on_instability: true
 
+# =============================================================
+# PROGRAM-GUIDED TRAINING (Jan 2026)
+# =============================================================
+# Joint training with NS-TEPS primitive prediction.
+# RLAN learns features useful for both pixel prediction AND program discovery.
+# At inference, PrimitiveHead provides search guidance to NS-TEPS.
+# =============================================================
+program_guided:
+  enabled: true  # Enable program-guided training with primitive loss
+  
+  # Primitive Head Architecture
+  primitive_head:
+    enabled: true
+    num_primitives: 17    # Must match NUM_PRIMITIVES in primitive_head.py
+    max_objects: 20       # Max objects per grid
+    num_params: 8         # Parameter slots per primitive
+    param_vocab_size: 32  # Discrete param vocabulary
+    hidden_dim: 256       # Match model.hidden_dim
+    num_heads: 4
+    dropout: 0.1
+    
+    # Loss weights (relative within primitive loss)
+    primitive_loss_weight: 0.5  # Primitive classification
+    object_loss_weight: 0.3     # Object selection
+    param_loss_weight: 0.2      # Parameter prediction
+    
+    # Inference settings
+    top_k_primitives: 5
+    temperature: 1.0
+  
+  # Loss Configuration
+  primitive_loss_weight: 0.3    # Weight relative to pixel loss
+  consistency_loss_weight: 0.1  # Program consistency regularization
+  
+  # Pseudo-label Cache (from NS-TEPS mined programs)
+  use_cached_programs: true     # Use pre-computed program cache
+  cache_path: "./cache/program_cache_merged_602.json"
+  
+  # Online mining configuration
+  # PROD NOTE: Set online_mining=true initially if cache doesn't exist.
+  # After first run, the cache will be populated and you can set to false.
+  # With 48 vCPUs, online mining adds ~2s overhead per batch but ensures
+  # primitive loss is never skipped due to missing cache entries.
+  online_mining: true   # PROD: Enable to build cache during first run
+  mining_frequency: 50  # Mine every 50 batches (balance between speed and coverage)
+  min_confidence: 0.95
+  
+  # Curriculum: warmup before primitive loss activates
+  warmup_epochs: 3        # Train pixel-only first
+  curriculum_epochs: 5    # Ramp up primitive weight over 5 epochs
+  
+  # NS-TEPS configuration (for online mining or inference)
+  nsteps:
+    enabled: true
+    max_search_steps: 500
+    timeout_seconds: 2.0
+    max_trace_length: 3
+    min_object_size: 1
+    max_objects: 20
+    sample_count: 200
+    match_threshold: 0.95
+
 training:
   max_epochs: 200  # Enough for hard tasks
   
@@ -160,6 +222,7 @@ training:
   dsc_lr_multiplier: 1.0
   msre_lr_multiplier: 1.0
   hyperlora_lr_multiplier: 1.0   # CONSERVATIVE: Same as base
+  primitive_head_lr_multiplier: 2.0  # PrimitiveHead for program-guided training
   
   # Temperature for DSC attention
   temperature_start: 1.0
@@ -538,21 +601,19 @@ data:
   persistent_workers: true
   
   # ==========================================================================
-  # CACHING CONFIGURATION
+  # CACHING CONFIGURATION (Jan 2026 PROD FIX)
   # ==========================================================================
-  # IMPORTANT (Jan 2026): cache_samples and phased training augmentation
-  # are INCOMPATIBLE. Cached samples have fixed augmentations from build time.
+  # PROD REASONING for 24GB VRAM / 128GB RAM / 48 vCPU:
+  # - cache_samples: true with rolling cache gives BOTH diversity AND enough steps/epoch
+  # - 602 tasks × 50 samples = 30,100 samples → ~750 steps/epoch at batch=40
+  # - Rolling cache refreshes 25% each epoch → fresh augmentations while training
+  # - Without caching: only 602 samples/epoch = ~15 steps → too few for convergence
   #
-  # For phased training to control augmentation per phase:
-  #   - Set cache_samples: false (on-the-fly augmentation)
-  #   - Phase A/B/C augmentation overrides will work correctly
-  #
-  # For maximum training speed with fixed augmentation:
-  #   - Set cache_samples: true
-  #   - Phase augmentation overrides will be IGNORED (warning printed)
-  #   - Use separate runs with different configs for each phase
+  # IMPORTANT: Rolling cache mode automatically applies augmentation overrides,
+  # so phased augmentation DOES work with rolling cache (unlike static cache).
   # ==========================================================================
-  cache_samples: false  # CHANGED: false for phased training augmentation control
+  cache_samples: true  # PROD: Enable for sufficient steps/epoch
+  cache_samples_mode: rolling  # PROD: Rolling refresh for augmentation diversity
   
   # ==========================================================================
   # CACHE CONFIGURATION FOR MERGED DATASET
@@ -564,6 +625,20 @@ data:
   
   # UPDATED PATH for merged dataset
   cache_path: "./cache/rlan_stable_merged_602tasks.pkl"
+  
+  # ==========================================================================
+  # ROLLING CACHE CONFIGURATION (PROD: 128GB RAM allows large pool)
+  # ==========================================================================
+  # Rolling cache provides fresh augmentations each epoch while maintaining
+  # enough samples for meaningful gradient updates.
+  # ==========================================================================
+  rolling_cache:
+    pool_size: 60000           # 60k samples (~100 per task) - fits in 128GB RAM
+    refresh_fraction: 0.25     # Refresh 25% each epoch (15k new samples)
+    anti_repeat_window: 4      # Don't repeat same sample for 4 epochs
+    prefetch_workers: 8        # Async prefetch with 8 workers (of 48 vCPUs)
+    coverage_scheduling: true  # Ensure all tasks represented each epoch
+    force_augmentation: true   # Always apply augmentation in rolling cache
   
   cache_load_percent: 100
   
