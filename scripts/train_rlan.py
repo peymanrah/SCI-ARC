@@ -3746,9 +3746,13 @@ def train_epoch(
             equiv_loss_val = equiv_loss_val.item() if hasattr(equiv_loss_val, 'item') else equiv_loss_val
             hpm_loss_val = losses.get('hpm_balance_loss', torch.tensor(0.0))
             hpm_loss_val = hpm_loss_val.item() if hasattr(hpm_loss_val, 'item') else hpm_loss_val
+            prim_loss_val = losses.get('primitive_loss', 0.0)
+            prim_loss_val = prim_loss_val.item() if hasattr(prim_loss_val, 'item') else prim_loss_val
             
             # Build meta-learning suffix if active
             meta_str = ""
+            if prim_loss_val > 0:
+                meta_str += f", prim={prim_loss_val:.4f}"
             if loo_loss_val > 0:
                 meta_str += f", loo={loo_loss_val:.4f}"
             if equiv_loss_val > 0:
