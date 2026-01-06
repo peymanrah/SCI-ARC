@@ -475,18 +475,33 @@ class ProgramGuidedRLAN(nn.Module):
         - use_hpm, use_loo, use_hasr (training flags)
         - dsc, encoder, solver, hpm, etc. (modules)
         - hidden_dim, config, etc. (config values)
+        
+        IMPORTANT: We must first check our own _modules/_parameters/_buffers before
+        delegating to base_rlan, otherwise the wrapper's own submodules won't be accessible.
         """
-        # Avoid infinite recursion: _modules, base_rlan must exist
-        if name in ('_modules', 'base_rlan', '_parameters', '_buffers'):
+        # Prevent infinite recursion during initialization
+        if name in ('_modules', '_parameters', '_buffers', 'training'):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
         
-        # Try to get from base_rlan
-        try:
-            base_rlan = self._modules.get('base_rlan')
+        # First check our own modules/parameters/buffers (replicate nn.Module.__getattr__ behavior)
+        if '_modules' in self.__dict__:
+            modules = self.__dict__['_modules']
+            if name in modules:
+                return modules[name]
+        if '_parameters' in self.__dict__:
+            parameters = self.__dict__['_parameters']
+            if name in parameters:
+                return parameters[name]
+        if '_buffers' in self.__dict__:
+            buffers = self.__dict__['_buffers']
+            if name in buffers:
+                return buffers[name]
+        
+        # If not found in this module, delegate to base_rlan
+        if '_modules' in self.__dict__:
+            base_rlan = self.__dict__['_modules'].get('base_rlan')
             if base_rlan is not None and hasattr(base_rlan, name):
                 return getattr(base_rlan, name)
-        except (KeyError, AttributeError):
-            pass
         
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
     
