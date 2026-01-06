@@ -91,13 +91,15 @@ def load_original_tasks(train_path: str) -> List[Dict[str, Any]]:
 
 def load_task_data(task_info: Dict) -> Dict:
     """Load full task data from file."""
-    if 'task_path' in task_info:
-        with open(task_info['task_path'], 'r', encoding='utf-8') as f:
+    # Handle both 'task_path' (original) and 'path' (merged manifest) keys
+    task_path = task_info.get('task_path') or task_info.get('path')
+    if task_path:
+        with open(task_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     elif 'train' in task_info:
         return task_info
     else:
-        raise ValueError(f"Invalid task info format: {task_info}")
+        raise ValueError(f"Invalid task info format: missing 'path', 'task_path', or 'train' key")
 
 
 def mine_single_task(task_info: Dict, nsteps_config: Dict) -> Optional[Dict]:
@@ -126,7 +128,8 @@ def mine_single_task(task_info: Dict, nsteps_config: Dict) -> Optional[Dict]:
         
         # Load task data
         task_data = load_task_data(task_info)
-        task_id = task_info.get('task_id', 'unknown')
+        # Handle both 'task_id' (original) and 'task_uid' (merged manifest)
+        task_id = task_info.get('task_id') or task_info.get('task_uid', 'unknown')
         
         train_pairs = task_data.get('train', [])
         if not train_pairs:
@@ -195,7 +198,8 @@ def build_program_cache(
     if num_workers == 1:
         # Single-threaded execution
         for i, task_info in enumerate(tasks):
-            task_id = task_info.get('task_id', f'task_{i}')
+            # Handle both 'task_id' (original) and 'task_uid' (merged manifest)
+            task_id = task_info.get('task_id') or task_info.get('task_uid', f'task_{i}')
             result = mine_single_task(task_info, nsteps_config)
             
             if result is not None:
@@ -207,11 +211,11 @@ def build_program_cache(
                 }
                 successful += 1
                 if verbose:
-                    print(f"[{i+1}/{len(tasks)}] ✓ {task_id} (conf={result['confidence']:.2f})")
+                    print(f"[{i+1}/{len(tasks)}] [OK] {task_id} (conf={result['confidence']:.2f})")
             else:
                 failed += 1
                 if verbose:
-                    print(f"[{i+1}/{len(tasks)}] ✗ {task_id} - no program found")
+                    print(f"[{i+1}/{len(tasks)}] [FAIL] {task_id} - no program found")
     else:
         # Multi-process execution
         print(f"Using {num_workers} workers for parallel mining...")
@@ -223,7 +227,8 @@ def build_program_cache(
             
             for i, future in enumerate(as_completed(futures)):
                 task_info = futures[future]
-                task_id = task_info.get('task_id', 'unknown')
+                # Handle both 'task_id' (original) and 'task_uid' (merged manifest)
+                task_id = task_info.get('task_id') or task_info.get('task_uid', 'unknown')
                 
                 try:
                     result = future.result()
@@ -236,14 +241,14 @@ def build_program_cache(
                         }
                         successful += 1
                         if verbose:
-                            print(f"[{i+1}/{len(tasks)}] ✓ {task_id}")
+                            print(f"[{i+1}/{len(tasks)}] [OK] {task_id}")
                     else:
                         failed += 1
                         if verbose:
-                            print(f"[{i+1}/{len(tasks)}] ✗ {task_id}")
+                            print(f"[{i+1}/{len(tasks)}] [FAIL] {task_id}")
                 except Exception as e:
                     failed += 1
-                    print(f"[{i+1}/{len(tasks)}] ✗ {task_id}: {e}")
+                    print(f"[{i+1}/{len(tasks)}] [ERR] {task_id}: {e}")
     
     elapsed = time.time() - start_time
     
