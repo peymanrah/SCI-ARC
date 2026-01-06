@@ -77,7 +77,7 @@ model:
   # =============================================================
   # HYPER-LORA: META-LEARNING WEIGHT ADAPTATION
   # =============================================================
-  use_hyperlora: true        # ENABLED - critical for task-specific adaptation
+  use_hyperlora: false       # DISABLED for program-guided training focus
   hyperlora_rank: 8          # LoRA rank (lower = fewer params, less expressive)
   hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
   hyperlora_dropout: 0.0     # Dropout on LoRA activations
@@ -87,7 +87,7 @@ model:
   # =============================================================
   # HIERARCHICAL PRIMITIVE MEMORY (HPM v2)
   # =============================================================
-  use_hpm: true                       # ENABLED: HPM with gated residual (safe warmup built-in)
+  use_hpm: false                      # DISABLED for program-guided training focus
   hpm_start_epoch: 20                 # Activate HPM at epoch 20 (after equivariance @ 16, before LOO @ 24)
   
   # Sparse MoE Routing Configuration
@@ -207,13 +207,14 @@ training:
   # =============================================================
   # BATCH SIZE (Jan 2026 MEMORY FIX)
   # =============================================================
-  # Phase A peaks at ~18GB → batch_size=40 is safe (~20GB with headroom)
-  # Phase B adds solver_context → peaks ~25GB at batch=50 → need 38
-  # Phase C adds full meta → peaks ~30GB at batch=50 → need 32
-  # Per-phase batch_size in phased_training section overrides this.
   # =============================================================
-  batch_size: 40    # Base batch size for Phase A (safe ~20GB peak)
-  grad_accumulation_steps: 9  # Effective batch_size = 40 × 9 = 360
+  # BATCH SIZE FOR PROGRAM-GUIDED TRAINING (Jan 2026 FIX)
+  # Peak at 97.6% with batch=40 → need 30% reduction
+  # batch=28 targets ~68% VRAM usage (~17GB peak)
+  # Increase grad_accumulation to maintain effective batch size
+  # =============================================================
+  batch_size: 28    # Reduced for 24GB VRAM safety (was 40)
+  grad_accumulation_steps: 13  # Effective batch_size = 28 × 13 = 364
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -319,11 +320,10 @@ training:
   # =============================================================
   # LOO TRAINING: LEAVE-ONE-OUT META-LEARNING LOSS
   # =============================================================
-  # Note: LOO only activates in Phase C (epoch 21+) due to phase disable flags
-  # start_epoch is a minimum; phase gating provides additional control
+  # DISABLED for program-guided training focus
   # =============================================================
   loo_training:
-    enabled: true
+    enabled: false  # DISABLED for program-guided training
     start_epoch: 25  # After HyperLoRA warmup completes (21 + 4 buffer epochs)
     loss_weight: 0.05
     min_pairs_for_loo: 2
@@ -345,17 +345,12 @@ training:
     num_augmentations: 4
 
   # =============================================================
-  # OUTPUT-LEVEL EQUIVARIANCE (Jan 2026 FIX)
+  # OUTPUT-LEVEL EQUIVARIANCE (DISABLED for Program-Guided Training)
   # =============================================================
-  # This replaces the degenerate weight-level equivariance.
-  # Compares MODEL OUTPUTS after inverse augmentation, directly
-  # optimizing for TTA consensus.
-  #
-  # FIX (Jan 2026): Now properly flows gradients through original_logits
-  # so the loss actually teaches the model to produce equivariant outputs.
+  # DISABLED for program-guided training focus
   # =============================================================
   output_equivariance_training:
-    enabled: true
+    enabled: false  # DISABLED for program-guided training
     start_epoch: 22  # Shortly after Phase C starts (epoch 21)
     loss_weight: 0.02
     num_augmentations: 2  # Keep low - each is a full forward pass
@@ -384,24 +379,14 @@ training:
     as_primary_loss: false  # If true, replaces task loss (use weight=1.0)
 
   # =============================================================
-  # PHASED TRAINING (Jan 2026)
+  # PHASED TRAINING (DISABLED for Program-Guided Training)
   # =============================================================
-  # Structured training phases to ensure base solver competence
-  # before enabling meta-learning components.
-  #
-  # Without phases, the model learns meta-learning shortcuts
-  # before the base solver can generalize, causing:
-  #   - equiv ≈ 0 (degenerate)
-  #   - TTA consensus ≈ random
-  #   - Training "looks good" but eval fails
-  #
-  # Phase progression:
-  #   A: Base solver only (no aug, no meta) - epochs 1-10
-  #   B: Add geometric aug, solver context  - epochs 11-20  
-  #   C: Full meta-learning                 - epochs 21+
+  # When resuming from warmup checkpoint with --reset-optimizer,
+  # we skip phased training since the base solver is already trained.
+  # Program-guided training focuses on PrimitiveHead learning.
   # =============================================================
   phased_training:
-    enabled: true
+    enabled: false  # DISABLED for program-guided training
     
     # Phase A: Base solver competence (no meta, limited aug)
     # Goal: Verify base model can learn to solve ARC without help
@@ -513,10 +498,10 @@ training:
         vote_tie_max: 0.50              # Vote ties ≤ 50% (relaxed - consensus improves in Phase C)
 
   # =============================================================
-  # META ESCALATION
+  # META ESCALATION (DISABLED for Program-Guided Training)
   # =============================================================
   meta_escalation:
-    enabled: true
+    enabled: false  # DISABLED for program-guided training
     
     # Meta Loss Capping
     meta_loss_cap_ratio: 0.25
