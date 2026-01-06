@@ -209,6 +209,12 @@ class DynamicSaliencyController(nn.Module):
         self.query_norm = nn.LayerNorm(hidden_dim)
         self.feature_norm = nn.LayerNorm(hidden_dim)
         
+        # CRITICAL FIX (Jan 2026): Add position encoding AFTER LayerNorm
+        # LayerNorm crushes score variance causing centroid collapse.
+        # This 2D sinusoidal position encoding restores spatial discrimination.
+        # See diagnose_dsc_scores.py for detailed analysis.
+        self._init_position_encoding(30, hidden_dim)  # Max ARC grid size
+        
         # GRU for recurrence: clue k's query depends on clue k-1's attended features
         # This implements the paper's claim: "iterative selection depends on H_{t-1}"
         # attended_features from clue k-1 updates query_state for clue k
@@ -219,6 +225,50 @@ class DynamicSaliencyController(nn.Module):
         
         # Coordinate grids (will be registered as buffers)
         self._init_coord_grids(30)  # Max ARC size
+    
+    def _init_position_encoding(self, max_size: int, hidden_dim: int):
+        """
+        Initialize 2D sinusoidal position encoding for DSC attention.
+        
+        This is CRITICAL for preventing centroid collapse. After LayerNorm normalizes
+        features, all spatial positions look similar (cosine_sim > 0.9). The position
+        encoding adds unique spatial signatures that the query can discriminate.
+        
+        Uses separate frequency bands for row and column, concatenated:
+        - First half of hidden_dim: row encoding
+        - Second half: column encoding
+        """
+        # Create position encoding grid
+        pos_encoding = torch.zeros(max_size, max_size, hidden_dim)
+        
+        # Use half the dimensions for row, half for column
+        half_dim = hidden_dim // 2
+        quarter_dim = half_dim // 2  # For sin/cos pairs
+        freq_base = 10000.0  # Standard transformer frequency base
+        
+        for row in range(max_size):
+            for col in range(max_size):
+                # Row encoding (first half of hidden_dim)
+                for i in range(quarter_dim):
+                    freq = 1.0 / (freq_base ** (2 * i / half_dim))
+                    pos_encoding[row, col, 2*i] = math.sin(row * freq)
+                    pos_encoding[row, col, 2*i + 1] = math.cos(row * freq)
+                    
+                # Column encoding (second half of hidden_dim)
+                for i in range(quarter_dim):
+                    freq = 1.0 / (freq_base ** (2 * i / half_dim))
+                    idx = half_dim + 2*i
+                    if idx < hidden_dim:
+                        pos_encoding[row, col, idx] = math.sin(col * freq)
+                    if idx + 1 < hidden_dim:
+                        pos_encoding[row, col, idx + 1] = math.cos(col * freq)
+        
+        # Scale position encoding to have similar magnitude as normalized features
+        # LayerNorm produces features with std ≈ 1, so we scale pos_enc to be comparable
+        # but not overwhelming (scale=0.5 means pos_enc is half the signal strength)
+        pos_encoding = pos_encoding * 0.5
+        
+        self.register_buffer('pos_encoding', pos_encoding)
     
     def _init_stop_predictor_for_entropy_coupling(self, init_bias: float = -1.0):
         """
@@ -308,17 +358,23 @@ class DynamicSaliencyController(nn.Module):
             H, W: Grid dimensions
             
         Returns:
-            centroids: Shape (B, 2) with (row, col) coordinates
+            centroids: Shape (B, 2) with (row, col) coordinates in [0, 1] normalized range
         """
         B = attention.shape[0]
         
-        # Get coordinate grids for this size
+        # Get coordinate grids for this size and NORMALIZE to [0, 1]
+        # Raw grids are 0, 1, 2, ..., H-1 so we divide by (H-1) to get [0, 1]
+        # Add small epsilon to avoid division by zero for 1x1 grids
         row_grid = self.row_grid[:H, :W].unsqueeze(0).expand(B, -1, -1)
         col_grid = self.col_grid[:H, :W].unsqueeze(0).expand(B, -1, -1)
         
-        # Weighted average of coordinates
-        row_centroid = (attention * row_grid).sum(dim=(-2, -1))
-        col_centroid = (attention * col_grid).sum(dim=(-2, -1))
+        # Normalize to [0, 1] range
+        row_grid_norm = row_grid / max(H - 1, 1)
+        col_grid_norm = col_grid / max(W - 1, 1)
+        
+        # Weighted average of normalized coordinates
+        row_centroid = (attention * row_grid_norm).sum(dim=(-2, -1))
+        col_centroid = (attention * col_grid_norm).sum(dim=(-2, -1))
         
         centroids = torch.stack([row_centroid, col_centroid], dim=-1)
         return centroids
@@ -386,6 +442,13 @@ class DynamicSaliencyController(nn.Module):
         features_flat = features.permute(0, 2, 3, 1).reshape(B, H * W, D)
         features_flat = self.feature_norm(features_flat)
         
+        # Add position encoding to features for value projection
+        # Note: Position encoding is also used directly for query-position affinity
+        # in the attention mechanism below for sharper spatial discrimination.
+        pos_enc = self.pos_encoding[:H, :W, :].reshape(H * W, D)  # (H*W, D)
+        pos_enc = pos_enc.unsqueeze(0).expand(B, -1, -1)  # (B, H*W, D)
+        features_flat = features_flat + pos_enc
+        
         # Initialize outputs
         all_centroids = []
         all_attention_maps = []
@@ -415,8 +478,31 @@ class DynamicSaliencyController(nn.Module):
             k_proj = self.key_proj(features_flat)  # (B, H*W, D)
             v = self.value_proj(features_flat)  # (B, H*W, D)
             
-            # Compute attention scores
-            attn_scores = torch.einsum('bd,bnd->bn', q, k_proj) / self.scale  # (B, H*W)
+            # CRITICAL FIX (Jan 2026): Use cosine similarity + position bias for attention
+            # Problem: Trained Q/K projections produce anti-correlated vectors (cos_sim ~ -0.85)
+            # with near-zero variance across positions (std=0.007), causing uniform attention.
+            # 
+            # Solution: Add a position-dependent bias directly to attention scores.
+            # The position encoding provides spatial discrimination that the learned
+            # projections failed to capture.
+            
+            # Step 1: Normalize Q and K for stable cosine similarity base
+            q_norm = F.normalize(q, dim=-1)  # (B, D) unit vectors  
+            k_norm = F.normalize(k_proj, dim=-1)  # (B, H*W, D) unit vectors
+            
+            # Step 2: Compute base attention as cosine similarity (in [-1, 1])
+            base_attn = torch.einsum('bd,bnd->bn', q_norm, k_norm)  # (B, H*W)
+            
+            # Step 3: Add position-dependent query-key matching
+            # Project query through a small network that outputs position preferences
+            # For now: compute query's affinity to each position via position encoding
+            pos_enc_flat = self.pos_encoding[:H, :W, :].reshape(H * W, D)  # (H*W, D)
+            q_pos_affinity = torch.einsum('bd,nd->bn', q_norm, pos_enc_flat.to(q.device))  # (B, H*W)
+            
+            # Step 4: Combine base attention with position affinity
+            # Scale base attention to have meaningful range, add position affinity as bias
+            # Higher position affinity scale = sharper attention peaks
+            attn_scores = base_attn * 2.0 + q_pos_affinity * 16.0  # (B, H*W)
             attn_scores = attn_scores.view(B, H, W)
             
             # Apply cumulative mask (already attended regions have low weight)

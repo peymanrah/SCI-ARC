@@ -131,7 +131,7 @@ class MultiScaleRelativeEncoding(nn.Module):
         Compute all three coordinate representations.
         
         Args:
-            centroids: Shape (B, K, 2) clue centroids (row, col)
+            centroids: Shape (B, K, 2) clue centroids (row, col) in NORMALIZED [0, 1] range
             grid_sizes: Shape (B, 2) original grid sizes (h, w) or None
             H, W: Current grid dimensions
             
@@ -149,11 +149,16 @@ class MultiScaleRelativeEncoding(nn.Module):
         row_grid = row_grid.view(1, 1, H, W).expand(B, K, -1, -1)
         col_grid = col_grid.view(1, 1, H, W).expand(B, K, -1, -1)
         
-        # Expand centroids for broadcasting
-        centroid_row = centroids[:, :, 0].view(B, K, 1, 1)  # (B, K, 1, 1)
-        centroid_col = centroids[:, :, 1].view(B, K, 1, 1)  # (B, K, 1, 1)
+        # IMPORTANT: Centroids come in normalized [0, 1] from DSC
+        # Convert to pixel coordinates for offset computation
+        centroid_row_norm = centroids[:, :, 0].view(B, K, 1, 1)  # (B, K, 1, 1) in [0, 1]
+        centroid_col_norm = centroids[:, :, 1].view(B, K, 1, 1)  # (B, K, 1, 1) in [0, 1]
         
-        # 1. Absolute offset
+        # Denormalize to pixel coordinates
+        centroid_row = centroid_row_norm * max(H - 1, 1)  # Scale to [0, H-1]
+        centroid_col = centroid_col_norm * max(W - 1, 1)  # Scale to [0, W-1]
+        
+        # 1. Absolute offset (in pixel space)
         abs_row = row_grid - centroid_row  # (B, K, H, W)
         abs_col = col_grid - centroid_col  # (B, K, H, W)
         
