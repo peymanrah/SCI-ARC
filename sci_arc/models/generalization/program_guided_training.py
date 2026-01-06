@@ -467,6 +467,29 @@ class ProgramGuidedRLAN(nn.Module):
         self.current_epoch = 0
         self.batch_count = 0
     
+    def __getattr__(self, name: str):
+        """
+        Delegate attribute access to base_rlan for any attributes not found on this wrapper.
+        
+        This allows transparent access to base RLAN attributes like:
+        - use_hpm, use_loo, use_hasr (training flags)
+        - dsc, encoder, solver, hpm, etc. (modules)
+        - hidden_dim, config, etc. (config values)
+        """
+        # Avoid infinite recursion: _modules, base_rlan must exist
+        if name in ('_modules', 'base_rlan', '_parameters', '_buffers'):
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        
+        # Try to get from base_rlan
+        try:
+            base_rlan = self._modules.get('base_rlan')
+            if base_rlan is not None and hasattr(base_rlan, name):
+                return getattr(base_rlan, name)
+        except (KeyError, AttributeError):
+            pass
+        
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    
     def forward(
         self,
         test_input: torch.Tensor,
