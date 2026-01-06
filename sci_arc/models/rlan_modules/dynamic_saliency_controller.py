@@ -131,6 +131,7 @@ class DynamicSaliencyController(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.1,
         context_dim: Optional[int] = None,
+        use_complexity_signals: bool = True,  # Jan 2026: Enable/disable for checkpoint compat
     ):
         """
         Args:
@@ -138,11 +139,13 @@ class DynamicSaliencyController(nn.Module):
             max_clues: Maximum number of clue anchors (K)
             num_heads: Number of attention heads
             dropout: Dropout probability
+            use_complexity_signals: If True, include grid_size/fg_ratio/num_colors in stop predictor
         """
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.max_clues = max_clues
+        self.use_complexity_signals = use_complexity_signals
         self.num_heads = num_heads
         self.context_dim = context_dim if context_dim is not None else hidden_dim
         
@@ -188,8 +191,13 @@ class DynamicSaliencyController(nn.Module):
         # The entropy input creates coupling between attention sharpness and stopping:
         # - Sharp attention (low entropy) → model can stop (found good anchor)
         # - Diffuse attention (high entropy) → need more clues (uncertain)
+        # 
+        # ENHANCED (Jan 2026): Added +3 complexity signals (grid_size, fg_ratio, num_colors)
+        # These help stop predictor decide earlier for simple tasks, later for complex ones.
+        # Disabled by default for checkpoint backward compatibility.
+        complexity_extra_dim = 3 if use_complexity_signals else 0
         self.stop_predictor = nn.Sequential(
-            nn.Linear(hidden_dim + 1 + self.context_dim, hidden_dim // 2),  # +1 entropy, +C task context
+            nn.Linear(hidden_dim + 1 + self.context_dim + complexity_extra_dim, hidden_dim // 2),  # +1 entropy, +C context, (+3 complexity optional)
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
@@ -385,6 +393,7 @@ class DynamicSaliencyController(nn.Module):
         temperature: float = 1.0,
         mask: Optional[torch.Tensor] = None,
         task_context: Optional[torch.Tensor] = None,
+        input_grid: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Extract clue anchors from encoded features.
@@ -393,6 +402,8 @@ class DynamicSaliencyController(nn.Module):
             features: Shape (B, D, H, W) encoded grid features
             temperature: Gumbel-softmax temperature (lower = sharper)
             mask: Optional (B, H, W) mask for valid positions
+            task_context: Optional (B, C) task context from context encoder
+            input_grid: Optional (B, H, W) raw input grid for FG/BG bias
             
         Returns:
             centroids: Shape (B, K, 2) clue centroid coordinates
@@ -449,6 +460,54 @@ class DynamicSaliencyController(nn.Module):
         pos_enc = pos_enc.unsqueeze(0).expand(B, -1, -1)  # (B, H*W, D)
         features_flat = features_flat + pos_enc
         
+        # =================================================================
+        # FOREGROUND/BACKGROUND ATTENTION BIAS (Jan 2026)
+        # =================================================================
+        # Create attention bias that favors foreground pixels (non-black)
+        # This helps DSC focus on actual objects rather than empty background
+        # 
+        # The bias is additive to attention scores BEFORE softmax:
+        # - FG pixels: bias = +fg_boost (favored)
+        # - BG pixels: bias = 0 (neutral, not penalized)
+        #
+        # This is more effective than trying to learn FG/BG discrimination
+        # from scratch when the encoder features don't preserve this info well.
+        fg_boost = 3.0  # Additive logit boost for foreground (tune-able)
+        if input_grid is not None:
+            # input_grid: (B, H, W) with color indices 0-9 (0 often = background)
+            # Create FG mask: pixels with color > 0 are foreground
+            fg_mask = (input_grid > 0).float()  # (B, H, W)
+            fg_bias = fg_mask * fg_boost  # (B, H, W)
+            fg_bias_flat = fg_bias.view(B, H * W)  # (B, H*W)
+        else:
+            fg_bias = None
+            fg_bias_flat = None
+        
+        # =================================================================
+        # TASK COMPLEXITY SIGNALS (Jan 2026)
+        # =================================================================
+        # Compute task complexity metrics that help stop predictor decide
+        # when to stop adding clues:
+        # - Larger grids / more FG objects = need more clues
+        # - Simple tasks = stop early
+        #
+        # These are appended to the stop predictor input alongside entropy
+        grid_size_signal = torch.full((B, 1), float(H * W) / (30 * 30), device=features.device)  # (B, 1)
+        if input_grid is not None:
+            num_fg_pixels = (input_grid > 0).float().sum(dim=(1, 2))  # (B,)
+            fg_ratio = (num_fg_pixels / (H * W)).unsqueeze(-1)  # (B, 1)
+            # Count unique colors per sample
+            color_counts = []
+            for b in range(B):
+                color_counts.append(float(torch.unique(input_grid[b]).numel()))
+            num_colors = torch.tensor(color_counts, device=features.device).unsqueeze(-1) / 10.0  # (B, 1), normalized
+        else:
+            fg_ratio = torch.zeros(B, 1, device=features.device)
+            num_colors = torch.ones(B, 1, device=features.device) * 0.5  # Default
+        
+        # Combined complexity signal: (B, 3) = [grid_size, fg_ratio, num_colors]
+        complexity_signal = torch.cat([grid_size_signal, fg_ratio, num_colors], dim=-1)  # (B, 3)
+        
         # Initialize outputs
         all_centroids = []
         all_attention_maps = []
@@ -499,18 +558,26 @@ class DynamicSaliencyController(nn.Module):
             pos_enc_flat = self.pos_encoding[:H, :W, :].reshape(H * W, D)  # (H*W, D)
             q_pos_affinity = torch.einsum('bd,nd->bn', q_norm, pos_enc_flat.to(q.device))  # (B, H*W)
             
-            # Step 4: Combine base attention with position affinity
+            # Step 4: Combine base attention with position affinity + FG bias
             # REBALANCED: Content-based attention now has higher weight than position
             # This ensures centroids are placed based on WHAT is in the grid, not WHERE
             # Previous: base_attn * 2.0 + q_pos_affinity * 16.0 (position dominated)
             # Now: content dominates, position provides light spatial bias
             attn_scores = base_attn * 4.0 + q_pos_affinity * 2.0  # (B, H*W)
+            
+            # Step 5: Add foreground bias to favor non-black pixels
+            # This directly encodes the prior that clues should be at FG objects
+            if fg_bias_flat is not None:
+                attn_scores = attn_scores + fg_bias_flat  # FG pixels get +fg_boost
+            
             attn_scores = attn_scores.view(B, H, W)
             
             # Apply cumulative mask (already attended regions have low weight)
             # Clamp mask to prevent log(0) and extreme negative values
+            # STRENGTHENED (Jan 2026): Use mask^2 for faster decay
             safe_mask = cumulative_mask.clamp(min=1e-6)
-            attn_scores = attn_scores + torch.log(safe_mask)
+            mask_penalty = torch.log(safe_mask) * 1.5  # Stronger penalty multiplier
+            attn_scores = attn_scores + mask_penalty
             
             # Clamp attention scores to prevent extreme values
             attn_scores = attn_scores.clamp(min=-50.0, max=50.0)
@@ -560,11 +627,17 @@ class DynamicSaliencyController(nn.Module):
             # And ensures POSITIVE correlation between confidence and stop = HEALTHY
             attn_confidence = 1.0 - attn_entropy_normalized  # (B, 1): sharp=high, diffuse=low
             
-            # Concatenate attended features with confidence and global task context
+            # Concatenate attended features with confidence, global task context, and optionally complexity
             # The confidence provides a "sharpness" signal to the stop predictor
-            stop_input = torch.cat(
-                [attended_features, attn_confidence, task_context_vec], dim=-1
-            )  # (B, D+1+C)
+            # The complexity signals help differentiate simple vs. complex tasks
+            if self.use_complexity_signals:
+                stop_input = torch.cat(
+                    [attended_features, attn_confidence, task_context_vec, complexity_signal], dim=-1
+                )  # (B, D+1+C+3)
+            else:
+                stop_input = torch.cat(
+                    [attended_features, attn_confidence, task_context_vec], dim=-1
+                )  # (B, D+1+C)
             
             # Predict stop probability with entropy-aware input
             stop_logit_raw = self.stop_predictor(stop_input).squeeze(-1)  # (B,)

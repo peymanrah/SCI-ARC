@@ -86,6 +86,7 @@ class RLANConfig:
     # DSC parameters
     max_clues: int = 5
     dsc_num_heads: int = 4
+    dsc_use_complexity_signals: bool = False  # Jan 2026: Task-aware stop prediction (set True for new training)
     
     # MSRE parameters
     msre_encoding_dim: int = 32
@@ -314,11 +315,15 @@ class RLAN(nn.Module):
         
         # Dynamic Saliency Controller (OPTIONAL - but core novelty)
         if self.use_dsc:
+            # Jan 2026: use_complexity_signals=False for backward compat with existing checkpoints
+            # Set to True when training from scratch to enable task-aware stop prediction
             self.dsc = DynamicSaliencyController(
                 hidden_dim=hidden_dim,
                 max_clues=max_clues,
                 num_heads=config.dsc_num_heads if config else 4,
                 dropout=dropout,
+                context_dim=hidden_dim,  # DSC uses context from task encoder
+                use_complexity_signals=getattr(config, 'dsc_use_complexity_signals', False) if config else False,
             )
         else:
             self.dsc = None
@@ -660,8 +665,10 @@ class RLAN(nn.Module):
         # 3. Dynamic Saliency Controller - find clue anchors (if enabled)
         if self.use_dsc and self.dsc is not None:
             # CRITICAL: Use dsc_task_context (always pooled) instead of context (may be None in cross-attn mode)
+            # ENHANCED (Jan 2026): Pass input_grid for FG bias + task complexity signals
             centroids, attention_maps, stop_logits = self.dsc(
-                features, temperature=temperature, mask=valid_mask, task_context=dsc_task_context
+                features, temperature=temperature, mask=valid_mask, task_context=dsc_task_context,
+                input_grid=input_grid
             )  # (B, K, 2), (B, K, H, W), (B, K)
         else:
             # Default: single centered anchor, uniform attention
@@ -1016,8 +1023,9 @@ class RLAN(nn.Module):
         
         # 3. DSC - find clue anchors
         if self.use_dsc and self.dsc is not None:
+            # ENHANCED (Jan 2026): Pass input_grid for FG bias + task complexity signals
             centroids, attention_maps, stop_logits = self.dsc(
-                features, temperature=temperature, mask=valid_mask
+                features, temperature=temperature, mask=valid_mask, input_grid=input_grid
             )
         else:
             K = self.max_clues

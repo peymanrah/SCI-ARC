@@ -8,6 +8,8 @@ import sys
 import json
 import torch
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server/headless environments
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path

@@ -1,0 +1,626 @@
+{
+  "agi2_train:52df9849": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.982421875,
+    "input_hash": "2cf5e22dc611bca3",
+    "timestamp": 1767669445.5026815
+  },
+  "agi2_train:7acdf6d3": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 3
+        }
+      ]
+    ],
+    "confidence": 0.9724251109467456,
+    "input_hash": "c5e0ba277c49cae4",
+    "timestamp": 1767669446.5586612
+  },
+  "agi2_train:3d588dc9": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.966796875,
+    "input_hash": "f6fdf5b8784de705",
+    "timestamp": 1767669446.8925521
+  },
+  "agi1_train:3618c87e": {
+    "trace": [
+      [
+        "gravity_down",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "aff35d23c20ea98f",
+    "timestamp": 1767669449.386358
+  },
+  "agi2_train:3618c87e": {
+    "trace": [
+      [
+        "gravity_down",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "dc5cc20674866ae2",
+    "timestamp": 1767669449.9681342
+  },
+  "agi1_train:ed36ccf7": {
+    "trace": [
+      [
+        "rotate_grid_90",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "f484f830b8a02f06",
+    "timestamp": 1767669450.2230022
+  },
+  "agi2_train:67a3c6ac": {
+    "trace": [
+      [
+        "mirror_horizontal",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "0de4d6ec81998bb4",
+    "timestamp": 1767669450.3938162
+  },
+  "agi2_train:cbded52d": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9635416666666666,
+    "input_hash": "8bdf68bb1a73fa3e",
+    "timestamp": 1767669454.211408
+  },
+  "agi1_train:cbded52d": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9635416666666666,
+    "input_hash": "e2b5892efcc926be",
+    "timestamp": 1767669454.7726579
+  },
+  "agi2_train:68b16354": {
+    "trace": [
+      [
+        "mirror_vertical",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "0241b83b974b10b2",
+    "timestamp": 1767669455.6475527
+  },
+  "agi1_train:67a3c6ac": {
+    "trace": [
+      [
+        "mirror_horizontal",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "51afa8bd1d4fd2f8",
+    "timestamp": 1767669456.909184
+  },
+  "agi1_train:3c9b0459": {
+    "trace": [
+      [
+        "rotate_grid_180",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "80a4b0da8822c0f9",
+    "timestamp": 1767669457.1499763
+  },
+  "agi2_train:3c9b0459": {
+    "trace": [
+      [
+        "rotate_grid_180",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "eac474f951cffc73",
+    "timestamp": 1767669457.6482036
+  },
+  "agi2_train:ed36ccf7": {
+    "trace": [
+      [
+        "rotate_grid_90",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "8bcefe5a0c06ec7c",
+    "timestamp": 1767669459.3785582
+  },
+  "agi2_train:3d6c6e23": {
+    "trace": [
+      [
+        "gravity_down",
+        {}
+      ]
+    ],
+    "confidence": 0.9723571181904515,
+    "input_hash": "135418e62313d105",
+    "timestamp": 1767669461.182271
+  },
+  "agi1_train:890034e9": {
+    "trace": [
+      [
+        "identity",
+        {}
+      ]
+    ],
+    "confidence": 0.965230536659108,
+    "input_hash": "9bb570d984910632",
+    "timestamp": 1767669462.4066136
+  },
+  "agi2_train:d6542281": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9542144055248679,
+    "input_hash": "f766bd195d83316f",
+    "timestamp": 1767669462.4457512
+  },
+  "agi2_train:0e206a2e": {
+    "trace": [
+      [
+        "recolor_objects",
+        {
+          "color": 4
+        }
+      ],
+      [
+        "keep_smallest",
+        {}
+      ]
+    ],
+    "confidence": 0.9509920634920634,
+    "input_hash": "1c8decbbaa9bad2e",
+    "timestamp": 1767669463.142288
+  },
+  "agi1_train:2c608aff": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9676256613756614,
+    "input_hash": "f0253ed7c496b94f",
+    "timestamp": 1767669463.8062751
+  },
+  "agi2_train:50846271": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 3
+        }
+      ]
+    ],
+    "confidence": 0.9772315257841573,
+    "input_hash": "723371a1d9b17adb",
+    "timestamp": 1767669467.1850321
+  },
+  "agi2_train:9b5080bb": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9765437933207309,
+    "input_hash": "63dbdef0c529b652",
+    "timestamp": 1767669467.2229853
+  },
+  "agi1_train:50846271": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 3
+        }
+      ]
+    ],
+    "confidence": 0.9772315257841573,
+    "input_hash": "aece941183edbedc",
+    "timestamp": 1767669468.0715823
+  },
+  "agi2_train:c3fa4749": {
+    "trace": [
+      [
+        "identity",
+        {}
+      ]
+    ],
+    "confidence": 0.9729000000000001,
+    "input_hash": "3d68e2acd251fc67",
+    "timestamp": 1767669468.116296
+  },
+  "agi2_train:e4888269": {
+    "trace": [
+      [
+        "flip_objects_horizontal",
+        {}
+      ]
+    ],
+    "confidence": 0.985,
+    "input_hash": "97cc3e90e465bbce",
+    "timestamp": 1767669469.4723032
+  },
+  "agi2_train:f8cc533f": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.967514479979854,
+    "input_hash": "0e5768353fd07594",
+    "timestamp": 1767669469.805365
+  },
+  "agi1_train:0e206a2e": {
+    "trace": [
+      [
+        "recolor_objects",
+        {
+          "color": 4
+        }
+      ],
+      [
+        "keep_smallest",
+        {}
+      ]
+    ],
+    "confidence": 0.9509920634920634,
+    "input_hash": "e540201c7bc26bf5",
+    "timestamp": 1767669471.9052212
+  },
+  "agi2_train:890034e9": {
+    "trace": [
+      [
+        "identity",
+        {}
+      ]
+    ],
+    "confidence": 0.965230536659108,
+    "input_hash": "f898cc229215b0bb",
+    "timestamp": 1767669471.9545827
+  },
+  "agi2_train:2c608aff": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9676256613756613,
+    "input_hash": "3d7488e3cb8438d1",
+    "timestamp": 1767669472.946194
+  },
+  "agi1_train:a61f2674": {
+    "trace": [
+      [
+        "recolor_objects",
+        {
+          "color": 1
+        }
+      ],
+      [
+        "keep_largest",
+        {}
+      ]
+    ],
+    "confidence": 0.9691358024691358,
+    "input_hash": "473c626259d5caa8",
+    "timestamp": 1767669477.4754102
+  },
+  "agi2_train:a61f2674": {
+    "trace": [
+      [
+        "recolor_objects",
+        {
+          "color": 1
+        }
+      ],
+      [
+        "keep_largest",
+        {}
+      ]
+    ],
+    "confidence": 0.9691358024691358,
+    "input_hash": "b032e2f25b9d763e",
+    "timestamp": 1767669477.6335242
+  },
+  "agi1_train:6150a2bd": {
+    "trace": [
+      [
+        "rotate_grid_180",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "7cc523ef5982710e",
+    "timestamp": 1767669478.0687861
+  },
+  "agi2_train:6150a2bd": {
+    "trace": [
+      [
+        "rotate_grid_180",
+        {}
+      ]
+    ],
+    "confidence": 1.0,
+    "input_hash": "2ac30ebc375b628e",
+    "timestamp": 1767669480.285178
+  },
+  "agi2_train:a48eeaf7": {
+    "trace": [
+      [
+        "keep_largest",
+        {}
+      ]
+    ],
+    "confidence": 0.965,
+    "input_hash": "780a9daa7cf79c12",
+    "timestamp": 1767669482.1448574
+  },
+  "agi2_train:18286ef8": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.9565740740740741,
+    "input_hash": "3c64360d72c5ad88",
+    "timestamp": 1767669484.727854
+  },
+  "agi2_train:342dd610": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.965,
+    "input_hash": "f38d494124d9d703",
+    "timestamp": 1767669485.3849237
+  },
+  "agi2_train:8dab14c2": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9844143065880198,
+    "input_hash": "2f6e7da287d42f4e",
+    "timestamp": 1767669485.8102798
+  },
+  "agi2_train:6d0160f0": {
+    "trace": [
+      [
+        "keep_largest",
+        {}
+      ]
+    ],
+    "confidence": 0.9710743801652892,
+    "input_hash": "e33663f0f588a567",
+    "timestamp": 1767669486.0100648
+  },
+  "agi2_train:6cf79266": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.9700000000000001,
+    "input_hash": "80fc47ad0d0007e4",
+    "timestamp": 1767669487.0558739
+  },
+  "agi2_train:50c07299": {
+    "trace": [
+      [
+        "rotate_objects_90",
+        {}
+      ]
+    ],
+    "confidence": 0.97265625,
+    "input_hash": "03e09a8d7e41c58b",
+    "timestamp": 1767669490.6961808
+  },
+  "agi2_train:776ffc46": {
+    "trace": [
+      [
+        "flip_objects_horizontal",
+        {}
+      ]
+    ],
+    "confidence": 0.956875,
+    "input_hash": "6005a11b6be247b7",
+    "timestamp": 1767669491.956523
+  },
+  "agi2_train:2f767503": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.9504700854700854,
+    "input_hash": "cf1c28c06929546f",
+    "timestamp": 1767669492.4737322
+  },
+  "agi2_train:48634b99": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.9778645833333334,
+    "input_hash": "24ee42b9bf986aca",
+    "timestamp": 1767669493.18464
+  },
+  "agi1_train:6cf79266": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.9700000000000001,
+    "input_hash": "e5113ad0dec87c92",
+    "timestamp": 1767669493.211005
+  },
+  "agi1_train:6d0160f0": {
+    "trace": [
+      [
+        "keep_largest",
+        {}
+      ]
+    ],
+    "confidence": 0.9710743801652892,
+    "input_hash": "ddb927fbd89c4a93",
+    "timestamp": 1767669497.1147869
+  },
+  "agi1_train:776ffc46": {
+    "trace": [
+      [
+        "flip_objects_horizontal",
+        {}
+      ]
+    ],
+    "confidence": 0.956875,
+    "input_hash": "c025faf70f66b0cf",
+    "timestamp": 1767669498.131731
+  },
+  "agi2_train:97c75046": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.9680555555555556,
+    "input_hash": "02ce9642cb2a36cc",
+    "timestamp": 1767669498.5747771
+  },
+  "agi2_train:df978a02": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9765625,
+    "input_hash": "002df3aeb3666ea3",
+    "timestamp": 1767669500.4856818
+  },
+  "agi2_train:edcc2ff0": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9533333333333333,
+    "input_hash": "6384fa1305e2d779",
+    "timestamp": 1767669501.7805946
+  },
+  "agi2_train:9f8de559": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.9897959183673469,
+    "input_hash": "8ed9e0263a8694d3",
+    "timestamp": 1767669502.7626138
+  },
+  "agi2_train:e4941b18": {
+    "trace": [
+      [
+        "swap_colors",
+        {
+          "c1": 1,
+          "c2": 2
+        }
+      ]
+    ],
+    "confidence": 0.9589816949124308,
+    "input_hash": "f8ae7a43b61802a1",
+    "timestamp": 1767669503.4576597
+  },
+  "agi2_train:5b37cb25": {
+    "trace": [
+      [
+        "remove_background",
+        {}
+      ]
+    ],
+    "confidence": 0.9722222222222222,
+    "input_hash": "19673804a6f80ee1",
+    "timestamp": 1767669537.5002909
+  }
+}
