@@ -500,9 +500,11 @@ class DynamicSaliencyController(nn.Module):
             q_pos_affinity = torch.einsum('bd,nd->bn', q_norm, pos_enc_flat.to(q.device))  # (B, H*W)
             
             # Step 4: Combine base attention with position affinity
-            # Scale base attention to have meaningful range, add position affinity as bias
-            # Higher position affinity scale = sharper attention peaks
-            attn_scores = base_attn * 2.0 + q_pos_affinity * 16.0  # (B, H*W)
+            # REBALANCED: Content-based attention now has higher weight than position
+            # This ensures centroids are placed based on WHAT is in the grid, not WHERE
+            # Previous: base_attn * 2.0 + q_pos_affinity * 16.0 (position dominated)
+            # Now: content dominates, position provides light spatial bias
+            attn_scores = base_attn * 4.0 + q_pos_affinity * 2.0  # (B, H*W)
             attn_scores = attn_scores.view(B, H, W)
             
             # Apply cumulative mask (already attended regions have low weight)

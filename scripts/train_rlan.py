@@ -3424,6 +3424,10 @@ def train_epoch(
                     # Global task tracking (Jan 2026): track all ever-seen tasks
                     if global_task_tracker is not None:
                         global_task_tracker['all_seen_task_ids'].add(sample_task_id)
+                        # STRICT SOLVED TRACKING: increment 'seen' count for this task
+                        if sample_task_id not in global_task_tracker['per_task_variant_stats']:
+                            global_task_tracker['per_task_variant_stats'][sample_task_id] = {'seen': 0, 'solved': 0}
+                        global_task_tracker['per_task_variant_stats'][sample_task_id]['seen'] += 1
                 
                 # Valid mask (exclude padding)
                 valid_mask = target_i != -100
@@ -3460,6 +3464,9 @@ def train_epoch(
                                     global_task_tracker['all_solved_task_ids'].add(sample_task_id)
                                     global_task_tracker['first_solve_epoch'][sample_task_id] = epoch + 1
                                     epoch_diagnostics['new_globally_solved_count'] = epoch_diagnostics.get('new_globally_solved_count', 0) + 1
+                                # STRICT SOLVED TRACKING: increment 'solved' count for this task
+                                if sample_task_id in global_task_tracker['per_task_variant_stats']:
+                                    global_task_tracker['per_task_variant_stats'][sample_task_id]['solved'] += 1
                         
                         # HPM DYNAMIC BUFFER POPULATION:
                         # When a sample is solved exactly, store its context in dynamic banks
@@ -3778,13 +3785,24 @@ def train_epoch(
                 expected_total = global_task_tracker.get('expected_task_count', None)
                 new_this_epoch = epoch_diagnostics.get('new_globally_solved_count', 0)
                 epoch_solved_this_epoch = len(epoch_diagnostics['solved_task_ids'])
+                
+                # STRICT SOLVED: Count tasks where ALL variants were solved (100% invariant)
+                # A task is strictly solved if solved_count == seen_count and seen_count > 0
+                per_task_stats = global_task_tracker.get('per_task_variant_stats', {})
+                strict_solved_count = sum(
+                    1 for stats in per_task_stats.values()
+                    if stats['seen'] > 0 and stats['solved'] == stats['seen']
+                )
+                
                 if expected_total is not None:
                     print(f"    [TaskTrack] Global_Solved: {total_globally_solved}/{expected_total}, "
+                          f"Strict_Solved: {strict_solved_count}/{expected_total}, "
                           f"Epoch_Solved: {epoch_solved_this_epoch}, New_Puzzles: {new_this_epoch}")
                 else:
                     # Fallback to dynamic count
                     total_ever_seen = len(global_task_tracker['all_seen_task_ids'])
                     print(f"    [TaskTrack] Global_Solved: {total_globally_solved}/{total_ever_seen}, "
+                          f"Strict_Solved: {strict_solved_count}/{total_ever_seen}, "
                           f"Epoch_Solved: {epoch_solved_this_epoch}, New_Puzzles: {new_this_epoch}")
             
             # FG/BG accuracy for this batch and running averages
@@ -6787,6 +6805,14 @@ Config Overrides:
         'first_solve_epoch': {},            # Dict: task_id -> first epoch where it was solved
         'expected_task_count': expected_task_count,  # Stable denominator from dataset
         'dataset_unique_task_ids': dataset_unique_task_ids,  # Full set for validation
+        # =============================================================
+        # STRICT SOLVED TRACKING (Jan 2026)
+        # =============================================================
+        # Tracks tasks where ALL seen augmentation variants were solved correctly.
+        # A task is "strictly solved" only if every sample for that task achieved
+        # exact match. This is the true augmentation-invariance metric.
+        # Structure: {task_id: {'seen': count, 'solved': count}}
+        'per_task_variant_stats': {},       # Per-task seen/solved counts
     }
     
     # ADAPTIVE BATCH SIZE TRACKING

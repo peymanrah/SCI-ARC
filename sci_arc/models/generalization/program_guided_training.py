@@ -90,11 +90,17 @@ class ProgramCache:
     
     Stores task_id -> (program_trace, confidence_score) mappings.
     Used to avoid re-mining programs every epoch.
+    
+    CACHE KEY NORMALIZATION (Jan 2026):
+    Cache keys may include source prefix (e.g., "agi2_train:52df9849")
+    but dataset task_ids may be raw (e.g., "52df9849"). We maintain
+    secondary indexes to support both lookup formats.
     """
     
     def __init__(self, cache_path: Optional[str] = None):
         self.cache: Dict[str, Dict[str, Any]] = {}
         self._by_input_hash: Dict[str, Dict[str, Any]] = {}
+        self._by_raw_task_id: Dict[str, Dict[str, Any]] = {}  # Jan 2026: raw task_id index
         self.cache_path = Path(cache_path) if cache_path else None
         
         if self.cache_path and self.cache_path.exists():
@@ -137,18 +143,40 @@ class ProgramCache:
         # This lets training fetch pseudo-labels by the (augmented) input hash.
         if input_hash:
             self._by_input_hash[input_hash] = self.cache[task_id]
+        
+        # Secondary index for raw task_id (without source prefix)
+        # Cache may use "agi2_train:52df9849" but dataset uses "52df9849"
+        raw_id = task_id.split(':')[-1] if ':' in task_id else task_id
+        self._by_raw_task_id[raw_id] = self.cache[task_id]
     
     def get(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """Get cached program for task."""
-        return self.cache.get(task_id)
+        """Get cached program for task.
+        
+        Tries multiple lookup strategies:
+        1. Exact task_id match
+        2. Raw task_id (without source prefix)
+        """
+        # Direct lookup
+        if task_id in self.cache:
+            return self.cache[task_id]
+        
+        # Try raw task_id (dataset may use "52df9849" while cache has "agi2_train:52df9849")
+        raw_id = task_id.split(':')[-1] if ':' in task_id else task_id
+        return self._by_raw_task_id.get(raw_id)
 
     def get_by_input_hash(self, input_hash: str) -> Optional[Dict[str, Any]]:
         """Get cached program by input hash (useful for augmented variants)."""
         return self._by_input_hash.get(input_hash)
     
     def has(self, task_id: str) -> bool:
-        """Check if task has cached program."""
-        return task_id in self.cache
+        """Check if task has cached program.
+        
+        Checks both exact task_id and raw task_id (without source prefix).
+        """
+        if task_id in self.cache:
+            return True
+        raw_id = task_id.split(':')[-1] if ':' in task_id else task_id
+        return raw_id in self._by_raw_task_id
     
     def save(self):
         """Save cache to disk."""
@@ -167,24 +195,33 @@ class ProgramCache:
                 with open(self.cache_path, 'r', encoding='utf-8') as f:
                     self.cache = json.load(f)
 
-                # Rebuild secondary index.
+                # Rebuild secondary indexes.
                 self._by_input_hash = {}
-                for entry in self.cache.values():
+                self._by_raw_task_id = {}
+                for task_id, entry in self.cache.items():
                     ih = entry.get('input_hash')
                     if ih:
                         self._by_input_hash[ih] = entry
+                    
+                    # Build raw task_id index (strip source prefix like "agi2_train:")
+                    raw_id = task_id.split(':')[-1] if ':' in task_id else task_id
+                    self._by_raw_task_id[raw_id] = entry
                 
                 print(f"[ProgramCache] Loaded {len(self.cache)} programs from {self.cache_path}")
                 if len(self._by_input_hash) > 0:
                     print(f"[ProgramCache] Built input_hash index with {len(self._by_input_hash)} entries")
+                if len(self._by_raw_task_id) > 0:
+                    print(f"[ProgramCache] Built raw_task_id index with {len(self._by_raw_task_id)} entries")
             except json.JSONDecodeError as e:
                 print(f"[ProgramCache] Warning: Cache file corrupted, starting fresh: {e}")
                 self.cache = {}
                 self._by_input_hash = {}
+                self._by_raw_task_id = {}
             except Exception as e:
                 print(f"[ProgramCache] Warning: Failed to load cache: {e}")
                 self.cache = {}
                 self._by_input_hash = {}
+                self._by_raw_task_id = {}
         elif self.cache_path:
             print(f"[ProgramCache] Cache file not found: {self.cache_path}")
             print(f"[ProgramCache] Primitive loss will be inactive until cache is built or online_mining is enabled")
