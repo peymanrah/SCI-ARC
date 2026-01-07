@@ -97,6 +97,29 @@ def load_model_with_checkpoint(checkpoint_path, device='cpu'):
     full_config = checkpoint.get('config', {})
     model_config = full_config.get('model', {})
     
+    # Detect if checkpoint was trained with complexity signals by checking stop_predictor weight shape
+    # Old checkpoints: dsc.stop_predictor.0.weight has shape [128, hidden_dim+1+context_dim] = [128, 513]
+    # New checkpoints: dsc.stop_predictor.0.weight has shape [128, hidden_dim+1+context_dim+3] = [128, 516]
+    use_complexity_signals = model_config.get('dsc_use_complexity_signals', None)
+    if use_complexity_signals is None:
+        # Not in config - detect from checkpoint weights
+        stop_pred_key = 'dsc.stop_predictor.0.weight'
+        if stop_pred_key in checkpoint['model_state_dict']:
+            stop_pred_shape = checkpoint['model_state_dict'][stop_pred_key].shape
+            # If shape[1] % 3 == 0 and expected size matches, it's new format
+            hidden_dim = model_config.get('hidden_dim', 256)
+            expected_old = hidden_dim + 1 + hidden_dim  # D + 1 + C = 513 for hidden_dim=256
+            expected_new = expected_old + 3  # + 3 complexity signals = 516
+            if stop_pred_shape[1] == expected_new:
+                use_complexity_signals = True
+                print(f"  Detected: Checkpoint trained WITH complexity signals (dim={stop_pred_shape[1]})")
+            else:
+                use_complexity_signals = False
+                print(f"  Detected: Checkpoint trained WITHOUT complexity signals (dim={stop_pred_shape[1]})")
+        else:
+            use_complexity_signals = False  # Default to False for unknown
+            print(f"  Warning: Could not detect complexity signals setting, defaulting to False")
+    
     # Create RLANConfig from checkpoint config
     config = RLANConfig(
         hidden_dim=model_config.get('hidden_dim', 256),
@@ -118,6 +141,8 @@ def load_model_with_checkpoint(checkpoint_path, device='cpu'):
         dsc_num_heads=model_config.get('dsc_num_heads', 4),
         msre_encoding_dim=model_config.get('msre_encoding_dim', 32),
         msre_num_freq=model_config.get('msre_num_freq', 8),
+        # Jan 2026: Use detected value for backward compatibility
+        dsc_use_complexity_signals=use_complexity_signals,
     )
     
     # Create model
