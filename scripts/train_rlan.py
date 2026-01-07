@@ -1147,7 +1147,9 @@ def create_loss(config: dict) -> RLANLoss:
         bg_weight_cap=train_config.get('bg_weight_cap', 2.0),
         fg_weight_cap=train_config.get('fg_weight_cap', 5.0),
         # Centroid diversity (CRITICAL for DSC health - prevents clue collapse)
-        lambda_centroid_diversity=train_config.get('lambda_centroid_diversity', 0.1),
+        # Default 0.3 matches rlan_loss.py default. Was 0.1 which caused DSC collapse.
+        # For production training, use 0.5 in config (see rlan_stable_prod.yaml).
+        lambda_centroid_diversity=train_config.get('lambda_centroid_diversity', 0.3),
     )
     
     return loss_fn

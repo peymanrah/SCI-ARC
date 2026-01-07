@@ -165,6 +165,15 @@ model:
   hyperlora_scaling: 1.0     # Scale factor for LoRA outputs
   hyperlora_dropout: 0.0     # Dropout on LoRA activations
   hyperlora_init_scale: 0.1  # INCREASED: Was 0.01, now 0.1 for stronger meta-learning signal
+  
+  # =============================================================
+  # LORA NORM CONSTRAINT (Jan 2026)
+  # =============================================================
+  # Training collapse analysis showed LoRA norm growing unboundedly.
+  # lora_max_norm clips LoRA weights to prevent this.
+  # Tighter bound (1.0) prevents explosive growth that caused collapse.
+  # =============================================================
+  hyperlora_max_norm: 1.0    # STABILITY FIX: Constrain LoRA norm (was 3.0)
 
   # =============================================================
   # HIERARCHICAL PRIMITIVE MEMORY (HPM v2) - Dec 2025
@@ -325,8 +334,15 @@ training:
   use_torch_compile: false    # DISABLED - can cause issues with dynamic shapes in ARC grids
   torch_compile_mode: 'reduce-overhead'  # Options: 'default', 'reduce-overhead', 'max-autotune'
   
-  batch_size: 80    # Safe with memory optimizations (epochs 0-13). LOO/Equi add N passes at epoch 8+/12+
-  grad_accumulation_steps: 4  # effective_batch_size = 80 × 4 = 320
+  # =============================================================
+  # MEMORY STABILITY FIX (Jan 2026)
+  # =============================================================
+  # Reduced batch_size from 80 to 32 to prevent OOM with LOO+Equivariance training.
+  # Increased grad_accumulation from 4 to 10 to maintain effective batch = 320.
+  # This matches TRM's effective batch size while staying within 24GB VRAM.
+  # =============================================================
+  batch_size: 32    # STABILITY FIX: Reduced from 80 to prevent OOM
+  grad_accumulation_steps: 10  # effective_batch_size = 32 × 10 = 320
   
   learning_rate: 5.0e-4  # Works well in ablation
   weight_decay: 0.01     # Light regularization
@@ -334,11 +350,16 @@ training:
   
   # Per-module LR boosting
   # NOTE: Set to 1.0 for stable training. Higher values may cause NaN.
-  # HyperLoRA benefits from higher LR to learn meta-weight prediction faster.
-  # MIDDLE GROUND (Dec 2025): Reduced from 10.0 to 3.0 for smoother staged training
+  # =============================================================
+  # LORA STABILITY FIX (Jan 2026)
+  # =============================================================
+  # Set all LR multipliers to 1.0 to prevent LoRA norm explosion.
+  # Training log analysis showed LoRA norm growing 0.8→1.7 causing collapse.
+  # Uniform learning rate across all modules is more stable.
+  # =============================================================
   dsc_lr_multiplier: 1.0
   msre_lr_multiplier: 1.0
-  hyperlora_lr_multiplier: 3.0   # 3x base LR (was 10x, caused instability)
+  hyperlora_lr_multiplier: 1.0   # STABILITY FIX: Reduced from 3.0 to 1.0
   
   # Temperature for DSC attention
   temperature_start: 1.0
@@ -374,6 +395,21 @@ training:
   lambda_curriculum: 0.0        # OFF
   lambda_deep_supervision: 0.0  # OFF - not needed with weighted_stablemax
   lambda_act: 0.0               # OFF
+  
+  # =============================================================
+  # CENTROID DIVERSITY LOSS (CRITICAL - Jan 2026 Bug Fix)
+  # =============================================================
+  # This loss prevents DSC clue collapse where all 7 clues attend
+  # to the same spatial location. Without this, MSRE produces
+  # identical clue features and the solver cannot iteratively refine.
+  #
+  # Diagnosis showed warmup3.pt trained with default 0.1 which was
+  # too weak - centroids clustered at (0.38, 0.39) with max distance
+  # only 0.063 (should be >0.5). All attention maps 99.3% correlated.
+  #
+  # DSC_CLUE_CONDITIONING_ANALYSIS.md recommends 0.5 for collapse.
+  # =============================================================
+  lambda_centroid_diversity: 0.5  # CRITICAL: Prevents DSC clue collapse (was missing!)
   
   # Clue regularization (ENABLED - validated stable Dec 2025)
   # Helps model learn appropriate clue count per task
