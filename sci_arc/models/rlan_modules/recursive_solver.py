@@ -593,6 +593,7 @@ class RecursiveSolver(nn.Module):
         use_lcr: bool = True,   # Enable count injection (ablation flag)
         use_sph: bool = True,   # Enable predicate gating (ablation flag)
         use_feedback: bool = False,  # Use prediction feedback (disabled by default - causes gradient issues)
+        use_entropy_refinement: bool = True,  # NEW (Dec 2025): Entropy-guided refinement for progressive accuracy
         use_solver_context: bool = True,  # NEW: Enable solver cross-attention to support set
         num_context_heads: int = 4,  # Heads for solver cross-attention
         use_dsc: bool = True,  # Kept for API compatibility but not used for module creation
@@ -616,6 +617,10 @@ class RecursiveSolver(nn.Module):
             use_feedback: Whether to use prediction feedback in refinement loop.
                           Disabled by default because argmax is non-differentiable,
                           causing later steps to receive gradient-disconnected inputs.
+            use_entropy_refinement: Whether to use entropy-guided refinement (Dec 2025).
+                          Gives solver different input at each step by highlighting
+                          uncertain regions from previous prediction. This breaks
+                          the plateau effect by providing step-specific information.
             use_solver_context: Whether to use cross-attention to support set at each step.
                                 Phase 2.5 feature - gives solver direct access to examples.
             num_context_heads: Number of attention heads for solver cross-attention.
@@ -635,6 +640,7 @@ class RecursiveSolver(nn.Module):
         self.use_lcr = use_lcr
         self.use_sph = use_sph
         self.use_feedback = use_feedback
+        self.use_entropy_refinement = use_entropy_refinement
         self.use_solver_context = use_solver_context
         self.use_dsc = use_dsc
         self.gradient_checkpointing = gradient_checkpointing
@@ -716,6 +722,29 @@ class RecursiveSolver(nn.Module):
                 print(f"[RecursiveSolver] Jan 2026: HPM solver-context coupling ENABLED (max_tokens={hpm_solver_context_max_tokens})")
         else:
             self.solver_cross_attn = None
+        
+        # Dec 2025: Entropy-Guided Refinement Module
+        # This gives the solver DIFFERENT input at each step based on prediction uncertainty
+        # Key insight: Without this, aggregated+input_embed is IDENTICAL every step,
+        # so later steps cannot improve because they receive the same information.
+        # By adding entropy from previous step, we highlight uncertain regions.
+        if use_entropy_refinement:
+            # Project entropy (1 channel) + soft prediction (num_classes) to hidden_dim
+            # This provides: (1) WHERE the model is uncertain, (2) WHAT it currently predicts
+            self.entropy_proj = nn.Sequential(
+                nn.Conv2d(1 + num_classes, hidden_dim, 3, padding=1),
+                nn.GELU(),
+                nn.GroupNorm(8, hidden_dim),
+            )
+            # Gate to blend entropy signal with aggregated features
+            self.entropy_gate = nn.Sequential(
+                nn.Conv2d(hidden_dim * 2, hidden_dim, 1),
+                nn.Sigmoid(),
+            )
+            print(f"[RecursiveSolver] Entropy-guided refinement ENABLED (breaks plateau effect)")
+        else:
+            self.entropy_proj = None
+            self.entropy_gate = None
         
         self.dropout = nn.Dropout(dropout)
     
@@ -1072,6 +1101,9 @@ class RecursiveSolver(nn.Module):
         # Store initial hidden state for residual connections
         h_initial = None
         
+        # Dec 2025: Previous step logits for entropy-guided refinement
+        prev_logits = None
+        
         # Allow overriding num_steps at inference (e.g., to test more iterations)
         effective_num_steps = num_steps_override if num_steps_override is not None else self.num_steps
         
@@ -1079,9 +1111,34 @@ class RecursiveSolver(nn.Module):
             # Check if all samples have halted (inference only)
             if self.use_act and not self.training and act_state.halted.all():
                 break
+            
+            # Dec 2025: Entropy-Guided Refinement
+            # For step > 0, augment aggregated features with entropy from previous prediction
+            # This gives the solver DIFFERENT input at each step, breaking the plateau effect
+            if self.use_entropy_refinement and self.entropy_proj is not None and prev_logits is not None:
+                # Compute prediction entropy: H(p) = -sum(p * log(p))
+                # High entropy = uncertain, low entropy = confident
+                prev_probs = F.softmax(prev_logits, dim=1)  # (B, C, H, W)
+                entropy = -torch.sum(prev_probs * torch.log(prev_probs + 1e-8), dim=1, keepdim=True)  # (B, 1, H, W)
+                # Normalize entropy to [0, 1] for stable training
+                max_entropy = torch.log(torch.tensor(self.num_classes, device=entropy.device, dtype=entropy.dtype))
+                entropy = entropy / max_entropy  # (B, 1, H, W)
+                
+                # Concatenate entropy and soft prediction to project
+                entropy_input = torch.cat([entropy, prev_probs], dim=1)  # (B, 1+C, H, W)
+                entropy_features = self.entropy_proj(entropy_input)  # (B, D, H, W)
+                
+                # Gated addition: blend entropy signal with aggregated features
+                gate_input = torch.cat([aggregated, entropy_features], dim=1)  # (B, 2D, H, W)
+                gate = self.entropy_gate(gate_input)  # (B, D, H, W), values in [0, 1]
+                
+                # Modulate aggregated with entropy info (residual style)
+                aggregated_refined = aggregated + gate * entropy_features
+            else:
+                aggregated_refined = aggregated
                 
             # Combine aggregated features with input embedding
-            combined = torch.cat([aggregated, input_embed], dim=1)  # (B, 2D, H, W)
+            combined = torch.cat([aggregated_refined, input_embed], dim=1)  # (B, 2D, H, W)
             combined = self.dropout(combined)
             
             # Core solver step - GRU + optional LoRA + optional cross-attention
@@ -1146,12 +1203,22 @@ class RecursiveSolver(nn.Module):
             if t == 0:
                 h_initial = h_new.clone()
             elif h_initial is not None:
-                # Add residual from initial state to prevent degradation
-                # This helps later steps maintain the quality of step 0
-                # while still allowing refinement
-                # Increased from 0.1 to 0.3 to prevent solver degradation
-                # Analysis showed step 0 had best loss, later steps regressed
-                h_new = 0.7 * h_new + 0.3 * h_initial
+                # Dec 2025: Progressive Residual Decay
+                # Early steps (1-2): Strong residual (0.3) to prevent degradation
+                # Later steps (3+): Weaker residual (0.15) to allow more refinement
+                # This addresses the "30% lock" issue where h_initial dominates later steps
+                #
+                # Key insight: After entropy-guided refinement helps solver see errors,
+                # we need to ALLOW it to make larger corrections in later steps.
+                if t <= 2:
+                    # Early steps: keep strong residual for stability
+                    residual_weight = 0.3
+                else:
+                    # Later steps: reduce residual to allow more change
+                    # Linear decay from 0.3 to 0.1 over steps 3-5
+                    residual_weight = max(0.1, 0.3 - 0.05 * (t - 2))
+                
+                h_new = (1.0 - residual_weight) * h_new + residual_weight * h_initial
             
             # Handle ACT updates
             if self.use_act:
@@ -1209,6 +1276,10 @@ class RecursiveSolver(nn.Module):
             logits = soft_clamp_logits(self.output_head(h_for_output))  # (B, num_classes, H, W)
             
             all_logits.append(logits)
+            
+            # Dec 2025: Update prev_logits for entropy-guided refinement in next step
+            # Detach to prevent gradient flow through entropy computation (stabilizes training)
+            prev_logits = logits.detach()
             
             # Optional: Use prediction to update input embedding (feedback)
             # CRITICAL FIX (Dec 2025): Removed Gumbel noise!

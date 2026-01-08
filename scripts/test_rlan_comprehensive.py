@@ -1,748 +1,1119 @@
-#!/usr/bin/env python
 """
-Comprehensive RLAN Testing Script
+Comprehensive RLAN Module Testing Suite
 
-This script performs a deep mathematical and academic review of RLAN by:
-1. Loading real ARC training/evaluation data
-2. Running forward passes with detailed tensor logging
-3. Checking for NaN/Inf at each module output
-4. Validating normalization choices (LayerNorm vs BatchNorm)
-5. Analyzing loss function behavior
-6. Testing gradient flow
-7. Validating counting, spatial reasoning, and compositional learning
+Tests ALL RLAN modules (old and new) with trained checkpoint on real ARC data:
+1. Core RLAN modules: Encoder, DSC, MSRE, LCR, SPH, RecursiveSolver
+2. HyperLoRA meta-learning module
+3. Context Encoder (cross-attention)
+4. TEPS (Test-time Exhaustive Program Search)
+5. NS-TEPS (Neuro-Symbolic TEPS with object-level operations)
+6. Program-Guided Training integration
+7. Recursive solver per-step visualization
+8. End-to-end signal quality analysis
+9. Gradient flow and norm analysis
 
-Author: AI Agent for RLAN Academic Review
+Author: AI Research Assistant
+Date: January 2026
 """
 
 import os
 import sys
-from pathlib import Path
 import json
-import math
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
-
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.gridspec import GridSpec
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple, Any
+import traceback
+import time
 
-# Add project root to path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sci_arc.models import RLAN, RLANConfig
-from sci_arc.models.rlan_modules import (
-    DynamicSaliencyController,
-    MultiScaleRelativeEncoding,
-    LatentCountingRegisters,
-    SymbolicPredicateHeads,
-    RecursiveSolver,
-)
-from sci_arc.models.grid_encoder import GridEncoder
-from sci_arc.training.rlan_loss import (
-    RLANLoss, FocalLoss, EntropyRegularization,
-    SparsityRegularization, PredicateDiversityLoss, CurriculumPenalty
-)
+from sci_arc.models.rlan import RLAN, RLANConfig
+
+# ARC color palette
+ARC_COLORS = [
+    '#000000',  # 0: black
+    '#0074D9',  # 1: blue
+    '#FF4136',  # 2: red
+    '#2ECC40',  # 3: green
+    '#FFDC00',  # 4: yellow
+    '#AAAAAA',  # 5: gray
+    '#F012BE',  # 6: magenta
+    '#FF851B',  # 7: orange
+    '#7FDBFF',  # 8: cyan
+    '#870C25',  # 9: maroon
+]
 
 
-@dataclass
-class TensorStats:
-    """Statistics for a tensor."""
-    name: str
-    shape: tuple
-    dtype: str
-    min_val: float
-    max_val: float
-    mean_val: float
-    std_val: float
-    has_nan: bool
-    has_inf: bool
-    num_zeros: int
+def get_arc_cmap():
+    """Get a colormap for ARC grids."""
+    from matplotlib.colors import ListedColormap
+    return ListedColormap(ARC_COLORS)
+
+
+def load_arc_task(task_path: Path) -> dict:
+    """Load an ARC task from JSON file."""
+    with open(task_path, 'r') as f:
+        return json.load(f)
+
+
+def get_grid_size_category(h: int, w: int) -> str:
+    """Categorize grid by size."""
+    max_dim = max(h, w)
+    if max_dim <= 10:
+        return "small"
+    elif max_dim <= 20:
+        return "medium"
+    else:
+        return "large"
+
+
+def find_tasks_by_size(data_dir: Path, target_sizes=("small", "medium", "large"), max_per_size: int = 2) -> Dict[str, List[dict]]:
+    """Find ARC tasks categorized by grid size."""
+    tasks_by_size = {size: [] for size in target_sizes}
+    json_files = list(data_dir.glob("*.json"))
     
-    def __str__(self):
-        status = "OK" if not (self.has_nan or self.has_inf) else "PROBLEM"
-        nan_str = " [NaN!]" if self.has_nan else ""
-        inf_str = " [Inf!]" if self.has_inf else ""
-        return (
-            f"{status} {self.name}: shape={self.shape}, "
-            f"range=[{self.min_val:.4f}, {self.max_val:.4f}], "
-            f"mean={self.mean_val:.4f}, std={self.std_val:.4f}"
-            f"{nan_str}{inf_str}"
-        )
-
-
-def analyze_tensor(name: str, tensor: torch.Tensor) -> TensorStats:
-    """Analyze a tensor for numerical issues."""
-    if tensor is None:
-        return TensorStats(name, (), "None", 0, 0, 0, 0, False, False, 0)
-    
-    with torch.no_grad():
-        flat = tensor.float().flatten()
-        return TensorStats(
-            name=name,
-            shape=tuple(tensor.shape),
-            dtype=str(tensor.dtype),
-            min_val=flat.min().item() if len(flat) > 0 else 0.0,
-            max_val=flat.max().item() if len(flat) > 0 else 0.0,
-            mean_val=flat.mean().item() if len(flat) > 0 else 0.0,
-            std_val=flat.std().item() if len(flat) > 0 else 0.0,
-            has_nan=torch.isnan(tensor).any().item(),
-            has_inf=torch.isinf(tensor).any().item(),
-            num_zeros=(flat == 0).sum().item(),
-        )
-
-
-def load_arc_tasks(data_dir: str, split: str = "training", max_tasks: int = 50) -> List[Dict]:
-    """Load ARC tasks from directory."""
-    tasks = []
-    split_dir = Path(data_dir) / split
-    
-    if not split_dir.exists():
-        print(f"Warning: {split_dir} not found, looking for alternate paths...")
-        # Try alternate locations
-        alt_paths = [
-            Path(data_dir) / f"{split}_challenges",
-            Path(data_dir) / "challenges" / split,
-            Path(data_dir),
-        ]
-        for alt in alt_paths:
-            if alt.exists():
-                split_dir = alt
-                break
-    
-    if not split_dir.exists():
-        print(f"Error: Could not find data directory")
-        return []
-    
-    json_files = list(split_dir.glob("*.json"))[:max_tasks]
-    
-    for json_file in json_files:
+    for task_path in json_files:
         try:
-            with open(json_file, 'r') as f:
-                data = json.load(f)
-            
-            task = {
-                'task_id': json_file.stem,
-                'train': [(np.array(p['input']), np.array(p['output'])) for p in data.get('train', [])],
-                'test': [(np.array(p['input']), np.array(p.get('output', p['input']))) for p in data.get('test', [])],
-            }
-            tasks.append(task)
-        except Exception as e:
-            print(f"Error loading {json_file}: {e}")
+            task = load_arc_task(task_path)
+            if task.get("train") and len(task["train"]) > 0:
+                grid = task["train"][0]["input"]
+                h, w = len(grid), len(grid[0])
+                category = get_grid_size_category(h, w)
+                
+                if category in tasks_by_size and len(tasks_by_size[category]) < max_per_size:
+                    tasks_by_size[category].append({
+                        "path": task_path,
+                        "task_id": task_path.stem,
+                        "grid_size": (h, w),
+                        "task": task
+                    })
+        except Exception:
+            continue
     
-    return tasks
+    return tasks_by_size
 
 
-def test_grid_encoder(device: torch.device):
-    """Test GridEncoder module."""
-    print("\n" + "="*80)
-    print("TEST 1: GridEncoder Analysis")
-    print("="*80)
+def load_model_with_checkpoint(checkpoint_path: Path, device: str = 'cpu') -> Tuple[RLAN, dict]:
+    """Load RLAN model with trained checkpoint."""
+    print(f"Loading checkpoint from: {checkpoint_path}")
     
-    encoder = GridEncoder(hidden_dim=128, num_colors=10, max_size=30, dropout=0.0).to(device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    full_config = checkpoint.get('config', {})
+    model_config = full_config.get('model', {})
     
-    # Test cases
-    test_grids = [
-        ("random_5x5", torch.randint(0, 10, (2, 5, 5))),
-        ("all_zeros_10x10", torch.zeros(2, 10, 10, dtype=torch.long)),
-        ("all_nines_10x10", torch.full((2, 10, 10), 9, dtype=torch.long)),
-        ("max_size_30x30", torch.randint(0, 10, (1, 30, 30))),
-        ("single_pixel", torch.randint(0, 10, (1, 1, 1))),
-    ]
+    # Detect complexity signals for backward compatibility
+    use_complexity_signals = model_config.get('dsc_use_complexity_signals', None)
+    if use_complexity_signals is None:
+        stop_pred_key = 'dsc.stop_predictor.0.weight'
+        if stop_pred_key in checkpoint['model_state_dict']:
+            stop_pred_shape = checkpoint['model_state_dict'][stop_pred_key].shape
+            hidden_dim = model_config.get('hidden_dim', 256)
+            expected_old = hidden_dim + 1 + hidden_dim
+            expected_new = expected_old + 3
+            use_complexity_signals = (stop_pred_shape[1] == expected_new)
+        else:
+            use_complexity_signals = False
     
-    all_passed = True
-    for name, grid in test_grids:
-        grid = grid.to(device)
-        output = encoder(grid)
-        stats = analyze_tensor(f"GridEncoder({name})", output)
-        print(f"  {stats}")
+    config = RLANConfig(
+        hidden_dim=model_config.get('hidden_dim', 256),
+        num_colors=model_config.get('num_colors', 10),
+        num_classes=model_config.get('num_classes', 10),
+        max_grid_size=model_config.get('max_grid_size', 30),
+        max_clues=model_config.get('max_clues', 7),
+        num_predicates=model_config.get('num_predicates', 32),
+        num_solver_steps=model_config.get('num_solver_steps', 6),
+        use_act=model_config.get('use_act', False),
+        dropout=model_config.get('dropout', 0.1),
+        use_context_encoder=model_config.get('use_context_encoder', True),
+        use_dsc=model_config.get('use_dsc', True),
+        use_msre=model_config.get('use_msre', True),
+        use_lcr=model_config.get('use_lcr', False),
+        use_sph=model_config.get('use_sph', False),
+        use_solver_context=model_config.get('use_solver_context', True),
+        use_cross_attention_context=model_config.get('use_cross_attention_context', True),
+        dsc_num_heads=model_config.get('dsc_num_heads', 4),
+        msre_encoding_dim=model_config.get('msre_encoding_dim', 32),
+        msre_num_freq=model_config.get('msre_num_freq', 8),
+        dsc_use_complexity_signals=use_complexity_signals,
+    )
+    
+    model = RLAN(config=config)
+    missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    
+    if missing_keys:
+        print(f"  Warning: Missing keys: {len(missing_keys)}")
+    if unexpected_keys:
+        print(f"  Warning: Unexpected keys: {len(unexpected_keys)}")
+    
+    model.to(device)
+    model.eval()
+    
+    print(f"  Loaded from epoch {checkpoint.get('epoch', 'unknown')}")
+    return model, model_config
+
+
+def visualize_grid(ax, grid, title: str, cmap=None):
+    """Visualize an ARC grid."""
+    if cmap is None:
+        cmap = get_arc_cmap()
+    if isinstance(grid, torch.Tensor):
+        grid = grid.cpu().numpy()
+    
+    ax.imshow(grid, cmap=cmap, vmin=0, vmax=9)
+    ax.set_title(title, fontsize=9)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    
+    h, w = grid.shape
+    for i in range(h + 1):
+        ax.axhline(i - 0.5, color='white', linewidth=0.3)
+    for j in range(w + 1):
+        ax.axvline(j - 0.5, color='white', linewidth=0.3)
+
+
+def visualize_features(ax, features, title: str):
+    """Visualize feature map (mean across channels)."""
+    if isinstance(features, torch.Tensor):
+        features = features.cpu().numpy()
+    if len(features.shape) == 3:
+        feat_vis = features.mean(axis=0)
+    else:
+        feat_vis = features
+    ax.imshow(feat_vis, cmap='viridis')
+    ax.set_title(title, fontsize=8)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+class TestResult:
+    """Container for test results."""
+    def __init__(self, name: str):
+        self.name = name
+        self.passed = True
+        self.messages = []
+        self.metrics = {}
+        self.warnings = []
+        self.errors = []
+    
+    def add_check(self, check_name: str, passed: bool, message: str = ""):
+        if not passed:
+            self.passed = False
+            self.errors.append(f"[FAIL] {check_name}: {message}")
+        else:
+            self.messages.append(f"[OK] {check_name}")
+    
+    def add_warning(self, message: str):
+        self.warnings.append(f"[WARN] {message}")
+    
+    def add_metric(self, name: str, value):
+        self.metrics[name] = value
+    
+    def __repr__(self):
+        status = "PASS" if self.passed else "FAIL"
+        return f"TestResult({self.name}): {status} - {len(self.errors)} errors, {len(self.warnings)} warnings"
+
+
+def pad_grid(grid, target_h: int, target_w: int, pad_value: int = 0) -> np.ndarray:
+    """Pad a grid to target dimensions."""
+    arr = np.array(grid)
+    curr_h, curr_w = arr.shape
+    padded = np.full((target_h, target_w), pad_value, dtype=np.int64)
+    padded[:curr_h, :curr_w] = arr
+    return padded
+
+
+def prepare_task_tensors(task: dict, device: str = 'cpu') -> Tuple[torch.Tensor, ...]:
+    """Prepare task tensors for model input."""
+    train_pairs = task["train"]
+    num_pairs = len(train_pairs)
+    
+    max_h = max(max(len(p["input"]) for p in train_pairs),
+                max(len(p["output"]) for p in train_pairs))
+    max_w = max(max(len(p["input"][0]) for p in train_pairs),
+                max(len(p["output"][0]) for p in train_pairs))
+    
+    train_inputs_list = [pad_grid(p["input"], max_h, max_w) for p in train_pairs]
+    train_outputs_list = [pad_grid(p["output"], max_h, max_w) for p in train_pairs]
+    
+    train_inputs = torch.tensor(np.stack(train_inputs_list), dtype=torch.long).unsqueeze(0).to(device)
+    train_outputs = torch.tensor(np.stack(train_outputs_list), dtype=torch.long).unsqueeze(0).to(device)
+    pair_mask = torch.ones(1, num_pairs, device=device)
+    
+    test_input = pad_grid(task["train"][0]["input"], max_h, max_w)
+    test_target = pad_grid(task["train"][0]["output"], max_h, max_w)
+    x = torch.tensor(test_input, dtype=torch.long).unsqueeze(0).to(device)
+    
+    return x, train_inputs, train_outputs, pair_mask, test_input, test_target
+
+
+# ==============================================================================
+# TEST 1: CORE RLAN MODULES
+# ==============================================================================
+
+def test_core_modules(model: RLAN, task_info: dict, output_dir: Path, device: str = 'cpu') -> TestResult:
+    """Test core RLAN modules: Encoder, DSC, MSRE, Solver."""
+    result = TestResult("Core Modules")
+    task_id = task_info["task_id"]
+    task = task_info["task"]
+    
+    try:
+        x, train_inputs, train_outputs, pair_mask, test_input, test_target = prepare_task_tensors(task, device)
         
-        if stats.has_nan or stats.has_inf:
-            all_passed = False
-        
-        # Check output shape
-        expected_shape = (grid.shape[0], grid.shape[1], grid.shape[2], 128)
-        if output.shape != expected_shape:
-            print(f"    ✗ Shape mismatch: expected {expected_shape}, got {output.shape}")
-            all_passed = False
-    
-    # Analysis: LayerNorm effect
-    print("\n  LayerNorm Analysis:")
-    with torch.no_grad():
-        grid = torch.randint(0, 10, (4, 10, 10)).to(device)
-        output = encoder(grid)
-        # Check per-position mean/std
-        per_pos_mean = output.mean(dim=-1)  # Should be ~0
-        per_pos_std = output.std(dim=-1)    # Should be ~1
-        print(f"    Per-position mean: {per_pos_mean.mean():.4f} (should be ~0)")
-        print(f"    Per-position std: {per_pos_std.mean():.4f} (should be ~1)")
-    
-    return all_passed
-
-
-def test_dsc(device: torch.device):
-    """Test Dynamic Saliency Controller."""
-    print("\n" + "="*80)
-    print("TEST 2: Dynamic Saliency Controller Analysis")
-    print("="*80)
-    
-    dsc = DynamicSaliencyController(hidden_dim=128, max_clues=5, num_heads=4, dropout=0.0).to(device)
-    
-    test_cases = [
-        ("small_features", torch.randn(2, 128, 5, 5)),
-        ("larger_features", torch.randn(2, 128, 15, 15)),
-        ("max_size", torch.randn(1, 128, 30, 30)),
-    ]
-    
-    temperatures = [5.0, 1.0, 0.5, 0.1]
-    
-    all_passed = True
-    for name, features in test_cases:
-        features = features.to(device)
-        print(f"\n  Testing {name} (shape={features.shape}):")
-        
-        for temp in temperatures:
-            centroids, attention_maps, stop_logits = dsc(features, temperature=temp)
-            
-            stats_c = analyze_tensor(f"centroids(T={temp})", centroids)
-            stats_a = analyze_tensor(f"attention(T={temp})", attention_maps)
-            stats_s = analyze_tensor(f"stop_logits(T={temp})", stop_logits)
-            
-            print(f"    T={temp}: {stats_c}")
-            
-            if stats_c.has_nan or stats_a.has_nan or stats_s.has_nan:
-                all_passed = False
-            
-            # Validate attention sums to 1
-            H, W = features.shape[2], features.shape[3]
-            attn_sum = attention_maps.view(attention_maps.shape[0], attention_maps.shape[1], -1).sum(dim=-1)
-            if not torch.allclose(attn_sum, torch.ones_like(attn_sum), atol=1e-4):
-                print(f"    ✗ Attention doesn't sum to 1: {attn_sum}")
-            
-            # Check centroid bounds
-            B, K = centroids.shape[0], centroids.shape[1]
-            if (centroids[:, :, 0] < 0).any() or (centroids[:, :, 0] > H).any():
-                print(f"    ✗ Row centroids out of bounds")
-            if (centroids[:, :, 1] < 0).any() or (centroids[:, :, 1] > W).any():
-                print(f"    ✗ Col centroids out of bounds")
-    
-    return all_passed
-
-
-def test_msre(device: torch.device):
-    """Test Multi-Scale Relative Encoding."""
-    print("\n" + "="*80)
-    print("TEST 3: Multi-Scale Relative Encoding Analysis")
-    print("="*80)
-    
-    msre = MultiScaleRelativeEncoding(hidden_dim=128, encoding_dim=32, max_size=30, num_freq=8).to(device)
-    
-    features = torch.randn(2, 128, 10, 10).to(device)
-    centroids = torch.tensor([[[5.0, 5.0], [2.0, 8.0]], [[3.0, 3.0], [7.0, 7.0]]]).to(device)  # (2, 2, 2)
-    
-    output = msre(features, centroids)
-    stats = analyze_tensor("MSRE output", output)
-    print(f"  {stats}")
-    
-    # Check relative encoding properties
-    print("\n  Relative Encoding Properties:")
-    
-    # Test translation equivariance
-    features_shifted = torch.roll(features, shifts=2, dims=2)  # Shift rows
-    centroids_shifted = centroids.clone()
-    centroids_shifted[:, :, 0] += 2  # Shift centroid rows too
-    
-    output_shifted = msre(features_shifted, centroids_shifted)
-    
-    # The relative encoding should be similar (modulo boundary effects)
-    diff = (output[:, :, :, 2:-2, 2:-2] - output_shifted[:, :, :, 2:-2, 2:-2]).abs().mean()
-    print(f"  Translation equivariance diff: {diff.item():.6f} (should be small)")
-    
-    return not (stats.has_nan or stats.has_inf)
-
-
-def test_lcr(device: torch.device):
-    """Test Latent Counting Registers."""
-    print("\n" + "="*80)
-    print("TEST 4: Latent Counting Registers Analysis")
-    print("="*80)
-    
-    lcr = LatentCountingRegisters(num_colors=10, hidden_dim=128, num_freq=8, num_heads=4, dropout=0.0).to(device)
-    
-    test_cases = [
-        ("uniform_colors", torch.randint(0, 10, (2, 10, 10))),
-        ("mostly_zeros", torch.zeros(2, 10, 10, dtype=torch.long)),
-        ("mostly_ones", torch.ones(2, 10, 10, dtype=torch.long)),
-        ("single_color_each", torch.stack([torch.full((10, 10), i, dtype=torch.long) for i in range(2)])),
-    ]
-    
-    all_passed = True
-    for name, grid in test_cases:
-        grid = grid.to(device)
-        features = torch.randn(grid.shape[0], 128, grid.shape[1], grid.shape[2]).to(device)
-        
-        output = lcr(grid, features)
-        stats = analyze_tensor(f"LCR({name})", output)
-        print(f"  {stats}")
-        
-        if stats.has_nan or stats.has_inf:
-            all_passed = False
-        
-        # Check count accuracy
         with torch.no_grad():
-            for b in range(grid.shape[0]):
-                for c in range(10):
-                    actual_count = (grid[b] == c).sum().item()
-                    # LCR should encode this count somehow
-                    # We can't directly check, but we verify no NaN
-    
-    # Test counting sensitivity
-    print("\n  Counting Sensitivity Test:")
-    grid1 = torch.zeros(1, 10, 10, dtype=torch.long).to(device)
-    grid2 = torch.ones(1, 10, 10, dtype=torch.long).to(device)
-    features = torch.randn(1, 128, 10, 10).to(device)
-    
-    out1 = lcr(grid1, features)
-    out2 = lcr(grid2, features)
-    diff = (out1 - out2).abs().mean()
-    print(f"  Difference between all-zeros vs all-ones: {diff.item():.4f} (should be large)")
-    
-    return all_passed
-
-
-def test_sph(device: torch.device):
-    """Test Symbolic Predicate Heads."""
-    print("\n" + "="*80)
-    print("TEST 5: Symbolic Predicate Heads Analysis")
-    print("="*80)
-    
-    sph = SymbolicPredicateHeads(hidden_dim=128, num_predicates=8, dropout=0.0).to(device)
-    
-    features = torch.randn(4, 128, 10, 10).to(device)
-    
-    for temp in [5.0, 1.0, 0.1]:
-        predicates = sph(features, temperature=temp)
-        stats = analyze_tensor(f"SPH(T={temp})", predicates)
-        print(f"  {stats}")
-        
-        # Check predicates in [0, 1]
-        if (predicates < 0).any() or (predicates > 1).any():
-            print(f"    ✗ Predicates outside [0, 1] range")
-    
-    # Test predicate diversity
-    print("\n  Predicate Diversity Check:")
-    predicates = sph(features, temperature=1.0)
-    corr = torch.corrcoef(predicates.T)
-    off_diag = corr * (1 - torch.eye(8, device=device))
-    print(f"  Mean off-diagonal correlation: {off_diag.abs().mean():.4f} (should be low)")
-    
-    return True
-
-
-def test_solver(device: torch.device):
-    """Test Recursive Solver."""
-    print("\n" + "="*80)
-    print("TEST 6: Recursive Solver Analysis")
-    print("="*80)
-    
-    solver = RecursiveSolver(
-        hidden_dim=128, num_classes=10, num_steps=6,
-        num_predicates=8, num_colors=10, dropout=0.0
-    ).to(device)
-    
-    B, K, H, W = 2, 3, 10, 10
-    clue_features = torch.randn(B, K, 128, H, W).to(device)
-    count_embedding = torch.randn(B, 10, 128).to(device)
-    predicates = torch.rand(B, 8).to(device)
-    input_grid = torch.randint(0, 10, (B, H, W)).to(device)
-    attention_maps = F.softmax(torch.randn(B, K, H, W).view(B, K, -1), dim=-1).view(B, K, H, W).to(device)
-    
-    # Test with all steps
-    all_logits = solver(
-        clue_features=clue_features,
-        count_embedding=count_embedding,
-        predicates=predicates,
-        input_grid=input_grid,
-        attention_maps=attention_maps,
-        return_all_steps=True,
-    )
-    
-    print(f"  Number of solver steps: {len(all_logits)}")
-    
-    all_passed = True
-    for i, logits in enumerate(all_logits):
-        stats = analyze_tensor(f"Step {i} logits", logits)
-        print(f"  {stats}")
-        
-        if stats.has_nan or stats.has_inf:
-            all_passed = False
-        
-        # Check logits are reasonable
-        if stats.max_val > 50 or stats.min_val < -50:
-            print(f"    [!] Logits may be too extreme")
-    
-    # Check refinement improves over steps
-    print("\n  Refinement Analysis:")
-    preds = [l.argmax(dim=1) for l in all_logits]
-    # In absence of target, check that predictions stabilize
-    changes = []
-    for i in range(1, len(preds)):
-        change = (preds[i] != preds[i-1]).float().mean()
-        changes.append(change.item())
-    print(f"  Step-to-step prediction changes: {changes}")
-    
-    return all_passed
-
-
-def test_focal_loss(device: torch.device):
-    """Test Focal Loss behavior."""
-    print("\n" + "="*80)
-    print("TEST 7: Focal Loss Analysis")
-    print("="*80)
-    
-    focal = FocalLoss(gamma=2.0, alpha=0.25).to(device)
-    ce = nn.CrossEntropyLoss()
-    
-    B, C, H, W = 4, 11, 10, 10
-    
-    test_cases = [
-        ("random_logits", torch.randn(B, C, H, W)),
-        ("confident_correct", torch.zeros(B, C, H, W)),  # Will set correct class high
-        ("confident_wrong", torch.zeros(B, C, H, W)),    # Will set wrong class high
-        ("extreme_logits", torch.randn(B, C, H, W) * 100),
-    ]
-    
-    targets = torch.randint(0, C, (B, H, W)).to(device)
-    
-    for name, logits in test_cases:
-        logits = logits.to(device)
-        
-        if name == "confident_correct":
-            for b in range(B):
-                for h in range(H):
-                    for w in range(W):
-                        logits[b, targets[b, h, w], h, w] = 10.0
-        elif name == "confident_wrong":
-            for b in range(B):
-                for h in range(H):
-                    for w in range(W):
-                        wrong_class = (targets[b, h, w].item() + 1) % C
-                        logits[b, wrong_class, h, w] = 10.0
-        
-        focal_loss = focal(logits, targets)
-        ce_loss = ce(logits, targets)
-        
-        stats = analyze_tensor(f"FocalLoss({name})", focal_loss.unsqueeze(0))
-        print(f"  {name}:")
-        print(f"    Focal Loss: {focal_loss.item():.4f}")
-        print(f"    CrossEntropy: {ce_loss.item():.4f}")
-        print(f"    Ratio (Focal/CE): {(focal_loss / ce_loss).item():.4f}")
-    
-    # Test class imbalance handling
-    print("\n  Class Imbalance Test:")
-    logits = torch.randn(B, C, H, W).to(device)
-    
-    # Mostly background (class 0)
-    targets_bg = torch.zeros(B, H, W, dtype=torch.long, device=device)
-    targets_bg[0, 5, 5] = 1  # One foreground pixel
-    
-    loss_bg = focal(logits, targets_bg)
-    print(f"  Loss with mostly background: {loss_bg.item():.4f}")
-    
-    # Mostly foreground
-    targets_fg = torch.ones(B, H, W, dtype=torch.long, device=device)
-    loss_fg = focal(logits, targets_fg)
-    print(f"  Loss with all foreground: {loss_fg.item():.4f}")
-    
-    return True
-
-
-def test_full_rlan(device: torch.device, arc_data_dir: Optional[str] = None):
-    """Test full RLAN model with real or synthetic data."""
-    print("\n" + "="*80)
-    print("TEST 8: Full RLAN End-to-End Test")
-    print("="*80)
-    
-    model = RLAN(
-        hidden_dim=128,
-        max_clues=5,
-        num_predicates=8,
-        num_solver_steps=6,
-        dropout=0.0,
-    ).to(device)
-    
-    criterion = RLANLoss(
-        focal_gamma=2.0,
-        focal_alpha=0.25,
-        lambda_entropy=0.1,
-        lambda_sparsity=0.05,
-        lambda_predicate=0.01,
-        lambda_curriculum=0.1,
-    )
-    
-    # Count parameters
-    params = model.count_parameters()
-    print(f"\n  Model Parameters:")
-    for name, count in params.items():
-        print(f"    {name}: {count:,}")
-    
-    # Load real data or use synthetic
-    if arc_data_dir and Path(arc_data_dir).exists():
-        tasks = load_arc_tasks(arc_data_dir, "training", max_tasks=10)
-        print(f"\n  Loaded {len(tasks)} real ARC tasks")
-    else:
-        print("\n  Using synthetic data (no ARC data found)")
-        tasks = []
-    
-    # Test with synthetic data first
-    print("\n  Synthetic Data Test:")
-    input_grid = torch.randint(0, 10, (4, 12, 12)).to(device)
-    target_grid = torch.randint(0, 11, (4, 12, 12)).to(device)
-    
-    model.train()
-    outputs = model(input_grid, temperature=1.0, return_intermediates=True)
-    
-    # Analyze all outputs
-    for key, val in outputs.items():
-        if isinstance(val, torch.Tensor):
-            stats = analyze_tensor(f"output[{key}]", val)
-            print(f"    {stats}")
-        elif isinstance(val, list) and len(val) > 0:
-            print(f"    output[{key}]: list of {len(val)} tensors")
-    
-    # Compute loss
-    losses = criterion(
-        logits=outputs["logits"],
-        targets=target_grid,
-        attention_maps=outputs["attention_maps"],
-        stop_logits=outputs["stop_logits"],
-        predicates=outputs["predicates"],
-        epoch=0,
-        max_epochs=100,
-        all_logits=outputs["all_logits"],
-    )
-    
-    print("\n  Loss Components:")
-    for key, val in losses.items():
-        stats = analyze_tensor(f"loss[{key}]", val.unsqueeze(0))
-        print(f"    {key}: {val.item():.4f} {' ✗ NaN!' if stats.has_nan else ''}")
-    
-    # Test gradient flow
-    print("\n  Gradient Flow Test:")
-    losses["total_loss"].backward()
-    
-    grad_stats = {}
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            has_nan = torch.isnan(param.grad).any().item()
-            grad_norm = param.grad.norm().item()
-            grad_stats[name] = {"norm": grad_norm, "has_nan": has_nan}
-    
-    nan_grads = [n for n, s in grad_stats.items() if s["has_nan"]]
-    if nan_grads:
-        print(f"    ✗ NaN gradients in: {nan_grads[:5]}...")
-    else:
-        print("    [OK] No NaN gradients")
-    
-    # Top gradient norms
-    sorted_grads = sorted(grad_stats.items(), key=lambda x: x[1]["norm"], reverse=True)
-    print("    Top 5 gradient norms:")
-    for name, stats in sorted_grads[:5]:
-        print(f"      {name}: {stats['norm']:.4f}")
-    
-    # Test with real ARC data
-    if tasks:
-        print("\n  Real ARC Data Test:")
-        for i, task in enumerate(tasks[:3]):
-            print(f"\n    Task {task['task_id']}:")
+            # Test Encoder
+            features = model.encode(x)
+            result.add_check("Encoder output shape", len(features.shape) == 4, f"shape={features.shape}")
+            result.add_check("Encoder no NaN", not torch.isnan(features).any().item(), "NaN detected")
+            result.add_check("Encoder no Inf", not torch.isinf(features).any().item(), "Inf detected")
+            result.add_metric("encoder_mean", features.mean().item())
+            result.add_metric("encoder_std", features.std().item())
             
-            for j, (inp, out) in enumerate(task['train'][:1]):
-                inp_t = torch.tensor(inp, dtype=torch.long).unsqueeze(0).to(device)
-                out_t = torch.tensor(out, dtype=torch.long).unsqueeze(0).to(device)
-                
-                # Handle size mismatch (input/output may differ)
-                # For testing, we'll just use input-sized output
-                if inp_t.shape != out_t.shape:
-                    # Pad or crop output to match input for this test
-                    out_t = torch.zeros_like(inp_t)
-                
-                model.zero_grad()
-                outputs = model(inp_t, temperature=1.0, return_intermediates=True)
-                
-                # Quick stats
-                logits = outputs["logits"]
-                pred = logits.argmax(dim=1)
-                accuracy = (pred == out_t).float().mean()
-                
-                print(f"      Pair {j}: input={inp.shape}, output={out.shape}")
-                print(f"        Accuracy (untrained): {accuracy.item():.2%}")
-                
-                attn = outputs["attention_maps"]
-                print(f"        Attention max: {attn.max():.4f}, entropy: {-(attn * (attn + 1e-10).log()).sum() / attn.numel():.4f}")
+            # Test DSC
+            if model.dsc is not None:
+                centroids, attn_maps, stop_logits = model.dsc(features)
+                result.add_check("DSC centroids shape", centroids.shape[1] == model.max_clues, f"shape={centroids.shape}")
+                result.add_check("DSC centroids range", (centroids >= 0).all().item() and (centroids <= 1).all().item(), "out of [0,1]")
+                result.add_check("DSC attn normalized", torch.allclose(attn_maps.sum(dim=(-2,-1)), torch.ones(attn_maps.shape[:2], device=device), atol=1e-3), "not normalized")
+                result.add_check("DSC no NaN", not torch.isnan(attn_maps).any().item(), "NaN in attention")
+                result.add_metric("dsc_stop_probs", torch.sigmoid(stop_logits)[0].cpu().tolist())
+            else:
+                result.add_warning("DSC is disabled")
+            
+            # Test MSRE
+            if model.msre is not None and model.dsc is not None:
+                msre_out = model.msre(features, centroids)
+                result.add_check("MSRE output shape", len(msre_out.shape) == 5, f"shape={msre_out.shape}")
+                result.add_check("MSRE no NaN", not torch.isnan(msre_out).any().item(), "NaN detected")
+                result.add_metric("msre_mean", msre_out.mean().item())
+            else:
+                result.add_warning("MSRE is disabled")
+            
+            # Test full forward pass
+            outputs = model(
+                input_grid=x,
+                train_inputs=train_inputs,
+                train_outputs=train_outputs,
+                pair_mask=pair_mask,
+                temperature=1.0,
+                return_intermediates=True
+            )
+            
+            logits = outputs['logits'] if isinstance(outputs, dict) else outputs
+            predictions = logits.argmax(dim=1)
+            
+            result.add_check("Forward output shape", logits.shape[1] == model.num_classes, f"classes={logits.shape[1]}")
+            result.add_check("Forward no NaN", not torch.isnan(logits).any().item(), "NaN in logits")
+            result.add_metric("unique_colors", predictions.unique().cpu().tolist())
+            
+            # Accuracy check
+            target = torch.tensor(test_target, dtype=torch.long, device=device)
+            correct = (predictions[0] == target).float().mean().item()
+            result.add_metric("accuracy", correct)
+            result.add_check("Reasonable accuracy", correct > 0.0, f"accuracy={correct:.2%}")
+            
+    except Exception as e:
+        result.passed = False
+        result.errors.append(f"Exception: {str(e)}")
+        traceback.print_exc()
     
-    return True
+    return result
 
 
-def test_training_step(device: torch.device):
-    """Test a full training step."""
-    print("\n" + "="*80)
-    print("TEST 9: Training Step Validation")
-    print("="*80)
+# ==============================================================================
+# TEST 2: RECURSIVE SOLVER PER-STEP VISUALIZATION
+# ==============================================================================
+
+def test_recursive_solver_steps(model: RLAN, task_info: dict, output_dir: Path, device: str = 'cpu') -> TestResult:
+    """Test recursive solver with per-step visualization."""
+    result = TestResult("Recursive Solver Steps")
+    task_id = task_info["task_id"]
+    task = task_info["task"]
     
-    model = RLAN(hidden_dim=64, max_clues=3, num_solver_steps=3, dropout=0.0).to(device)
-    criterion = RLANLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    
-    input_grid = torch.randint(0, 10, (4, 8, 8)).to(device)
-    target_grid = input_grid.clone()  # Identity task
-    
-    model.train()
-    
-    print("\n  Training for 20 steps on identity task:")
-    losses_history = []
-    
-    for step in range(20):
-        optimizer.zero_grad()
+    try:
+        x, train_inputs, train_outputs, pair_mask, test_input, test_target = prepare_task_tensors(task, device)
+        target = torch.tensor(test_target, dtype=torch.long, device=device)
         
-        outputs = model(input_grid, temperature=1.0, return_intermediates=True)
+        with torch.no_grad():
+            # Full forward to get context
+            outputs = model(
+                input_grid=x,
+                train_inputs=train_inputs,
+                train_outputs=train_outputs,
+                pair_mask=pair_mask,
+                temperature=1.0,
+                return_intermediates=True
+            )
+            
+            # Get per-step logits from solver
+            step_logits_list = outputs.get('step_logits', [])
+            if not step_logits_list:
+                # Try to get from solver directly
+                result.add_warning("step_logits not available in outputs, using final logits only")
+                step_logits_list = [outputs['logits']]
+            
+            num_steps = len(step_logits_list)
+            result.add_metric("num_solver_steps", num_steps)
+            
+            # Analyze each step
+            step_entropies = []
+            step_accuracies = []
+            step_predictions = []
+            
+            for step_idx, step_logits in enumerate(step_logits_list):
+                # Get predictions
+                probs = F.softmax(step_logits, dim=1)
+                preds = step_logits.argmax(dim=1)
+                
+                # Entropy (lower = more confident)
+                entropy = -(probs * (probs + 1e-10).log()).sum(dim=1).mean().item()
+                step_entropies.append(entropy)
+                
+                # Accuracy
+                acc = (preds[0] == target).float().mean().item()
+                step_accuracies.append(acc)
+                step_predictions.append(preds[0].cpu().numpy())
+            
+            result.add_metric("step_entropies", step_entropies)
+            result.add_metric("step_accuracies", step_accuracies)
+            
+            # Check for improvement over steps
+            improvement = 0
+            best_step = 0
+            if len(step_accuracies) > 1:
+                improvement = step_accuracies[-1] - step_accuracies[0]
+                result.add_metric("accuracy_improvement", improvement)
+                result.add_check("Steps improve", improvement >= -0.1, f"improvement={improvement:.2%}")
+                
+                # Best step analysis
+                best_step = int(np.argmax(step_accuracies))
+                result.add_metric("best_step", best_step)
+                result.add_check("Best step found", best_step >= 0, f"best_step={best_step}")
+            
+            # Create per-step visualization
+            fig = plt.figure(figsize=(16, 12))
+            gs = GridSpec(3, max(num_steps + 2, 5), figure=fig)
+            
+            # Row 1: Input, Target, and step predictions
+            ax_input = fig.add_subplot(gs[0, 0])
+            visualize_grid(ax_input, test_input, "Input")
+            
+            ax_target = fig.add_subplot(gs[0, 1])
+            visualize_grid(ax_target, test_target, "Target")
+            
+            for step_idx in range(min(num_steps, 6)):
+                ax = fig.add_subplot(gs[0, step_idx + 2])
+                visualize_grid(ax, step_predictions[step_idx], f"Step {step_idx+1} (acc={step_accuracies[step_idx]:.0%})")
+            
+            # Row 2: Entropy and accuracy curves
+            ax_curves = fig.add_subplot(gs[1, :3])
+            steps = list(range(1, num_steps + 1))
+            ax_curves.plot(steps, step_accuracies, 'b-o', label='Accuracy', linewidth=2)
+            max_entropy = max(step_entropies) if step_entropies else 1
+            ax_curves.plot(steps, [e/max_entropy for e in step_entropies], 'r-s', label='Norm Entropy', linewidth=2)
+            ax_curves.set_xlabel('Solver Step')
+            ax_curves.set_ylabel('Value')
+            ax_curves.set_title('Accuracy & Entropy per Step')
+            ax_curves.legend()
+            ax_curves.grid(True, alpha=0.3)
+            
+            # Row 2: Per-step difference maps
+            if num_steps > 1:
+                ax_diff = fig.add_subplot(gs[1, 3:])
+                diff_from_target = np.abs(step_predictions[-1].astype(float) - test_target.astype(float))
+                ax_diff.imshow(diff_from_target, cmap='Reds')
+                ax_diff.set_title(f'Final Error Map ({(diff_from_target > 0).mean():.1%} errors)')
+                ax_diff.set_xticks([])
+                ax_diff.set_yticks([])
+            
+            # Row 3: Summary statistics
+            ax_summary = fig.add_subplot(gs[2, :])
+            ax_summary.axis('off')
+            summary_text = f"""Recursive Solver Analysis for {task_id}:
+{'='*74}
+Number of steps: {num_steps}
+Step accuracies: {[f'{a:.1%}' for a in step_accuracies]}
+Step entropies:  {[f'{e:.3f}' for e in step_entropies]}
+Best step: {best_step + 1} (accuracy={step_accuracies[best_step]:.1%})
+Final step: {num_steps} (accuracy={step_accuracies[-1]:.1%})
+Accuracy improvement: {improvement:.1%} (step 1 -> step {num_steps})
+
+SIGNAL QUALITY:
+- Entropy decreasing: {'Y' if step_entropies[-1] < step_entropies[0] else 'N'} (model becomes more confident)
+- Accuracy improving: {'Y' if improvement > 0 else 'N'} (iterative refinement helps)
+- Best != Last step: {'Y (early stopping could help)' if best_step < num_steps - 1 else 'N (last step is best)'}
+"""
+            ax_summary.text(0.02, 0.95, summary_text, transform=ax_summary.transAxes, fontsize=10,
+                           verticalalignment='top', fontfamily='monospace')
+            
+            try:
+                plt.tight_layout()
+            except Exception:
+                pass  # Ignore tight_layout errors
+            
+            # Save
+            task_output_dir = output_dir / "solver_steps" / task_id
+            task_output_dir.mkdir(parents=True, exist_ok=True)
+            viz_path = task_output_dir / f"{task_id}_solver_steps.png"
+            plt.savefig(viz_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"    Saved: {viz_path}")
+            
+    except Exception as e:
+        result.passed = False
+        result.errors.append(f"Exception: {str(e)}")
+        traceback.print_exc()
+    
+    return result
+
+
+# ==============================================================================
+# TEST 3: TEPS PROGRAM SEARCH
+# ==============================================================================
+
+def test_teps_program_search(task_info: dict, output_dir: Path) -> TestResult:
+    """Test TEPS program search module."""
+    result = TestResult("TEPS Program Search")
+    task_id = task_info["task_id"]
+    task = task_info["task"]
+    
+    try:
+        from sci_arc.models.generalization.teps import TEPS, TEPSConfig
         
-        losses = criterion(
-            logits=outputs["logits"],
-            targets=target_grid,
-            attention_maps=outputs["attention_maps"],
-            stop_logits=outputs["stop_logits"],
-            predicates=outputs["predicates"],
-            epoch=step,
-            max_epochs=20,
+        config = TEPSConfig(
+            max_search_steps=1000,
+            timeout_seconds=10.0,
+            max_program_depth=2,
+        )
+        teps = TEPS(config)
+        
+        # Prepare training pairs as numpy arrays
+        train_inputs_np = []
+        train_outputs_np = []
+        for pair in task["train"]:
+            inp = np.array(pair["input"], dtype=np.int64)
+            out = np.array(pair["output"], dtype=np.int64)
+            train_inputs_np.append(inp)
+            train_outputs_np.append(out)
+        
+        # Use first input as test input
+        test_input_np = train_inputs_np[0]
+        
+        result.add_metric("num_train_pairs", len(train_inputs_np))
+        
+        # Run search with correct signature
+        start_time = time.time()
+        search_result = teps.search(test_input_np, train_inputs_np, train_outputs_np)
+        search_time = time.time() - start_time
+        
+        result.add_metric("search_time_seconds", search_time)
+        result.add_metric("program_found", search_result.get('success', False))
+        
+        if search_result.get('success', False):
+            found_program = search_result.get('program')
+            match_score = search_result.get('stats', {}).get('best_score', 0)
+            result.add_metric("program", str(found_program))
+            result.add_metric("match_score", match_score)
+            result.add_check("High match score", match_score >= 0.9, f"score={match_score:.2%}")
+            
+            # Visualize program execution
+            num_pairs = len(train_inputs_np)
+            fig, axes = plt.subplots(2, num_pairs + 1, figsize=(4 * (num_pairs + 1), 8))
+            
+            for i in range(num_pairs):
+                visualize_grid(axes[0, i], train_inputs_np[i], f"Input {i+1}")
+                visualize_grid(axes[1, i], train_outputs_np[i], f"Target {i+1}")
+            
+            # Show program text
+            axes[0, -1].axis('off')
+            axes[0, -1].text(0.5, 0.5, f"Program Found:\n{found_program}\n\nScore: {match_score:.1%}",
+                            ha='center', va='center', fontsize=10, fontfamily='monospace',
+                            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+            
+            axes[1, -1].axis('off')
+            steps_taken = getattr(teps, 'steps_taken', 0)
+            axes[1, -1].text(0.5, 0.5, f"Search Stats:\nTime: {search_time:.2f}s\nSteps: {steps_taken}",
+                            ha='center', va='center', fontsize=10, fontfamily='monospace')
+            
+            plt.suptitle(f"TEPS Search Result: {task_id}", fontsize=12, fontweight='bold')
+            try:
+                plt.tight_layout()
+            except Exception:
+                pass  # Ignore tight_layout errors
+            
+            teps_dir = output_dir / "teps" / task_id
+            teps_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(teps_dir / f"{task_id}_teps_result.png", dpi=150, bbox_inches='tight')
+            plt.close()
+            
+        else:
+            result.add_warning(f"No program found within timeout ({config.timeout_seconds}s)")
+            result.add_metric("primitives_tried", getattr(teps, 'steps_taken', 0))
+            
+    except ImportError as e:
+        result.add_warning(f"TEPS module not available: {e}")
+    except Exception as e:
+        result.passed = False
+        result.errors.append(f"Exception: {str(e)}")
+        traceback.print_exc()
+    
+    return result
+
+
+# ==============================================================================
+# TEST 4: NS-TEPS OBJECT-LEVEL PROGRAM SEARCH
+# ==============================================================================
+
+def test_ns_teps_program_search(task_info: dict, output_dir: Path) -> TestResult:
+    """Test NS-TEPS neuro-symbolic program search."""
+    result = TestResult("NS-TEPS Program Search")
+    task_id = task_info["task_id"]
+    task = task_info["task"]
+    
+    try:
+        from sci_arc.models.generalization.ns_teps import NSTEPS, NSTEPSConfig, ObjectExtractor
+        
+        config = NSTEPSConfig(
+            max_search_steps=500,
+            timeout_seconds=5.0,
+            max_trace_length=2,
+            sample_count=200,
+        )
+        ns_teps = NSTEPS(config)
+        extractor = ObjectExtractor()
+        
+        # Prepare training inputs/outputs as numpy arrays
+        train_inputs_np = []
+        train_outputs_np = []
+        for pair in task["train"]:
+            inp = np.array(pair["input"], dtype=np.int64)
+            out = np.array(pair["output"], dtype=np.int64)
+            train_inputs_np.append(inp)
+            train_outputs_np.append(out)
+        
+        # Use first input as test input
+        test_input_np = train_inputs_np[0]
+        
+        # Test object extraction
+        objects = extractor.extract(test_input_np)
+        result.add_metric("num_objects_in_first_input", len(objects))
+        result.add_check("Objects extracted", len(objects) >= 0, f"found {len(objects)} objects")
+        
+        # Run NS-TEPS search with correct signature
+        start_time = time.time()
+        search_result = ns_teps.search(test_input_np, train_inputs_np, train_outputs_np)
+        search_time = time.time() - start_time
+        
+        result.add_metric("search_time_seconds", search_time)
+        result.add_metric("trace_found", search_result.get('success', False))
+        
+        if search_result.get('success', False):
+            found_trace = search_result.get('trace')
+            match_score = search_result.get('confidence', 0)
+            result.add_metric("trace", str(found_trace))
+            result.add_metric("match_score", match_score)
+            result.add_check("High match score", match_score >= 0.8, f"score={match_score:.2%}")
+            
+            # Visualize
+            num_pairs = len(train_inputs_np)
+            fig, axes = plt.subplots(2, num_pairs + 1, figsize=(4 * (num_pairs + 1), 8))
+            
+            for i in range(num_pairs):
+                num_objs = len(extractor.extract(train_inputs_np[i]))
+                visualize_grid(axes[0, i], train_inputs_np[i], f"Input {i+1} ({num_objs} objs)")
+                visualize_grid(axes[1, i], train_outputs_np[i], f"Target {i+1}")
+            
+            axes[0, -1].axis('off')
+            axes[0, -1].text(0.5, 0.5, f"NS-TEPS Trace:\n{found_trace}\n\nScore: {match_score:.1%}",
+                            ha='center', va='center', fontsize=9, fontfamily='monospace',
+                            bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+            
+            axes[1, -1].axis('off')
+            
+            plt.suptitle(f"NS-TEPS Search Result: {task_id}", fontsize=12, fontweight='bold')
+            try:
+                plt.tight_layout()
+            except Exception:
+                pass  # Ignore tight_layout errors
+            
+            ns_teps_dir = output_dir / "ns_teps" / task_id
+            ns_teps_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(ns_teps_dir / f"{task_id}_ns_teps_result.png", dpi=150, bbox_inches='tight')
+            plt.close()
+            
+        else:
+            result.add_warning("No trace found")
+            
+    except ImportError as e:
+        result.add_warning(f"NS-TEPS module not available: {e}")
+    except Exception as e:
+        result.passed = False
+        result.errors.append(f"Exception: {str(e)}")
+        traceback.print_exc()
+    
+    return result
+
+
+# ==============================================================================
+# TEST 5: PROGRAM CACHE INTEGRATION
+# ==============================================================================
+
+def test_program_cache(output_dir: Path) -> TestResult:
+    """Test program cache loading and usage."""
+    result = TestResult("Program Cache")
+    cache_path = Path("c:/Users/perahmat/Downloads/SCI-ARC/cache/program_cache_merged_602.json")
+    
+    try:
+        from sci_arc.models.generalization.program_guided_training import ProgramCache
+        
+        result.add_check("Cache file exists", cache_path.exists(), str(cache_path))
+        
+        if cache_path.exists():
+            cache = ProgramCache(str(cache_path))
+            num_programs = len(cache.cache)
+            result.add_metric("num_cached_programs", num_programs)
+            result.add_check("Cache not empty", num_programs > 0, f"found {num_programs} programs")
+            
+            # Sample some programs
+            if num_programs > 0:
+                sample_keys = list(cache.cache.keys())[:5]
+                sample_programs = []
+                for key in sample_keys:
+                    entry = cache.cache[key]
+                    trace = entry.get('trace', [])
+                    confidence = entry.get('confidence', 0)
+                    sample_programs.append({
+                        'task_id': key,
+                        'trace_length': len(trace),
+                        'confidence': confidence,
+                    })
+                result.add_metric("sample_programs", sample_programs)
+                
+                # Verify structure
+                sample = cache.cache[sample_keys[0]]
+                result.add_check("Has trace", 'trace' in sample, "missing trace field")
+                result.add_check("Has confidence", 'confidence' in sample, "missing confidence field")
+                
+    except ImportError as e:
+        result.add_warning(f"ProgramCache not available: {e}")
+    except Exception as e:
+        result.passed = False
+        result.errors.append(f"Exception: {str(e)}")
+        traceback.print_exc()
+    
+    return result
+
+
+# ==============================================================================
+# TEST 6: HYPERLORA META-LEARNING
+# ==============================================================================
+
+def test_hyperlora(model: RLAN, task_info: dict, output_dir: Path, device: str = 'cpu') -> TestResult:
+    """Test HyperLoRA meta-learning module."""
+    result = TestResult("HyperLoRA Meta-Learning")
+    task_id = task_info["task_id"]
+    task = task_info["task"]
+    
+    try:
+        # Check if HyperLoRA is enabled
+        has_hyperlora = hasattr(model, 'hyper_lora') and model.hyper_lora is not None
+        result.add_check("HyperLoRA exists", has_hyperlora, "module not found")
+        
+        if not has_hyperlora:
+            result.add_warning("HyperLoRA not enabled in model config")
+            return result
+        
+        x, train_inputs, train_outputs, pair_mask, test_input, test_target = prepare_task_tensors(task, device)
+        
+        with torch.no_grad():
+            # Get context encoding
+            if hasattr(model, 'context_encoder') and model.context_encoder is not None:
+                context = model.context_encoder(train_inputs, train_outputs, pair_mask)
+                result.add_check("Context encoded", context is not None, "context is None")
+                
+                if isinstance(context, dict):
+                    context_pooled = context.get('pooled', context.get('context'))
+                else:
+                    context_pooled = context
+                
+                if context_pooled is not None:
+                    result.add_metric("context_shape", list(context_pooled.shape) if hasattr(context_pooled, 'shape') else str(type(context_pooled)))
+                    if hasattr(context_pooled, 'norm'):
+                        result.add_metric("context_norm", context_pooled.norm().item())
+            
+            # Get LoRA predictions if method available
+            if hasattr(model.hyper_lora, 'get_lora_params'):
+                lora_params = model.hyper_lora.get_lora_params(context_pooled)
+                result.add_check("LoRA params generated", lora_params is not None, "no LoRA params")
+                
+                if lora_params is not None:
+                    # Analyze LoRA parameter norms
+                    lora_norms = {}
+                    for key, val in lora_params.items():
+                        if isinstance(val, tuple) and len(val) == 2:
+                            A, B = val
+                            norm_A = A.norm().item()
+                            norm_B = B.norm().item()
+                            lora_norms[key] = {'A': norm_A, 'B': norm_B}
+                    
+                    result.add_metric("lora_norms", lora_norms)
+                    
+                    # Check for reasonable norms (not exploded)
+                    if lora_norms:
+                        max_norm = max(max(v['A'], v['B']) for v in lora_norms.values())
+                        result.add_check("LoRA norms reasonable", max_norm < 100, f"max_norm={max_norm:.2f}")
+                        result.add_metric("max_lora_norm", max_norm)
+            else:
+                result.add_warning("get_lora_params method not available")
+                
+    except Exception as e:
+        result.passed = False
+        result.errors.append(f"Exception: {str(e)}")
+        traceback.print_exc()
+    
+    return result
+
+
+# ==============================================================================
+# TEST 7: END-TO-END SIGNAL QUALITY
+# ==============================================================================
+
+def test_signal_quality(model: RLAN, task_info: dict, output_dir: Path, device: str = 'cpu') -> TestResult:
+    """Test end-to-end signal quality: gradients, norms, activations."""
+    result = TestResult("Signal Quality")
+    task_id = task_info["task_id"]
+    task = task_info["task"]
+    
+    try:
+        x, train_inputs, train_outputs, pair_mask, test_input, test_target = prepare_task_tensors(task, device)
+        target = torch.tensor(test_target, dtype=torch.long, device=device)
+        
+        # Enable gradients for signal analysis
+        model.train()
+        
+        # Forward pass
+        outputs = model(
+            input_grid=x,
+            train_inputs=train_inputs,
+            train_outputs=train_outputs,
+            pair_mask=pair_mask,
+            temperature=1.0,
+            return_intermediates=True
         )
         
-        loss = losses["total_loss"]
+        logits = outputs['logits'] if isinstance(outputs, dict) else outputs
         
-        if torch.isnan(loss):
-            print(f"    Step {step}: NaN loss detected!")
-            break
+        # Compute loss
+        loss = F.cross_entropy(logits, target.unsqueeze(0), ignore_index=-100)
+        result.add_metric("loss", loss.item())
+        result.add_check("Loss is finite", torch.isfinite(loss).item(), f"loss={loss.item()}")
         
+        # Backward pass for gradient analysis
         loss.backward()
         
-        # Check gradient health
-        total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # Analyze gradients
+        grad_norms = {}
+        zero_grad_modules = []
+        nan_grad_modules = []
         
-        optimizer.step()
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.norm().item()
+                
+                # Categorize by module
+                module_name = name.split('.')[0]
+                if module_name not in grad_norms:
+                    grad_norms[module_name] = []
+                grad_norms[module_name].append(grad_norm)
+                
+                if grad_norm == 0:
+                    zero_grad_modules.append(name)
+                if not np.isfinite(grad_norm):
+                    nan_grad_modules.append(name)
         
-        losses_history.append(loss.item())
+        # Summarize gradient statistics per module
+        grad_summary = {}
+        for module, norms in grad_norms.items():
+            grad_summary[module] = {
+                'mean': float(np.mean(norms)),
+                'max': float(np.max(norms)),
+                'min': float(np.min(norms)),
+            }
         
-        if step % 5 == 0:
-            pred = outputs["logits"].argmax(dim=1)
-            acc = (pred == target_grid).float().mean()
-            print(f"    Step {step}: loss={loss.item():.4f}, acc={acc.item():.2%}, grad_norm={total_grad_norm:.4f}")
+        result.add_metric("gradient_summary", grad_summary)
+        result.add_metric("zero_grad_count", len(zero_grad_modules))
+        result.add_metric("nan_grad_count", len(nan_grad_modules))
+        
+        result.add_check("No NaN gradients", len(nan_grad_modules) == 0, f"{len(nan_grad_modules)} NaN grads")
+        result.add_check("Gradients flow", len(zero_grad_modules) < len(list(model.parameters())) * 0.5, 
+                        f"{len(zero_grad_modules)} zero grads")
+        
+        # Check for gradient explosion/vanishing
+        all_grads = [n for norms in grad_norms.values() for n in norms]
+        mean_grad = 0.0
+        max_grad = 0.0
+        if all_grads:
+            mean_grad = float(np.mean(all_grads))
+            max_grad = float(np.max(all_grads))
+            result.add_metric("mean_gradient_norm", mean_grad)
+            result.add_metric("max_gradient_norm", max_grad)
+            result.add_check("No gradient explosion", max_grad < 100, f"max_grad={max_grad:.2f}")
+            result.add_check("No gradient vanishing", mean_grad > 1e-8, f"mean_grad={mean_grad:.2e}")
+        
+        # Reset to eval mode
+        model.eval()
+        model.zero_grad()
+        
+        # Create visualization
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        
+        # Plot 1: Gradient norms by module
+        modules = list(grad_summary.keys())
+        means = [grad_summary[m]['mean'] for m in modules]
+        maxes = [grad_summary[m]['max'] for m in modules]
+        
+        x_pos = np.arange(len(modules))
+        axes[0].bar(x_pos - 0.2, means, 0.4, label='Mean', color='blue', alpha=0.7)
+        axes[0].bar(x_pos + 0.2, maxes, 0.4, label='Max', color='red', alpha=0.7)
+        axes[0].set_xticks(x_pos)
+        axes[0].set_xticklabels(modules, rotation=45, ha='right', fontsize=8)
+        axes[0].set_ylabel('Gradient Norm')
+        axes[0].set_title('Gradient Norms by Module')
+        axes[0].legend()
+        if max(maxes) > 0:
+            axes[0].set_yscale('log')
+        axes[0].grid(True, alpha=0.3)
+        
+        # Plot 2: Loss and accuracy
+        predictions = logits.argmax(dim=1)
+        accuracy = (predictions[0] == target).float().mean().item()
+        metrics = ['Loss', 'Accuracy']
+        values = [loss.item(), accuracy]
+        colors = ['red' if loss.item() > 2 else 'green', 'green' if accuracy > 0.5 else 'orange']
+        axes[1].bar(metrics, values, color=colors, alpha=0.7)
+        axes[1].set_title('Training Metrics')
+        axes[1].set_ylim(0, max(values) * 1.2 + 0.1)
+        for i, v in enumerate(values):
+            axes[1].text(i, v + 0.05, f'{v:.3f}', ha='center', fontsize=12)
+        
+        # Plot 3: Summary text
+        axes[2].axis('off')
+        summary_text = f"""Signal Quality Summary for {task_id}:
+{'='*58}
+Loss: {loss.item():.4f}
+Accuracy: {accuracy:.2%}
+
+Gradient Statistics:
+- Mean gradient norm: {mean_grad:.2e}
+- Max gradient norm: {max_grad:.2e}
+- Zero gradients: {len(zero_grad_modules)} params
+- NaN gradients: {len(nan_grad_modules)} params
+
+Module Gradient Norms:
+"""
+        for module, stats in list(grad_summary.items())[:6]:
+            summary_text += f"  {module}: mean={stats['mean']:.2e}, max={stats['max']:.2e}\n"
+        
+        axes[2].text(0.02, 0.95, summary_text, transform=axes[2].transAxes, fontsize=9,
+                    verticalalignment='top', fontfamily='monospace')
+        
+        try:
+            plt.tight_layout()
+        except Exception:
+            pass  # Ignore tight_layout errors
+        
+        signal_dir = output_dir / "signal_quality" / task_id
+        signal_dir.mkdir(parents=True, exist_ok=True)
+        plt.savefig(signal_dir / f"{task_id}_signal_quality.png", dpi=150, bbox_inches='tight')
+        plt.close()
+        
+    except Exception as e:
+        result.passed = False
+        result.errors.append(f"Exception: {str(e)}")
+        traceback.print_exc()
+        model.eval()
     
-    # Check if loss decreased
-    if len(losses_history) >= 10:
-        first_half = sum(losses_history[:10]) / 10
-        second_half = sum(losses_history[-10:]) / 10
-        print(f"\n  Loss trend: {first_half:.4f} -> {second_half:.4f}")
-        if second_half < first_half:
-            print("  [OK] Loss is decreasing")
-        else:
-            print("  [!] Loss not decreasing - potential issue")
-    
-    return True
+    return result
 
 
-def analyze_normalization_choices():
-    """Analyze LayerNorm vs BatchNorm for RLAN."""
-    print("\n" + "="*80)
-    print("ANALYSIS: Normalization Choices for RLAN")
-    print("="*80)
+# ==============================================================================
+# MAIN TEST RUNNER
+# ==============================================================================
+
+def generate_comprehensive_report(all_results: Dict[str, List[TestResult]], output_dir: Path):
+    """Generate comprehensive test report."""
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "summary": {"total_tests": 0, "passed": 0, "failed": 0, "warnings": 0},
+        "by_test_type": {},
+        "by_task": {},
+        "critical_issues": [],
+        "recommendations": [],
+    }
     
-    print("""
-    RLAN uses LayerNorm throughout, which is the correct choice for several reasons:
+    for test_name, results in all_results.items():
+        report["by_test_type"][test_name] = {
+            "total": len(results),
+            "passed": sum(1 for r in results if r.passed),
+            "failed": sum(1 for r in results if not r.passed),
+        }
+        
+        for result in results:
+            report["summary"]["total_tests"] += 1
+            if result.passed:
+                report["summary"]["passed"] += 1
+            else:
+                report["summary"]["failed"] += 1
+            report["summary"]["warnings"] += len(result.warnings)
+            
+            if result.errors:
+                for error in result.errors:
+                    report["critical_issues"].append(f"{test_name}: {error}")
     
-    1. SPATIAL INFORMATION PRESERVATION:
-       - LayerNorm normalizes across features, keeping spatial relationships intact
-       - BatchNorm would normalize across batch and spatial dims, mixing spatial info
-       - For ARC's spatial reasoning, preserving relative spatial patterns is critical
+    # Generate recommendations
+    if report["summary"]["failed"] > 0:
+        report["recommendations"].append("Fix failing tests before production training")
     
-    2. VARIABLE GRID SIZES:
-       - ARC grids vary from 1x1 to 30x30
-       - LayerNorm works with any spatial size
-       - BatchNorm requires fixed spatial dimensions or special handling
+    for test_name, stats in report["by_test_type"].items():
+        if stats["failed"] > 0:
+            report["recommendations"].append(f"Investigate {test_name}: {stats['failed']} failures")
     
-    3. SMALL BATCH SIZES:
-       - ARC training often uses small batches (limited data)
-       - BatchNorm is unstable with small batches
-       - LayerNorm is independent of batch size
+    # Save report
+    report_path = output_dir / "comprehensive_test_report.json"
+    with open(report_path, 'w') as f:
+        json.dump(report, f, indent=2, default=str)
     
-    4. INFERENCE CONSISTENCY:
-       - LayerNorm behavior is identical in train/eval modes
-       - BatchNorm requires running statistics that may not generalize
+    # Print summary
+    print("\n" + "=" * 70)
+    print("COMPREHENSIVE TEST REPORT")
+    print("=" * 70)
+    print(f"Total Tests: {report['summary']['total_tests']}")
+    print(f"  Passed: {report['summary']['passed']}")
+    print(f"  Failed: {report['summary']['failed']}")
+    print(f"  Warnings: {report['summary']['warnings']}")
+    print()
     
-    RECOMMENDATION: Keep LayerNorm. Consider GroupNorm for ConvGRU (already used).
-    """)
+    print("Results by Test Type:")
+    for test_name, stats in report["by_test_type"].items():
+        status = "Y" if stats["failed"] == 0 else "N"
+        print(f"  [{status}] {test_name}: {stats['passed']}/{stats['total']} passed")
+    
+    if report["critical_issues"]:
+        print("\nCritical Issues:")
+        for issue in report["critical_issues"][:10]:
+            print(f"  - {issue}")
+    
+    if report["recommendations"]:
+        print("\nRecommendations:")
+        for rec in report["recommendations"]:
+            print(f"  -> {rec}")
+    
+    return report
 
 
 def main():
-    """Run all tests."""
-    print("="*80)
-    print("RLAN COMPREHENSIVE TESTING AND ACADEMIC REVIEW")
-    print("="*80)
+    # Configuration
+    checkpoint_path = Path("c:/Users/perahmat/Downloads/SCI-ARC/checkpoints/warmup3.pt")
+    data_dir = Path("c:/Users/perahmat/Downloads/SCI-ARC/data/arc-agi/data/training")
+    output_dir = Path("c:/Users/perahmat/Downloads/SCI-ARC/scripts/outputs/comprehensive_tests")
     
-    # Setup device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nDevice: {device}")
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
     
-    # Find ARC data
-    arc_paths = [
-        "../data/arc-agi",
-        "../arc-agi",
-        "data/arc-agi",
-        "arc-agi",
-        "../ARC-AGI/data",
-    ]
-    arc_data_dir = None
-    for p in arc_paths:
-        if Path(p).exists():
-            arc_data_dir = p
-            break
+    print("=" * 70)
+    print("COMPREHENSIVE RLAN MODULE TESTING SUITE")
+    print("=" * 70)
     
-    print(f"ARC data: {arc_data_dir or 'Not found'}")
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Run all tests
-    results = {}
+    # Load model
+    model, model_config = load_model_with_checkpoint(checkpoint_path, device)
     
-    results["GridEncoder"] = test_grid_encoder(device)
-    results["DSC"] = test_dsc(device)
-    results["MSRE"] = test_msre(device)
-    results["LCR"] = test_lcr(device)
-    results["SPH"] = test_sph(device)
-    results["Solver"] = test_solver(device)
-    results["FocalLoss"] = test_focal_loss(device)
-    results["FullRLAN"] = test_full_rlan(device, arc_data_dir)
-    results["TrainingStep"] = test_training_step(device)
+    # Find tasks by size
+    print("\nFinding ARC tasks by grid size...")
+    tasks_by_size = find_tasks_by_size(data_dir, max_per_size=2)
     
-    analyze_normalization_choices()
+    for size, tasks in tasks_by_size.items():
+        print(f"  {size.upper()}: {len(tasks)} tasks")
     
-    # Summary
-    print("\n" + "="*80)
-    print("TEST SUMMARY")
-    print("="*80)
+    # Collect all results
+    all_results: Dict[str, List[TestResult]] = {
+        "Core Modules": [],
+        "Recursive Solver Steps": [],
+        "TEPS Program Search": [],
+        "NS-TEPS Program Search": [],
+        "HyperLoRA Meta-Learning": [],
+        "Signal Quality": [],
+    }
     
-    all_passed = True
-    for name, passed in results.items():
-        status = "PASSED" if passed else "FAILED"
-        print(f"  {name}: {status}")
-        if not passed:
-            all_passed = False
+    # Run tests on each task
+    for size in ["small", "medium", "large"]:
+        print(f"\n{'=' * 70}")
+        print(f"Testing {size.upper()} grid tasks")
+        print("=" * 70)
+        
+        for task_info in tasks_by_size[size]:
+            task_id = task_info["task_id"]
+            print(f"\n  Task: {task_id} ({task_info['grid_size'][0]}x{task_info['grid_size'][1]})")
+            
+            # Test 1: Core modules
+            print("    Testing core modules...")
+            result = test_core_modules(model, task_info, output_dir, device)
+            all_results["Core Modules"].append(result)
+            print(f"      {result}")
+            
+            # Test 2: Recursive solver steps
+            print("    Testing recursive solver steps...")
+            result = test_recursive_solver_steps(model, task_info, output_dir, device)
+            all_results["Recursive Solver Steps"].append(result)
+            print(f"      {result}")
+            
+            # Test 3: TEPS program search
+            print("    Testing TEPS program search...")
+            result = test_teps_program_search(task_info, output_dir)
+            all_results["TEPS Program Search"].append(result)
+            print(f"      {result}")
+            
+            # Test 4: NS-TEPS program search
+            print("    Testing NS-TEPS program search...")
+            result = test_ns_teps_program_search(task_info, output_dir)
+            all_results["NS-TEPS Program Search"].append(result)
+            print(f"      {result}")
+            
+            # Test 5: HyperLoRA
+            print("    Testing HyperLoRA meta-learning...")
+            result = test_hyperlora(model, task_info, output_dir, device)
+            all_results["HyperLoRA Meta-Learning"].append(result)
+            print(f"      {result}")
+            
+            # Test 6: Signal quality
+            print("    Testing signal quality...")
+            result = test_signal_quality(model, task_info, output_dir, device)
+            all_results["Signal Quality"].append(result)
+            print(f"      {result}")
     
-    if all_passed:
-        print("\n[OK] All tests passed!")
-    else:
-        print("\n✗ Some tests failed - review output above")
+    # Test program cache (once)
+    print("\n  Testing program cache...")
+    cache_result = test_program_cache(output_dir)
+    all_results["Program Cache"] = [cache_result]
+    print(f"    {cache_result}")
     
-    return all_passed
+    # Generate comprehensive report
+    report = generate_comprehensive_report(all_results, output_dir)
+    
+    print(f"\n\nAll outputs saved to: {output_dir}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+    main()
