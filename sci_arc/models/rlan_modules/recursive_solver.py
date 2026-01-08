@@ -593,7 +593,7 @@ class RecursiveSolver(nn.Module):
         use_lcr: bool = True,   # Enable count injection (ablation flag)
         use_sph: bool = True,   # Enable predicate gating (ablation flag)
         use_feedback: bool = False,  # Use prediction feedback (disabled by default - causes gradient issues)
-        use_entropy_refinement: bool = True,  # NEW (Dec 2025): Entropy-guided refinement for progressive accuracy
+        use_entropy_refinement: bool = False,  # Dec 2025: Entropy-guided refinement (DISABLED by default - requires training from scratch)
         use_solver_context: bool = True,  # NEW: Enable solver cross-attention to support set
         num_context_heads: int = 4,  # Heads for solver cross-attention
         use_dsc: bool = True,  # Kept for API compatibility but not used for module creation

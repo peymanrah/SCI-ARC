@@ -65,7 +65,7 @@ model:
   
   max_clues: 7
   num_predicates: 32  # More predicates for diversity
-  num_solver_steps: 5   # Reduced from 6 to save ~150MB (logs showed best step was 4 anyway)
+  num_solver_steps: 3   # REDUCED from 5 - epoch 2 showed best step was 2, degradation at step 4-5
   
   use_act: false       # DISABLED
   dropout: 0.1
@@ -407,9 +407,10 @@ training:
   # too weak - centroids clustered at (0.38, 0.39) with max distance
   # only 0.063 (should be >0.5). All attention maps 99.3% correlated.
   #
-  # DSC_CLUE_CONDITIONING_ANALYSIS.md recommends 0.5 for collapse.
+  # Jan 7, 2026: Increased from 0.5 to 1.5 - epoch 2 logs still showed
+  # centroid spread=0.10 (critical collapse). Stronger regularization needed.
   # =============================================================
-  lambda_centroid_diversity: 0.5  # CRITICAL: Prevents DSC clue collapse (was missing!)
+  lambda_centroid_diversity: 1.5  # INCREASED from 0.5 - centroid spread still 0.10 at epoch 2
   
   # Clue regularization (ENABLED - validated stable Dec 2025)
   # Helps model learn appropriate clue count per task

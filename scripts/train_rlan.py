@@ -1619,6 +1619,7 @@ def train_epoch(
         'curriculum_loss': 0.0,
         'deep_supervision_loss': 0.0,  # FIX: Was missing, caused zero reporting
         'act_loss': 0.0,  # ACT halting loss
+        'centroid_diversity_loss': 0.0,  # CRITICAL: DSC clue spatial diversity (prevents collapse)
         # Jan 2026 Ablation Study
         'art_consistency_loss': 0.0,  # ART anchor robustness loss
         'arps_imitation_loss': 0.0,   # ARPS program imitation loss
@@ -7899,6 +7900,13 @@ Config Overrides:
         if train_cfg.get('lambda_act', 0) > 0 and config['model'].get('use_act', False):
             act_loss_val = train_losses.get('act_loss', 0)
             print(f"  ACT Loss: {act_loss_val:.4f} (weight={train_cfg['lambda_act']})")
+        # Centroid Diversity Loss (CRITICAL for DSC health)
+        if train_cfg.get('lambda_centroid_diversity', 0) > 0:
+            cdiv_loss_val = train_losses.get('centroid_diversity_loss', 0)
+            print(f"  Centroid Diversity: {cdiv_loss_val:.4f} (weight={train_cfg['lambda_centroid_diversity']})")
+            # Warn if centroid diversity loss is near zero despite collapse
+            if cdiv_loss_val < 0.01:
+                print(f"    [!] Low diversity loss ({cdiv_loss_val:.4f}) - check if centroids are being passed to loss")
         
         # ART (Anchor Robustness Training) stats - Jan 2026 Ablation
         art_config_yaml = config.get('model', {}).get('anchor_robustness', {})
